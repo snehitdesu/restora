@@ -120,8 +120,9 @@ export async function managerSummary(db: PrismaClient, ctx: AccessContext, outle
     kitchen: can(ctx, "kot.view", outletId),
     inventory: can(ctx, "inventory.view", outletId),
     finance: can(ctx, "finance.view", outletId),
+    approvals: can(ctx, "purchase.approve", outletId),
   };
-  if (!may.sales && !may.ops && !may.inventory && !may.finance) throw new ForbiddenError("Missing permission for the manager view at this outlet");
+  if (!may.sales && !may.ops && !may.inventory && !may.finance && !may.approvals) throw new ForbiddenError("Missing permission for the manager view at this outlet");
   const tz = await outletTimeZone(db, ctx, outletId);
   const day = businessDayRange(now, tz);
   const today = { from: day.start, to: new Date(day.end.getTime() - 1) };
@@ -206,6 +207,23 @@ export async function managerSummary(db: PrismaClient, ctx: AccessContext, outle
       })()
     : null;
 
+  // Purchase orders waiting for the owner's yes (audit MB-05): the oldest first, with the vendor and the amount.
+  const approvals = may.approvals
+    ? await (async () => {
+        const where = { ...scope, status: "SUBMITTED" };
+        const [count, rows] = await Promise.all([
+          db.purchaseOrder.count({ where }),
+          db.purchaseOrder.findMany({ where, orderBy: { createdAt: "asc" }, take: 20, select: { id: true, number: true, vendorId: true, total: true, createdAt: true, expectedDate: true, notes: true, _count: { select: { lines: true } } } }),
+        ]);
+        const vendors = await db.vendor.findMany({ where: { organizationId: ctx.organizationId, id: { in: [...new Set(rows.map((p) => p.vendorId))] } }, select: { id: true, name: true } });
+        const vendorName = new Map(vendors.map((v) => [v.id, v.name]));
+        return {
+          pendingPurchaseOrders: count,
+          purchaseOrders: rows.map((p) => ({ id: p.id, number: p.number, vendor: vendorName.get(p.vendorId) ?? "Unknown vendor", total: m2(p.total), lines: p._count.lines, raisedAt: p.createdAt.toISOString(), expectedDate: p.expectedDate?.toISOString() ?? null, notes: p.notes })),
+        };
+      })()
+    : null;
+
   // Phase 5 deterministic insights (same engine; it filters rules by permission itself).
   const insights = await businessInsights(db, ctx, { outletId, asOf: now }).then((r) => ({ window: r.window, items: r.insights }))
     .catch((e) => {
@@ -213,5 +231,5 @@ export async function managerSummary(db: PrismaClient, ctx: AccessContext, outle
       throw e;
     });
 
-  return { outletId, businessDate: day.date, timezone: tz, generatedAt: now.toISOString(), sales, ops, inventory, finance, insights };
+  return { outletId, businessDate: day.date, timezone: tz, generatedAt: now.toISOString(), sales, ops, inventory, finance, approvals, insights };
 }

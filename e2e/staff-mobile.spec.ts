@@ -7,9 +7,10 @@
  *  - MOB-002 manager: today / live / alerts (Phase 5 insights) → staff: add a
  *    captain behind password re-confirmation (one-time link) → deactivate.
  *  - MOB-003 security: wrong roles and other outlets are refused by the server.
+ *  - MOB-004 manager: approves one waiting purchase order and rejects another from the Approvals tab.
  */
 import { test, expect } from "@playwright/test";
-import { statePath, outletByCode, tableByCode, apiData, apiCall, apiAs, confirmPasswordIfPrompted, CENTRAL } from "./helpers";
+import { statePath, outletByCode, tableByCode, apiData, apiCall, apiAs, confirmPasswordIfPrompted, materialByName, CENTRAL } from "./helpers";
 
 test.use({ viewport: { width: 393, height: 851 }, hasTouch: true, isMobile: true });
 
@@ -125,6 +126,50 @@ test.describe("manager (phone)", () => {
     await card.getByRole("button", { name: "Deactivate" }).tap();
     await page.getByRole("dialog", { name: /Deactivate/ }).getByRole("button", { name: "Deactivate" }).tap();
     await confirmPasswordIfPrompted(page, card.getByText("Inactive"));
+  });
+});
+
+test.describe("manager approvals (phone)", () => {
+  test.use({ storageState: statePath("manager") });
+
+  test("MOB-004 purchase orders wait in the Approvals tab; approve and reject change the order and empty the queue", async ({ page }) => {
+    const owner = await apiAs("owner");
+    const central = await outletByCode(owner, CENTRAL);
+    const cashew = await materialByName(owner, "Cashew");
+    const vendors = await apiData<{ items: Array<{ id: string; name: string }> }>(owner, "/api/master/vendors?take=200");
+    const vendor = vendors.items.find((v) => v.name === "Karachi Bakery Supplies")!;
+    const raise = async (tag: string, qty: number) => {
+      const made = await apiCall<{ id: string; number: string }>(owner, "POST", "/api/procurement/purchase-orders", { outletId: central.id, vendorId: vendor.id, notes: `MOB-004 ${tag} ${RUN}`, lines: [{ materialId: cashew.id, qty, rate: 800 }] }, { "idempotency-key": `mob4-${tag}-${RUN}` });
+      expect(made.status, JSON.stringify(made.body?.error)).toBe(200);
+      expect((await apiCall(owner, "POST", `/api/procurement/purchase-orders/${made.body!.data.id}/transition`, { to: "SUBMITTED" })).status).toBe(200);
+      return made.body!.data;
+    };
+    const toApprove = await raise("a", 2);
+    const toReject = await raise("r", 3);
+
+    await page.goto("/manager");
+    const tab = page.getByRole("button", { name: /Approvals/ });
+    await expect(tab).toBeVisible();
+    await tab.tap();
+    const queue = page.getByRole("list", { name: "Purchase orders waiting" });
+    const approveCard = queue.getByTestId(`approval-${toApprove.number}`);
+    const rejectCard = queue.getByTestId(`approval-${toReject.number}`);
+    await expect(approveCard).toContainText("Karachi Bakery Supplies");
+    await expect(approveCard).toContainText("₹1,600.00"); // 2 x 800, no tax on the lines
+    await expect(rejectCard).toContainText(`MOB-004 r ${RUN}`);
+
+    await approveCard.getByRole("button", { name: "Approve" }).tap();
+    await page.getByRole("dialog").getByRole("button", { name: "Approve" }).tap();
+    await expect(queue.getByTestId(`approval-${toApprove.number}`)).toHaveCount(0);
+
+    await rejectCard.getByRole("button", { name: "Reject" }).tap();
+    await page.getByRole("dialog").getByRole("button", { name: "Reject" }).tap();
+    await expect(queue.getByTestId(`approval-${toReject.number}`)).toHaveCount(0);
+
+    const approved = await apiData<{ status: string; approvedAt: string | null }>(owner, `/api/procurement/purchase-orders/${toApprove.id}`);
+    expect(approved.status).toBe("APPROVED");
+    expect(approved.approvedAt).not.toBeNull();
+    expect((await apiData<{ status: string }>(owner, `/api/procurement/purchase-orders/${toReject.id}`)).status).toBe("CANCELLED");
   });
 });
 
