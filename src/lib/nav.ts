@@ -64,7 +64,11 @@ export const NAV_ITEMS: NavItem[] = [
 
   { href: "/customers", label: "Customers", icon: "users", permission: "customer.view", section: "Customers", description: "Guests, history and loyalty" },
   { href: "/customers/segments", label: "Segments", icon: "chart", permission: "customer.view", section: "Customers", description: "Rule-based guest segments" },
-  { href: "/customers/feedback", label: "Feedback", icon: "star", permission: "customer.view", section: "Customers", description: "Guest feedback" },
+  { href: "/customers/feedback", label: "Feedback", icon: "star", permission: "customer.view", section: "Customers", description: "What guests say, who followed up, what keeps going wrong" },
+  { href: "/customers/loyalty", label: "Loyalty & referrals", icon: "wallet", permission: "customer.view", section: "Customers", description: "Tiers from 365-day spend, and referral rewards" },
+  { href: "/customers/coupons", label: "Coupons", icon: "tag", permission: "growth.view", section: "Customers", description: "Codes for guests and the counter, priced by the server" },
+  { href: "/customers/campaigns", label: "Campaigns", icon: "send", permission: "growth.view", section: "Customers", description: "Offers to guests who agreed to hear from you" },
+  { href: "/customers/growth-settings", label: "Growth settings", icon: "sliders", permission: "growth.view", section: "Customers", description: "Automatic offers, quiet hours, feedback and the morning summary" },
 
   { href: "/staff", label: "Staff", icon: "user", permission: "staff.manage", section: "People", description: "Users, roles and outlet access" },
   { href: "/staff/attendance", label: "Attendance", icon: "clock", section: "People", description: "Check-in / check-out" },

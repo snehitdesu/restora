@@ -20,6 +20,7 @@ import { unsubscribeToken } from "@/server/services/consent";
 import { getRateLimitStore, RATE_POLICIES } from "@/server/api/rateLimit";
 import * as Growth from "@/app/api/growth/[[...path]]/route";
 import * as Guest from "@/app/api/qr/[[...path]]/route";
+import { createOrder, addOrderItem } from "@/server/services/orders";
 import { phone as newPhone } from "../domain/growthSupport";
 
 const RUN = Date.now().toString(36);
@@ -183,6 +184,38 @@ describe("R2. a manager runs the growth tools through the API", () => {
   });
 });
 
+describe("R2b. the till", () => {
+  it("R2b a cashier applies a code to an open order, sees it, removes it; a kitchen login and another restaurant cannot", async () => {
+    const owner = { ...systemContext(orgId, [outletId]), userId: `owner-${RUN}`, roles: ["OWNER"], orgRoles: ["OWNER"], isOrgWide: true, isSuperAdmin: false };
+    const order = await createOrder(owner, { outletId, channel: "TAKEAWAY" });
+    await addOrderItem(owner, order.id, { name: "Meal", qty: 1, unitPrice: 400, taxPct: 0 });
+    const code = `TILL${RUN}`.toUpperCase().slice(0, 20);
+    expect((await staff("POST", "coupons", "manager", { code, name: "Till", kind: "PERCENT", value: 10, maxDiscount: 25 })).status).toBe(200);
+
+    // "No coupon" is an object, not a bare null (the client unwraps `data ?? envelope`).
+    const none = await staff("GET", `orders/${order.id}/coupon`, "cashier");
+    expect(none.status).toBe(200);
+    expect(none.json).toEqual({ ok: true, data: { coupon: null } });
+
+    expect((await staff("POST", `orders/${order.id}/coupon`, "kitchen", { code })).status).toBe(403);
+    expect((await staff("POST", `orders/${order.id}/coupon`, "foreign", { code })).status).toBe(404);
+    expect((await staff("POST", `orders/${order.id}/coupon`, "cashier", { code: "NOSUCHCODE" })).status).toBe(422);
+    const applied = await staff("POST", `orders/${order.id}/coupon`, "cashier", { code: code.toLowerCase() });
+    expect(applied.status).toBe(200);
+    expect(applied.json.data).toMatchObject({ discount: 25 }); // 10% of 400 = 40, capped at 25
+    expect((await staff("GET", `orders/${order.id}/coupon`, "cashier")).json.data.coupon).toMatchObject({ code, amount: 25 });
+    expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).total)).toBe(375);
+    // Typing the same code again changes nothing (one use, counted once).
+    expect((await staff("POST", `orders/${order.id}/coupon`, "cashier", { code })).json.data).toMatchObject({ discount: 25 });
+    expect(await prisma.couponRedemption.count({ where: { orderId: order.id, status: "APPLIED" } })).toBe(1);
+
+    expect((await staff("POST", `orders/${order.id}/coupon/remove`, "cashier")).json.data).toEqual({ removed: true });
+    expect((await staff("GET", `orders/${order.id}/coupon`, "cashier")).json.data).toEqual({ coupon: null });
+    expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).total)).toBe(400);
+    expect((await staff("POST", `orders/${order.id}/coupon/remove`, "cashier")).json.data).toEqual({ removed: false });
+  });
+});
+
 describe("R3. the guest journey", () => {
   const guestCall = (method: string, path: string, opts: { body?: unknown; key?: string; orderKey?: string } = {}) =>
     call(Guest, method, path, { body: opts.body, origin: ORIGIN, headers: { ...(opts.key ? { "idempotency-key": opts.key } : {}), ...(opts.orderKey ? { "x-order-key": opts.orderKey } : {}) } });
@@ -191,6 +224,7 @@ describe("R3. the guest journey", () => {
     const code = `QUOTE${RUN}`.toUpperCase().slice(0, 20);
     expect((await staff("POST", "coupons", "manager", { code, name: "Quote", kind: "FIXED", value: 20, minOrderValue: 150 })).status).toBe(200);
     const items = [{ menuItemId: dish, qty: 2 }];
+    const usesBefore = await prisma.couponRedemption.count({ where: { organizationId: orgId } });
     const q = await guestCall("POST", `t/${token}/quote`, { body: { items, couponCode: code } });
     expect(q.status).toBe(200);
     expect(q.json.data.coupon).toMatchObject({ ok: true, code, discount: "20.00" });
@@ -203,7 +237,7 @@ describe("R3. the guest journey", () => {
     const unknown = await guestCall("POST", `t/${token}/quote`, { body: { items, couponCode: "NOSUCHCODE" } });
     expect(unknown.status).toBe(200);
     expect(unknown.json.data.coupon).toMatchObject({ ok: false });
-    expect(await prisma.couponRedemption.count({ where: { organizationId: orgId } })).toBe(0); // a quote counts nothing
+    expect(await prisma.couponRedemption.count({ where: { organizationId: orgId } })).toBe(usesBefore); // a quote counts nothing
   });
 
   it("R3 order with code + referral + offers opt-in, paid online: discount, redemption, consent, loyalty and the referral reward all follow the server", async () => {

@@ -6,35 +6,30 @@
  * balances and point movements are all computed server-side; the UI only asks
  * for them. Loyalty changes go through the loyalty service (loyalty.manage).
  */
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api } from "@/lib/api/client";
 import { useQuery, usePaged } from "@/lib/hooks/useApi";
-import { useShell, useOutletId } from "@/lib/shellContext";
+import { useShell } from "@/lib/shellContext";
 import { formatDate, formatDateTime, formatMoney, humanize, shortRef } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Badge } from "@/components/ui/Badge";
-import { Field, FormDialog, Input, Select, Textarea, opt } from "@/components/ui/Form";
+import { Field, FormDialog, Input, Textarea, opt } from "@/components/ui/Form";
 import { DataTable, Pager } from "@/components/ui/Table";
 import { Card, Details, PageHeader, StatusBadge, Stat, Tabs } from "@/components/ui/Page";
 import { LoadingState, ErrorState } from "@/components/ui/States";
 import { FilterBar, SearchInput, SelectFilter } from "@/components/ui/Filters";
+import { CustomerGrowth } from "@/features/backoffice/growthCustomer";
 
 export type Customer = { id: string; name: string; phone: string | null; email: string | null; birthday: string | null; notes: string | null; createdAt: string };
 type Stats = { customerId: string; orders: number; totalSpend: number; avgOrderValue: number; firstOrderAt: string | null; lastOrderAt: string | null; loyaltyPoints: number };
 type OrderRow = { id: string; outletId: string; invoiceNo: string | null; channel: string; status: string; total: string; createdAt: string; items: Array<{ name: string; qty: number }> };
 type LoyaltyTxn = { id: string; type: string; points: number; orderId: string | null; note: string | null; createdAt: string };
 type SegmentRow = { customerId: string; name: string; segment: string; orders: number; totalSpend: number; lastOrderAt: string | null };
-type FeedbackRow = { id: string; outletId: string | null; customerId: string | null; orderId: string | null; rating: number; comment: string | null; createdAt: string };
 
 const SEGMENTS = ["NEW", "RETURNING", "VIP", "INACTIVE"] as const;
 const SEGMENT_TONE: Record<string, "neutral" | "info" | "ok" | "warn" | "bad"> = { NEW: "info", RETURNING: "ok", VIP: "warn", INACTIVE: "neutral" };
-
-function Stars({ rating }: { rating: number }) {
-  return <span aria-label={`${rating} of 5`} className="tracking-tight text-warn-500">{"★".repeat(rating)}<span className="text-ink-300">{"★".repeat(Math.max(0, 5 - rating))}</span></span>;
-}
 
 // ============================================================
 // Customer form (create / edit)
@@ -116,7 +111,7 @@ export function CustomerDetail({ id }: { id: string }) {
   const { can, outlets } = useShell();
   const customer = useQuery<Customer | null>(`/api/customers/${id}`);
   const stats = useQuery<Stats>(`/api/customers/${id}/stats`);
-  const [tab, setTab] = useState<"orders" | "loyalty">("orders");
+  const [tab, setTab] = useState<"orders" | "loyalty" | "growth">("orders");
   const orders = usePaged<OrderRow>(tab === "orders" ? `/api/customers/${id}/orders` : null);
   const [loyaltyCursor, setLoyaltyCursor] = useState<string[]>([]);
   const loyalty = useQuery<{ balance: number; history: { items: LoyaltyTxn[]; nextCursor: string | null } }>(`/api/loyalty/customers/${id}`, { take: 25, cursor: loyaltyCursor.at(-1) });
@@ -144,8 +139,10 @@ export function CustomerDetail({ id }: { id: string }) {
       <Card className="mb-4">
         <Details cols={4} items={[["Birthday", formatDate(c.birthday)], ["First order", formatDateTime(stats.data?.firstOrderAt)], ["Last order", formatDateTime(stats.data?.lastOrderAt)], ["Customer since", formatDate(c.createdAt)], ["Notes", c.notes]]} />
       </Card>
-      <Tabs label="Customer history" value={tab} onChange={setTab} options={[{ value: "orders", label: "Orders" }, { value: "loyalty", label: "Loyalty" }]} />
-      {tab === "orders" ? (
+      <Tabs label="Customer history" value={tab} onChange={setTab} options={[{ value: "orders", label: "Orders" }, { value: "loyalty", label: "Loyalty" }, { value: "growth", label: "Offers & referrals" }]} />
+      {tab === "growth" ? (
+        <CustomerGrowth customerId={id} hasPhone={Boolean(c.phone)} hasEmail={Boolean(c.email)} />
+      ) : tab === "orders" ? (
         <>
           <DataTable label="Order history" rows={orders.items} rowKey={(r) => r.id} loading={orders.loading} error={orders.error} onRetry={orders.reload} empty="No orders"
             columns={[
@@ -213,63 +210,6 @@ export function SegmentsScreen() {
           { key: "l", header: "Last order", cell: (r) => formatDate(r.lastOrderAt) },
         ]} />
       <Pager {...list} />
-    </>
-  );
-}
-
-// ============================================================
-// Feedback
-// ============================================================
-
-function FeedbackDialog({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: () => void }) {
-  const outletId = useOutletId();
-  const [rating, setRating] = useState("5");
-  const [comment, setComment] = useState("");
-  const [phone, setPhone] = useState("");
-  const submit = async () => {
-    let customerId: string | undefined;
-    if (phone.trim()) {
-      const found = await api<Customer[]>("/api/customers", { query: { phone: phone.trim() } });
-      if (!found[0]) throw new Error("No customer with this phone number");
-      customerId = found[0].id;
-    }
-    return api("/api/customers/feedback", { method: "POST", body: { outletId, rating: Number(rating), comment: opt(comment), customerId } });
-  };
-  return (
-    <FormDialog open={open} onClose={onClose} title="Record feedback" submitLabel="Save feedback" onSubmit={submit} onDone={() => { setComment(""); setPhone(""); onDone(); }}>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Rating" name="rating" required><Select value={rating} onChange={(e) => setRating(e.target.value)}>{[5, 4, 3, 2, 1].map((n) => <option key={n} value={n}>{"★".repeat(n)} ({n})</option>)}</Select></Field>
-        <Field label="Customer phone" name="customerId" hint="Optional — links to an existing customer"><Input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={16} /></Field>
-      </div>
-      <Field label="Comment" name="comment"><Textarea value={comment} onChange={(e) => setComment(e.target.value)} maxLength={2000} /></Field>
-    </FormDialog>
-  );
-}
-
-export function FeedbackScreen() {
-  const { can, outletId, outlet } = useShell();
-  const [open, setOpen] = useState(false);
-  const list = usePaged<FeedbackRow>(outletId ? "/api/customers/feedback" : null, { outletId: outletId ?? undefined }, 25, { shape: "array" });
-  const avg = list.items.length ? list.items.reduce((a, r) => a + r.rating, 0) / list.items.length : 0;
-  return (
-    <>
-      <PageHeader title="Guest feedback" subtitle="Ratings and comments recorded at this outlet" actions={can("customer.manage") && <Button variant="primary" onClick={() => setOpen(true)}><Icon name="plus" /> Record feedback</Button>} />
-      {list.items.length > 0 && (
-        <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <Stat label="Average rating" value={avg.toFixed(1)} hint="On this page" />
-          <Stat label="Low ratings (≤ 2)" value={list.items.filter((r) => r.rating <= 2).length} tone={list.items.some((r) => r.rating <= 2) ? "bad" : undefined} hint="On this page" />
-        </div>
-      )}
-      <DataTable label="Feedback" rows={list.items} rowKey={(r) => r.id} loading={list.loading} error={list.error} onRetry={list.reload} empty="No feedback yet"
-        columns={[
-          { key: "d", header: "Date", cell: (r) => formatDateTime(r.createdAt, outlet?.timezone) },
-          { key: "r", header: "Rating", cell: (r) => <Stars rating={r.rating} /> },
-          { key: "c", header: "Comment", cell: (r) => r.comment ?? "—" },
-          { key: "cu", header: "Customer", cell: (r) => (r.customerId ? <Link className="text-brand-600 hover:underline" href={`/customers/${r.customerId}`}>View</Link> : "—") },
-          { key: "o", header: "Order", cell: (r) => (r.orderId ? `#${shortRef(r.orderId)}` : "—") },
-        ]} />
-      <Pager {...list} />
-      <FeedbackDialog open={open} onClose={() => setOpen(false)} onDone={list.reload} />
     </>
   );
 }

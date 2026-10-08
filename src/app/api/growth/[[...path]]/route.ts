@@ -29,7 +29,8 @@ export const { GET, POST, PATCH } = createRouter([
   { method: "PATCH", path: "coupons/:id", handler: ({ ctx, params, body }) => updateCoupon(ctx, params.id, body as never) },
   { method: "GET", path: "coupons/:id/redemptions", handler: ({ ctx, params, query }) => couponRedemptions(prisma, ctx, params.id, z.object({ take }).parse(query).take) },
 
-  { method: "GET", path: "orders/:orderId/coupon", handler: ({ ctx, params }) => orderCoupon(prisma, ctx, params.orderId) },
+  // An object, never a bare null: the client unwraps `data ?? envelope`, which would turn "no coupon" into a coupon.
+  { method: "GET", path: "orders/:orderId/coupon", handler: async ({ ctx, params }) => ({ coupon: await orderCoupon(prisma, ctx, params.orderId) }) },
   { method: "POST", path: "orders/:orderId/coupon", handler: ({ ctx, params, body }) => applyCoupon(ctx, params.orderId, z.object({ code: z.string().trim().min(1).max(40) }).parse(body).code) },
   { method: "POST", path: "orders/:orderId/coupon/remove", handler: ({ ctx, params }) => removeCoupon(ctx, params.orderId) },
 

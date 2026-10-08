@@ -13,6 +13,7 @@ import { ModifierDialog } from "@/features/pos/components/ModifierDialog";
 import { TablePicker } from "@/features/pos/components/TablePicker";
 import { CustomerPicker } from "@/features/pos/components/CustomerPicker";
 import { PaymentDialog } from "@/features/pos/components/PaymentDialog";
+import { DiscountDialog } from "@/features/pos/components/DiscountDialog";
 import { OpenOrdersDialog, isIncomingQr, type OpenOrder } from "@/features/pos/components/OpenOrdersDialog";
 import { createPoller } from "@/lib/polling";
 import { BACKGROUND_HEADER } from "@/constants/auth";
@@ -23,7 +24,7 @@ import { useToast } from "@/components/ui/Toast";
 
 export type PosPermissions = { pay: boolean; discount: boolean; cancel: boolean; customerView: boolean; customerManage: boolean };
 
-type Action = "save" | "send" | "pay" | "cancel" | "discount" | null;
+type Action = "save" | "send" | "pay" | "cancel" | null;
 
 /** Counter POS. Every mutation goes through /api; the cart is only a draft until the server confirms. */
 export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPermissions }) {
@@ -38,7 +39,6 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
   const [payingOrderId, setPayingOrderId] = useState<string | null>(null);
   const [busy, setBusy] = useState<Action>(null);
   const [reason, setReason] = useState("");
-  const [discount, setDiscount] = useState("");
   const guard = useRef(createSubmitGuard());
   const searchRef = useRef<HTMLInputElement>(null);
   const [incoming, setIncoming] = useState(0);
@@ -233,21 +233,6 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
     }
   }
 
-  async function applyDiscount() {
-    if (!running) return;
-    setBusy("discount");
-    try {
-      await api(`/api/orders/${running.id}/discount`, { method: "POST", body: { amount: Number(discount) || 0 } });
-      await refreshRunning(running.id);
-      setDialog(null);
-      toast.show("Discount applied", "ok");
-    } catch (e) {
-      failure(e);
-    } finally {
-      setBusy(null);
-    }
-  }
-
   if (loadError) return <ErrorState error={loadError} onRetry={load} />;
   if (!menu) return <LoadingState label="Loading menu…" />;
 
@@ -284,7 +269,7 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
             </Button>
           )}
           {running && perms.discount && (
-            <Button size="xl" onClick={() => { setDiscount(String(toNumber(running.discount) || "")); setDialog("discount"); }}>Discount</Button>
+            <Button size="xl" onClick={() => setDialog("discount")}>Discount</Button>
           )}
           <Button size="xl" variant="primary" className={running && perms.discount ? "col-span-2" : "col-span-3"} onClick={() => void send()} loading={busy === "send"} disabled={(!hasLines && running?.status !== "OPEN") || busy !== null}>
             Send to kitchen
@@ -318,14 +303,7 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
           </label>
         </Dialog>
       )}
-      {dialog === "discount" && running && (
-        <Dialog open onClose={() => setDialog(null)} title="Order discount" size="sm" footer={<Button variant="primary" onClick={applyDiscount} loading={busy === "discount"}>Apply</Button>}>
-          <label className="block text-sm">
-            Discount amount (₹)
-            <input id="discount-amount" name="discount" inputMode="decimal" value={discount} onChange={(e) => setDiscount(e.target.value.replace(/[^\d.]/g, ""))} data-autofocus className="mt-1 h-10 w-full rounded-md border border-ink-300 px-3 text-sm" />
-          </label>
-        </Dialog>
-      )}
+      {dialog === "discount" && running && <DiscountDialog order={running} onClose={() => setDialog(null)} onChanged={() => refreshRunning(running.id)} />}
       {payingOrderId && (
         <PaymentDialog
           orderId={payingOrderId}
