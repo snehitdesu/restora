@@ -5,8 +5,8 @@
 |---|---|---|
 | Unit + DB integration, SQLite | `npm test` | 110 files, 1176 passed, 7 skipped, 0 failed |
 | Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 110 files, 1154 passed, 29 skipped, 0 failed |
-| Browser E2E (production build), SQLite | `npm run e2e` | 90/90 |
-| Browser E2E, PostgreSQL | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 89/90 (the open navigation flake, see `docs/stabilization-report.md` §4) |
+| Browser E2E (production build), SQLite | `npm run e2e` | 92/92 (incl. `nav-after-save.spec.ts`) |
+| Browser E2E, PostgreSQL | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 89/90 before the navigation fix (`docs/stabilization-report.md` §4); to be re-run |
 | Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3 (SQLite) |
 | Desktop E2E | `npm run desktop:build && npm run desktop:e2e` | Windows / macOS CI on `d922cda`: 8/9 (the 9th needed the Chromium install step, added since); not run locally |
 | Packaged desktop security | `npx electron-builder --dir && npm run desktop:verify` | **not run on this commit** (last: 23/23 on 2026-10-05) |

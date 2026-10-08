@@ -56,19 +56,24 @@ part of `.github/workflows/ci.yml` (it is a manual release gate in `docs/release
 | 2 | The aggregator provider factory returned the mock in production. Payment, POS, notification, Sheets and messaging all refuse mocks there; aggregators did not, so a status push was recorded SENT with no platform contacted, connection tests answered "healthy", and settlement reconciliation ran against an empty feed | `getAggregatorProvider` had no `assertMockAllowed`; callers `pushAggregatorStatus`, `testConnection`, `runAggregatorReconciliation` | **Fixed**: the factory now calls `assertMockAllowed("aggregator")`. `pushAggregatorStatus` catches the refusal, counts and logs it and returns without a delivery row, so the kitchen "order ready" flow is not broken. New `tests/integrations/production-providers.test.ts` covers all three factories |
 | 3 | The demo seed built the completed PAYMENTS reconciliation's date from the host calendar day (`new Date().toDateString()`), the app uses the outlet's business day (Asia/Kolkata). Between 18:30 and 24:00 UTC the seed locked what the app calls yesterday and `e2e/money-desk.spec.ts` G3-MD-001 failed every time | reproduced with seed data only; seed rows dated `2026-10-08` while the app's day was `2026-10-09` | **Fixed**: `businessDateKey(new Date(), outlet.timezone)`. The spec is unchanged and passes (7/7 and in the full run) |
 | 4 | Desktop CI jobs never install Playwright's Chromium, which `desktop/e2e/starter.spec.ts` launches directly | Windows and macOS logs: "Executable doesn't exist" | **Fixed in the workflow** (an `npx playwright install chromium` step before `desktop:e2e` in the Windows and both macOS jobs). Not yet proven: it needs a CI run |
-| 5 | After a create dialog saves, the navigation to the new document sometimes never commits | section 4 | **Open, not fixed** |
+| 5 | After a create dialog saves, the navigation to the new document sometimes never commits | section 4 | **Fixed** (route-level `loading.tsx` removed; guard test + 60-round regression spec) |
 
-## 4. Open defect: intermittent post-save navigation stall
+## 4. Post-save navigation stall: root cause found and fixed (follow-up pass)
 
-`FormDialog` calls `onClose()` then `onDone()`, which does `router.push('/inventory/wastage/<id>')` (and the
-equivalent for purchase orders, recipes and other documents). Sometimes the URL never changes and the user
-stays on the list.
+`FormDialog` calls `onClose()` then `onDone()`, which does `router.push('/inventory/wastage/<id>')` (and the equivalent for purchase
+orders, recipes and other documents). Sometimes the URL never changed and the user stayed on the list. First seen as `RECIPE-001` in
+Phase 14; reproduced here on SQLite and PostgreSQL (about 1 in 10 on a cold server).
 
-- Rate: 2 of 15 repeated runs on PostgreSQL, 1 of 24 on SQLite, 5 of 40 and 7 of 40 with tracing on. The first sighting was `RECIPE-001` in the Phase 14 report (also intermittent, "no server error logged").
-- What the traces show: the create `POST` returns 200 in about 25 ms; the router fetches the detail page's RSC payload (200) and its JS chunk (200); then, in the failing runs only, the new page never mounts (no client API calls follow). No console errors, no PostgreSQL errors.
-- Ruled out: the database engine (it happens on both); the order of `onClose` and `onDone` (swapping them gave 7 failures in 40, no improvement, and was reverted).
-- Not found: the root cause. Next 15.5.27 with React 19.0.8 are both within Next's supported range.
-- Impact: the document exists and appears in the list; the user is not taken to it. No data loss. It makes the browser suite flaky (about 1 in 8 on a cold server for the two affected specs) and should be found before relying on E2E as a gate.
+How it was isolated (each step measured over 50-125 repeated runs from a fresh page load):
+- The create `POST` returned 200 in about 25 ms and the router fetched the new page's RSC payload and chunk, but the page never mounted. After a stall the React root had two suspended transition lanes, nothing scheduled and nothing pinged, and the router hook held a transition update whose promise was already *fulfilled* with the new URL: the router's work was done, React never rendered it.
+- Not the database, not the order of `onClose` / `onDone`, not `flushSync` around the close, not the sidebar prefetch (`prefetch={false}` on every shell link changed nothing; experiments that blocked prefetch requests only looked like fixes because route interception adds latency to every request and hides a timing race).
+- A bare `window.next.router.push(...)` with no dialog and no application code stalled 11 times in 105: it is the framework, not the form.
+- Removing `src/app/(app)/loading.tsx` (the Suspense boundary Next wraps around every back-office page) gave **0 stalls in 105** for the bare push and **0 in 105** for the real create dialog. Next 15.5.27 is the newest 15.5 release; the next line is the Next 16 major.
+
+Fix: `src/app/(app)/loading.tsx` is deleted. Back-office screens show their own loading states, so only the instant skeleton between a click and the server's first byte is gone. Guards:
+`tests/ui/no-loading-boundary.test.ts` fails if a `loading.tsx` / `loading.js` reappears under `src/app/(app)`, and `e2e/nav-after-save.spec.ts`
+(30 rounds of the create dialog and 30 rounds of a bare `router.push`, each from a fresh page load) fails within 5 rounds on the old build and passes on the fixed one.
+The sign-in redirect (`router.replace('/dashboard')`) uses the same router path and is expected to benefit; the desktop jobs in CI will show it.
 
 ## 5. Production-safety audit (read from code, with tests)
 
@@ -93,7 +98,7 @@ PG = pass in the full PostgreSQL run; E2E = browser coverage; External = needs s
 
 ## 7. What remains
 
-1. **Confirmed defects**: the post-save navigation stall (open); defects 1-4 fixed here and unproven in CI until it runs.
+1. **Confirmed defects**: none open; defects 1-5 fixed (4 and the sign-in redirect proven only by the next CI run).
 2. **Verification gaps**: a green CI run on the new commit (the two desktop fixes are untested); desktop E2E packaging / `desktop:verify` / DMG on real Windows and macOS runners; the web browser suite is not in CI; no browser test for the Aggregators, accounting-sync and Sheets screens or department P&L; no investor flow on PostgreSQL.
 3. **Documentation gaps**: closed by this pass (audit, status, README, final report, testing guide); `docs/postgres.md` and the phase reports are historical records and keep their original numbers.
 4. **Genuine missing product features** (not built, per the audit): material brand, generic CSV / Excel import, a variance-trend chart, FSSAI lots and expiry alerts, a combined PO / indent queue, line-level PO approval and thresholds, aggregator item on/off, captain split / merge / transfer, KDS prep-time measurement, universal search, offline captain, plus everything in Groups 6-9.

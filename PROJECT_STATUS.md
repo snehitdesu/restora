@@ -20,8 +20,7 @@ desktop jobs): both are fixed in the stabilization commit and unproven until CI 
 | 5 Integrations | Tally / Zoho sync, Sheets sync, aggregator finance, nightly POS re-pull, control room | IMPLEMENTED + NOT EXTERNALLY VERIFIED (emulators and mocks only) |
 | 6+ Growth, mobile / advanced ops, infrastructure | | not started |
 
-**Open defect:** after a create dialog saves, the navigation to the new document sometimes does not commit (about 1 in 8 runs
-of two browser specs, SQLite and PostgreSQL; no data loss; root cause not found; first logged as `RECIPE-001` in Phase 14).
+**Navigation stall (formerly open):** fixed by removing the `(app)` route-level `loading.tsx` (Next 15.5 router race; guard test and 60-round regression spec added).
 **Not verified:** desktop packaging / `desktop:verify` / DMG on real Windows and macOS runners (never ran on this commit), the web
 browser suite is not part of CI, no real provider (Razorpay keys, Petpooja, Zomato / Swiggy, WhatsApp, Tally, Zoho, Google Sheets).
 **Production blockers** are external: hosting, backups / PITR on real infrastructure, provider credentials, code signing.

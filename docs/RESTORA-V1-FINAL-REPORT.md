@@ -10,7 +10,7 @@ the detailed evidence is in the per-phase reports linked in each section._
 > `docs/stabilization-report.md`. In particular the "Deferred" list below is out of date: Tally / Zoho sync and
 > Google Sheets sync now exist (tested against emulators only, never against a real company or spreadsheet), the nightly
 > POS re-pull is scheduled in the worker, and aggregator statement import / charges / margin are built. The
-> intermittent `RECIPE-001` navigation failure listed here was reproduced and is still open.
+> intermittent `RECIPE-001` navigation failure listed here was reproduced and fixed (the route-level `loading.tsx` was removed).
 
 ## Phase 9 — Production infrastructure
 **Status:** PASS WITH DOCUMENTED LIMITATIONS (`docs/phase9-final-report.md`)

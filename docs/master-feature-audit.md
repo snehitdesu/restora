@@ -48,7 +48,7 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 
 **Screens with no automated test** (service and API are tested; the screen was only exercised by hand): Finance > Aggregators (`aggregators.tsx`), Integrations > Accounting mapping / sync cards and Sheets panel (`integrationsSync.tsx`), the Integrations control room. `/analytics/departments` (department P&L, daily costing) has a jsdom test but no browser spec.
 
-**Known open defect (not fixed, root cause not found):** after a create dialog saves successfully, `router.push` to the new document's page sometimes does not commit and the user stays on the list (document created, no server error). Seen on SQLite and PostgreSQL, about 1 in 8 runs of `e2e/backoffice-ops.spec.ts` on a cold server; first logged as `RECIPE-001` in Phase 14. It is a front-end navigation race, not data loss.
+**Post-save navigation stall (was open):** fixed in the follow-up pass; root cause was the route-level `loading.tsx` under `(app)` (Next 15.5 router race), see `docs/stabilization-report.md` section 4.
 
 **Defects fixed in this pass:** the aggregator provider factory returned the mock in production (status pushes were recorded as SENT without any platform being contacted; connection tests reported success); the demo seed's reconciliation date used the host's calendar day instead of the outlet's business day (made `e2e/money-desk.spec.ts` fail between 18:30 and 24:00 UTC); `tests/desktop/shell-policy.test.ts` asserted a Windows path on every OS; the desktop CI jobs never installed Playwright's Chromium (`STARTER-002` could not launch).
 

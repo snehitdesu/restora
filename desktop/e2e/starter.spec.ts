@@ -203,13 +203,14 @@ test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → order �
     const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     const guest = await phone.newPage();
     await guest.goto(t07Link);
-    await expect(guest.getByLabel("Table T07")).toBeVisible();
+    await expect(guest.getByLabel("Table T07").first()).toBeVisible();
     await guest.getByRole("button", { name: "Add Loaded Veg Nachos" }).click();
     await guest.getByRole("button", { name: "Add Veg Arrabita Penne" }).click();
-    await guest.getByRole("button", { name: /View cart/ }).click();
-    const cart = guest.getByRole("dialog", { name: "Your order" });
-    await expect(cart.getByLabel("Estimated total")).toContainText(inr(351.75)); // 150 + 185 = 335 + 5% GST
-    await cart.getByRole("button", { name: "Place order" }).click();
+    // Sticky cart link → cart page (priced by the server) → checkout → place the order (cash at the counter).
+    await guest.getByRole("link", { name: /^View cart/ }).click();
+    await expect(guest.getByTestId("cart-total")).toHaveText(inr(351.75)); // 150 + 185 = 335 + 5% GST
+    await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
+    await guest.getByRole("button", { name: /^Place order/ }).click();
     await guest.waitForURL(/\/o\/[^/#]+#k=/);
     const orderId = decodeURIComponent(new URL(guest.url()).pathname.split("/").pop()!);
     const ref = orderId.slice(-6).toUpperCase();
