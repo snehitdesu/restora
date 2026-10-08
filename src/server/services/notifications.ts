@@ -28,6 +28,8 @@ export const NotificationType = [
   "LOW_STOCK", "PURCHASE_APPROVAL", "VENDOR_DUE", "RESERVATION", "ORDER_READY", "ANOMALY", "TASK", "LEAVE", "SYSTEM",
   // Phase 6 operational events
   "NEW_ORDER", "BILL_REQUESTED", "PAYMENT_FAILED",
+  // Group 6: a guest's low rating (private follow-up) and the morning summary
+  "LOW_RATING", "DAILY_SUMMARY",
 ] as const;
 export type NotificationTypeT = (typeof NotificationType)[number];
 
@@ -41,6 +43,8 @@ export const NOTIFICATION_PERMISSION: Record<NotificationTypeT, Permission | nul
   NEW_ORDER: "order.view",
   BILL_REQUESTED: "payment.take",
   PAYMENT_FAILED: "payment.take",
+  LOW_RATING: "growth.view",
+  DAILY_SUMMARY: "reports.view",
   ANOMALY: "anomaly.view",
   TASK: null,
   LEAVE: null,

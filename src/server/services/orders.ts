@@ -21,6 +21,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { type AccessContext, assertOutletAccess, ValidationError, NotFoundError, ConflictError } from "@/server/db/scope";
 import { assertOutletInOrg } from "@/server/db/outletGuard";
 import { assertCan } from "@/server/auth/rbac";
+import { repriceAppliedCoupon } from "@/server/services/couponPricing";
 import { writeAudit } from "@/server/audit/log";
 import { D, dMul, dDiv, money, moneyAmount } from "@/domain/money";
 import { priceMenuSelection } from "@/server/services/menu";
@@ -144,7 +145,7 @@ async function heldTx(tx: Tx, orderId: string) {
 }
 
 /** A repricing (discount, quantity) may never take the total below what the guest already paid. */
-async function assertTotalCoversPaymentsTx(tx: Tx, orderId: string, total: Prisma.Decimal) {
+export async function assertTotalCoversPaymentsTx(tx: Tx, orderId: string, total: Prisma.Decimal) {
   const { gross } = await heldTx(tx, orderId);
   if (D(total).lt(gross)) throw new ValidationError(`The new total ${money(total).toString()} is below the ${money(gross).toString()} already paid; refund first`);
 }
@@ -160,7 +161,15 @@ export async function recomputeTotals(tx: Tx, orderId: string) {
     taxPct: it.taxPct,
     modifiersPerUnit: it.modifiers.reduce((a, m) => a.plus(D(m.priceDelta)), D(0)),
   }));
-  const totals = calculateOrderTotals(items, order.discount);
+  // An applied coupon follows the lines: a percentage coupon is worth more after items are added, and one whose
+  // minimum is no longer met is released. The manual share of the discount is untouched.
+  let orderDiscount: Prisma.Decimal | number | string = order.discount;
+  const repriced = await repriceAppliedCoupon(tx, order, calculateOrderTotals(items, 0).subtotal);
+  if (repriced) {
+    orderDiscount = repriced.discount;
+    if (!D(order.discount).eq(repriced.discount)) await tx.order.update({ where: { id: orderId }, data: { discount: repriced.discount } });
+  }
+  const totals = calculateOrderTotals(items, orderDiscount);
   // keep persisted lineTotal in sync (only lines whose value changed are written:
   // rewriting every line of a long-running order on each round cost a write per
   // line and widened the conflict surface of concurrent rounds)
@@ -415,6 +424,13 @@ export function applyDiscount(ctx: AccessContext, orderId: string, amount: numbe
     assertCan(ctx, "order.discount", order.outletId);
     if (CLOSED_STATUSES.includes(order.status)) throw new ValidationError(`Cannot discount a ${order.status} order`);
     moneyAmount(z.number().nonnegative("Discount cannot be negative")).parse(amount);
+    // `amount` is the order's TOTAL discount. With a coupon on the order it must keep covering the coupon's share, and
+    // a coupon that does not stack refuses any other discount (take the coupon off first).
+    const coupon = await tx.couponRedemption.findFirst({ where: { orderId, status: "APPLIED" }, include: { coupon: { select: { stackable: true, code: true } } } });
+    if (coupon) {
+      if (!coupon.coupon.stackable && D(amount).gt(D(coupon.amount))) throw new ValidationError(`Coupon ${coupon.coupon.code} does not combine with another discount; remove the coupon first`);
+      if (D(amount).lt(D(coupon.amount))) throw new ValidationError(`The discount cannot be lower than coupon ${coupon.coupon.code}'s ${money(coupon.amount).toString()}; remove the coupon to take it off`);
+    }
     await tx.order.update({ where: { id: orderId }, data: { discount: money(amount) } });
     const updated = await recomputeTotals(tx, orderId);
     await assertTotalCoversPaymentsTx(tx, orderId, D(updated.total));
@@ -594,6 +610,7 @@ export function cancelOrder(ctx: AccessContext, orderId: string, reason: string,
     const held = await heldTx(tx, orderId);
     if (held.net.gt(0)) throw new ValidationError(`This order holds ${money(held.net).toString()} in payments; refund them before cancelling`);
     const updated = await tx.order.update({ where: { id: orderId }, data: { status: "CANCELLED", notes: reason } });
+    await tx.couponRedemption.updateMany({ where: { orderId, status: "APPLIED" }, data: { status: "REVERSED", reversedAt: new Date(), reverseReason: "Order cancelled" } });
     // Stop the kitchen: tickets not yet READY are cancelled (READY food already exists; KOT_TRANSITIONS lets it be served/cleared).
     const live = await tx.kot.findMany({ where: { orderId, status: { in: ["NEW", "ACCEPTED", "PREPARING"] } }, select: { id: true, number: true } });
     if (live.length) {

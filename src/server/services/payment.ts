@@ -26,7 +26,9 @@ import { consumeInventoryForOrder } from "@/server/services/orderConsumption";
 import { createKOTsForOrder } from "@/server/services/kot";
 import { releaseTableTx } from "@/server/services/orders";
 import { issueInvoiceTx, issueCreditNoteTx } from "@/server/services/invoicing";
-import { awardOrderLoyaltyTx, reverseOrderLoyaltyTx } from "@/server/services/loyalty";
+import { reverseOrderLoyaltyTx } from "@/server/services/loyalty";
+import { afterOrderPaidTx } from "@/server/services/growthHooks";
+import { reverseReferralRewardTx } from "@/server/services/referrals";
 import { getPaymentProvider, GATEWAY_PROVIDERS } from "@/integrations/payment";
 import { D, money, moneyAmount, type Decimalish } from "@/domain/money";
 
@@ -282,7 +284,7 @@ function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { provider
         // Sequential invoice + frozen tax breakdown, in the same transaction (gapless numbering).
         await issueInvoiceTx(tx, ctx, payment.orderId);
         await consumeInventoryForOrder(tx, ctx, payment.orderId);
-        await awardOrderLoyaltyTx(tx, ctx, payment.orderId); // idempotent; no-op without a customer
+        await afterOrderPaidTx(tx, ctx, payment.orderId); // loyalty, referral reward, feedback request: idempotent, no-ops without a customer
         if (payment.order.tableId) await releaseTableTx(tx, payment.order.tableId, payment.orderId);
         orderSettled = true;
       }
@@ -354,6 +356,9 @@ export function refundPayment(ctx: AccessContext, paymentId: string, input: z.in
       if (outstanding === 0 && (payment.order.status === "PAID")) {
         await tx.order.update({ where: { id: payment.orderId }, data: { status: "REFUNDED" } });
         await reverseOrderLoyaltyTx(tx, ctx, payment.orderId);
+        await reverseReferralRewardTx(tx, ctx, payment.orderId);
+        // A fully refunded order frees its coupon (usage limits count only orders that stood).
+        await tx.couponRedemption.updateMany({ where: { orderId: payment.orderId, status: "APPLIED" }, data: { status: "REVERSED", reversedAt: new Date(), reverseReason: "Order refunded" } });
       }
     }
     await writeAudit(tx, ctx, { action: "REFUND", entityType: "Payment", entityId: paymentId, outletId: payment.outletId, after: { amount: data.amount, status: updated.status, refundId: refund.id, providerRef } });

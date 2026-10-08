@@ -32,6 +32,11 @@ import { createNotificationTx } from "@/server/services/notifications";
 import { listMenu, priceMenuSelection } from "@/server/services/menu";
 import { calculateOrderTotals, placeOrder } from "@/server/services/orders";
 import { upsertCustomerByPhone } from "@/server/services/crm";
+import { applyCouponTx, previewCoupon } from "@/server/services/coupons";
+import { attachReferralTx } from "@/server/services/referrals";
+import { setConsent } from "@/server/services/consent";
+import { submitOrderFeedback, type GuestFeedbackResult } from "@/server/services/feedbackLoop";
+import { runInTx } from "@/server/services/_workflow";
 import type { Tx } from "@/server/services/_workflow";
 import { formatClock, formatHours, hasHours, isOpenAt } from "@/domain/openingHours";
 import { guestTracker, type GuestTracker } from "@/domain/orderProgress";
@@ -227,7 +232,13 @@ async function priceGuestLines(db: PrismaClient, t: GuestTable, items: GuestLine
   return out;
 }
 
-const quoteSchema = z.object({ items: z.array(z.lazy(() => guestItem)).min(1, "Your cart is empty").max(30) }).strict();
+const quoteSchema = z.object({
+  items: z.array(z.lazy(() => guestItem)).min(1, "Your cart is empty").max(30),
+  /** Optional: price the cart with this coupon code (nothing is created or counted). */
+  couponCode: z.string().trim().min(1).max(40).optional(),
+  /** Optional: lets a first-order / per-guest coupon be checked against the guest's own record (looked up, never created). */
+  phone: z.string().trim().max(20).optional(),
+}).strict();
 
 export type GuestQuote = {
   lines: GuestPricedLine[];
@@ -238,6 +249,9 @@ export type GuestQuote = {
   total: string;
   allAvailable: boolean;
   ordering: OrderingStatus;
+  /** Present when a code was sent: what it is worth now, or a message a guest may see. `discount` is already out of `subtotal`'s tax base and `total`. */
+  coupon?: { ok: true; code: string; name: string; discount: string } | { ok: false; message: string };
+  discount: string;
 };
 
 /**
@@ -249,7 +263,15 @@ export async function quoteGuestCart(token: string, input: unknown, db: PrismaCl
   const t = await resolveTable(token, db);
   const lines = await priceGuestLines(db, t, data.items);
   const okLines = lines.filter((l): l is Extract<GuestPricedLine, { ok: true }> => l.ok);
-  const totals = calculateOrderTotals(okLines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct })));
+  const lineItems = okLines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }));
+  let totals = calculateOrderTotals(lineItems);
+  let coupon: GuestQuote["coupon"];
+  if (data.couponCode && okLines.length) {
+    const phone = data.phone ? normalizeGuestPhone(data.phone) : null;
+    const known = phone ? await db.customer.findFirst({ where: { organizationId: t.ctx.organizationId, phone }, select: { id: true } }) : null;
+    coupon = await previewCoupon(db, { organizationId: t.ctx.organizationId, outletId: t.outlet.id, channel: "QR", code: data.couponCode, subtotal: totals.subtotal, customerId: known?.id ?? null });
+    if (coupon.ok) totals = calculateOrderTotals(lineItems, coupon.discount);
+  }
   return {
     // `notFound` is internal (placement keeps answering 404 for a dish that is not this restaurant's).
     lines: lines.map((l) => (l.ok ? l : { index: l.index, ok: false as const, menuItemId: l.menuItemId, reason: l.reason })),
@@ -259,6 +281,8 @@ export async function quoteGuestCart(token: string, input: unknown, db: PrismaCl
     total: totals.total.toFixed(2),
     allAvailable: okLines.length === lines.length,
     ordering: orderingStatus(t),
+    discount: totals.discount.toFixed(2),
+    ...(coupon ? { coupon } : {}),
   };
 }
 
@@ -303,6 +327,12 @@ const guestOrderSchema = z
     customer: guestCustomer.optional(),
     /** How the guest says they will pay. Informational for the staff; payment itself is verified separately. */
     paymentMethod: z.enum(["CASH", "ONLINE"]).optional(),
+    /** A coupon code: priced and applied by the server after the order exists; an invalid one never blocks the order. */
+    couponCode: z.string().trim().min(1).max(40).optional(),
+    /** A friend's referral code (counts only for a new guest who gave a phone number). */
+    referralCode: z.string().trim().min(4).max(20).optional(),
+    /** "Send me offers": an explicit yes to SMS and WhatsApp marketing for the phone number given. */
+    marketingOptIn: z.boolean().optional(),
   })
   .strict();
 const idemKey = z.string().trim().min(8).max(64).regex(/^[\w.:-]+$/, "Invalid idempotency key");
@@ -349,6 +379,24 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
     items: data.items.map((i) => ({ menuItemId: i.menuItemId, variantId: i.variantId, modifierOptionIds: i.modifierOptionIds?.length ? i.modifierOptionIds : undefined, qty: i.qty, notes: i.notes || undefined })),
     submit: false,
   }, db);
+  // Coupon, referral and consent ride on the order but never fail it: each reports its own outcome.
+  let coupon: { applied: boolean; code?: string; discount?: string; message?: string } | undefined;
+  let referral: { attached: boolean; message?: string } | undefined;
+  if (!order.replayed) {
+    if (data.couponCode) {
+      try {
+        const r = await runInTx(db, (tx) => applyCouponTx(tx, t.ctx, order.id, data.couponCode!));
+        coupon = { applied: true, code: r.coupon.code, discount: r.discount.toFixed(2) };
+      } catch (e) {
+        coupon = { applied: false, message: e instanceof ValidationError ? e.message : "This code can't be used here." };
+      }
+    }
+    if (customerId && data.referralCode) {
+      const r = await runInTx(db, (tx) => attachReferralTx(tx, t.ctx, customerId, data.referralCode!));
+      referral = { attached: r.status === "ATTACHED", ...(r.status === "ATTACHED" ? {} : { message: r.reason }) };
+    }
+    if (customerId && data.marketingOptIn) await setConsent(t.ctx, customerId, [{ channel: "SMS", marketing: true }, { channel: "WHATSAPP", marketing: true }], "GUEST_QR", db);
+  }
   if (!order.replayed) {
     const pays = data.paymentMethod === "ONLINE" ? "paying online" : data.paymentMethod === "CASH" ? "pays at the counter" : null;
     await db.$transaction(async (tx) => {
@@ -357,7 +405,13 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
       await createNotificationTx(tx, t.ctx, { outletId: t.outlet.id, type: "NEW_ORDER", title: `New QR order · table ${t.table.code}`, body: [`${orderRef(order.id)} · ₹${money(order.total).toFixed(2)} — waiting to be accepted`, guestName, pays].filter(Boolean).join(" · ") });
     });
   }
-  return { orderId: order.id, ref: orderRef(order.id), accessKey: guestOrderKey(order.id), replayed: Boolean(order.replayed) };
+  return { orderId: order.id, ref: orderRef(order.id), accessKey: guestOrderKey(order.id), replayed: Boolean(order.replayed), ...(coupon ? { coupon } : {}), ...(referral ? { referral } : {}) };
+}
+
+/** The order page's feedback form: the order's access key is the credential (same check as every guest order action). */
+export async function submitGuestOrderFeedback(orderId: string, key: string | null | undefined, input: unknown, db: PrismaClient = prisma): Promise<GuestFeedbackResult> {
+  if (typeof orderId !== "string" || orderId.length > 64 || !keyMatches(orderId, key)) throw new NotFoundError("Order not found");
+  return submitOrderFeedback(orderId, input, db);
 }
 
 // ---------------- the guest's view of an order ----------------
