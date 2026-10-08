@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { receiveWebhook, type WebhookKind } from "@/server/services/webhooks";
-import { handleMessagingStatus } from "@/server/services/messaging";
+import { handleEmailWebhook, handleMessagingStatus } from "@/server/services/messaging";
 import { prisma } from "@/server/db/client";
 import { fail } from "@/server/api/respond";
 import { clientIp, enforceRateLimit, RATE_POLICIES } from "@/server/api/rateLimit";
@@ -46,6 +46,12 @@ async function handle(req: NextRequest, { params }: { params: Promise<{ kind: st
     const rawBody = await req.text();
     if (rawBody.length > MAX_BODY) return NextResponse.json({ ok: false, error: { code: "PayloadTooLarge", message: "Payload too large" } }, { status: 413 });
     const signature = SIGNATURE_HEADERS.map((h) => req.headers.get(h)).find(Boolean) ?? undefined;
+    if (parsed.data.kind === "messaging" && parsed.data.provider.toLowerCase() === "resend") {
+      // E-mail delivery events: JSON signed by Svix (id + timestamp + body), verified with the tenant's own secret.
+      const r = await handleEmailWebhook(prisma, rawBody, { id: req.headers.get("svix-id") ?? undefined, timestamp: req.headers.get("svix-timestamp") ?? undefined, signature: req.headers.get("svix-signature") ?? undefined });
+      observe("messaging", parsed.data.provider, r.status, r.httpStatus);
+      return NextResponse.json({ ok: r.httpStatus < 300, status: r.status }, { status: r.httpStatus });
+    }
     if (parsed.data.kind === "messaging") {
       // Delivery-status callbacks (form-encoded). The signature covers the PUBLIC url the provider called.
       const publicUrl = process.env.PUBLIC_BASE_URL ? `${process.env.PUBLIC_BASE_URL.replace(/\/$/, "")}/api/webhooks/messaging/${parsed.data.provider}` : req.url;
