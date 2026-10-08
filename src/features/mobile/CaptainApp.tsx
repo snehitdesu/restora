@@ -21,6 +21,7 @@ import { createSubmitGuard } from "@/features/pos/submitGuard";
 import { newIdempotencyKey } from "@/lib/idempotency";
 import { needsConfiguration } from "@/features/pos/modifiers";
 import { ModifierDialog } from "@/features/pos/components/ModifierDialog";
+import { UpsellStrip, type UpsellHint } from "@/features/pos/components/UpsellStrip";
 import type { CartLine } from "@/features/pos/cart";
 import type { MenuItemDTO, OrderDTO } from "@/features/pos/types";
 import type { BoardTable, TableFilter } from "@/server/services/mobile";
@@ -198,6 +199,17 @@ function TablePanel({ outletId, table, perms, online, onChanged, onBack }: { out
 
   const closed = order ? ["PAID", "CANCELLED", "REFUNDED"].includes(order.status) : false;
   const canAdd = perms.modify && (!order || ["OPEN", "SENT", "PREPARING"].includes(order.status));
+  // A suggestion is added like a menu tap; the menu is loaded on demand when the sheet has not been opened yet.
+  const addHint = async (h: UpsellHint) => {
+    try {
+      const items = menu ?? (await api<MenuItemDTO[]>("/api/menu", { query: { outletId, activeOnly: "true" } }));
+      if (!menu) setMenu(items);
+      const item = items.find((m) => m.id === h.menuItemId);
+      if (item) pick(item);
+    } catch (e) {
+      toast.show(describeError(e), "bad");
+    }
+  };
   const lines = draft.map((l) => ({ menuItemId: l.menuItemId, variantId: l.variantId, modifierOptionIds: l.modifierOptionIds.length ? l.modifierOptionIds : undefined, qty: l.qty, notes: l.notes }));
 
   async function send() {
@@ -320,6 +332,7 @@ function TablePanel({ outletId, table, perms, online, onChanged, onBack }: { out
               <Button size="lg" aria-label="More guests" onClick={() => setCovers((c) => Math.min(50, c + 1))}><Icon name="plus" /></Button>
             </div>
           )}
+          <UpsellStrip outletId={outletId} menuItemIds={[...draft.map((l) => l.menuItemId), ...(order?.items ?? []).flatMap((i) => (i.menuItemId ? [i.menuItemId] : []))]} onAdd={(h) => void addHint(h)} disabled={!canAdd} />
           {draft.length > 0 && (
             <ul className="mb-3 divide-y divide-ink-100" aria-label="Not yet sent">
               {draft.map((l) => (

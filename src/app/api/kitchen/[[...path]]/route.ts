@@ -3,6 +3,7 @@ import { prisma } from "@/server/db/client";
 import { createRouter } from "@/server/api/router";
 import { KOTStatus } from "@/constants/enums";
 import { listKOTs, listStations, updateKOTStatus, routeKOTToStation } from "@/server/services/kot";
+import { dishPrepTimes } from "@/server/services/prepTimes";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,8 @@ export const { GET, POST } = createRouter([
     },
   },
   { method: "GET", path: "stations", handler: ({ ctx, query }) => listStations(prisma, ctx, z.object({ outletId: z.string().min(1) }).parse(query).outletId) },
+  // Measured preparation time per dish and station (kot.view): what the KDS uses to flag late tickets.
+  { method: "GET", path: "prep-times", handler: ({ ctx, query }) => dishPrepTimes(prisma, ctx, query as never) },
   { method: "POST", path: "kots/:id/status", handler: ({ ctx, params, body }) => updateKOTStatus(ctx, params.id, z.object({ status: KOTStatus.zod }).parse(body).status) },
   { method: "POST", path: "kots/:id/station", handler: ({ ctx, params, body }) => routeKOTToStation(ctx, params.id, z.object({ stationId: z.string() }).parse(body).stationId) },
 ]);

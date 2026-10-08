@@ -14,6 +14,7 @@ import { TablePicker } from "@/features/pos/components/TablePicker";
 import { CustomerPicker } from "@/features/pos/components/CustomerPicker";
 import { PaymentDialog } from "@/features/pos/components/PaymentDialog";
 import { DiscountDialog } from "@/features/pos/components/DiscountDialog";
+import { UpsellStrip } from "@/features/pos/components/UpsellStrip";
 import { OpenOrdersDialog, isIncomingQr, type OpenOrder } from "@/features/pos/components/OpenOrdersDialog";
 import { createPoller } from "@/lib/polling";
 import { BACKGROUND_HEADER } from "@/constants/auth";
@@ -252,6 +253,12 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
           onPickTable={() => setDialog("table")}
           onPickCustomer={() => setDialog("customer")}
           canUseCustomers={perms.customerView}
+        />
+        <UpsellStrip
+          outletId={outletId}
+          menuItemIds={[...cart.lines.map((l) => l.menuItemId), ...(running?.items ?? []).flatMap((i) => (i.menuItemId ? [i.menuItemId] : []))]}
+          disabled={Boolean(running && ["PAID", "CANCELLED", "REFUNDED"].includes(running.status))}
+          onAdd={(h) => { const item = menu.find((m) => m.id === h.menuItemId); if (item) pick(item); }}
         />
         <div className="grid grid-cols-3 gap-2 border-t border-ink-200 bg-ink-50 p-2" role="toolbar" aria-label="Order actions">
           <Button size="lg" onClick={() => setDialog("orders")} aria-label={incoming ? `Open orders, ${incoming} new QR ${incoming === 1 ? "order" : "orders"}` : "Open orders"}>

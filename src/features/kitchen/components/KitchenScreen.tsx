@@ -3,9 +3,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, describeError } from "@/lib/api/client";
 import { createPoller, type Poller } from "@/lib/polling";
-import { KDS_COLUMNS, groupTickets, type KdsTicket } from "@/features/kitchen/kds";
+import { KDS_COLUMNS, NO_EXPECTATIONS, expectationsFrom, groupTickets, lateSummary, type KdsTicket, type PrepExpectations } from "@/features/kitchen/kds";
 import type { KOTStatus } from "@/constants/enums";
 import { TicketCard } from "@/features/kitchen/components/TicketCard";
+import { BACKGROUND_HEADER } from "@/constants/auth";
 import { LoadingState, ErrorState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
 
@@ -28,10 +29,24 @@ export function KitchenScreen({ outletId, canUpdate }: { outletId: string; canUp
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [now, setNow] = useState(() => Date.now());
+  const [expectations, setExpectations] = useState<PrepExpectations>(NO_EXPECTATIONS);
   const poller = useRef<Poller | null>(null);
 
   useEffect(() => {
     api<Station[]>("/api/kitchen/stations", { query: { outletId } }).then(setStations).catch(() => setStations([]));
+  }, [outletId]);
+
+  // What each dish usually takes at this outlet (measured from the last two weeks of tickets). If it cannot be loaded the
+  // board falls back to the fixed 10 / 20 minute lines; it never blocks the kitchen.
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api<{ dishes: Array<{ menuItemId: string | null; name: string; medianMinutes: number; reliable: boolean }> }>("/api/kitchen/prep-times", { query: { outletId, days: 14 }, headers: { [BACKGROUND_HEADER]: "1" } })
+        .then((r) => alive && setExpectations(expectationsFrom(r.dishes)))
+        .catch(() => undefined);
+    void load();
+    const t = setInterval(load, 10 * 60_000);
+    return () => { alive = false; clearInterval(t); };
   }, [outletId]);
 
   useEffect(() => {
@@ -59,6 +74,7 @@ export function KitchenScreen({ outletId, canUpdate }: { outletId: string; canUp
   }, []);
 
   const columns = useMemo(() => groupTickets(tickets ?? []), [tickets]);
+  const lateness = useMemo(() => lateSummary(tickets ?? [], now, expectations), [tickets, now, expectations]);
 
   async function act(ticket: KdsTicket, to: KOTStatus) {
     if (pending.has(ticket.id)) return;
@@ -101,6 +117,13 @@ export function KitchenScreen({ outletId, canUpdate }: { outletId: string; canUp
             ))}
           </select>
         </label>
+        {(lateness.late > 0 || lateness.due > 0) && (
+          <p role="status" aria-live="polite" data-testid="kds-late-banner" className={`rounded-md px-2.5 py-1 text-sm font-bold ${lateness.late > 0 ? "bg-bad-500 text-white" : "bg-warn-50 text-warn-700"}`}>
+            {lateness.late > 0 ? `${lateness.late} ${lateness.late === 1 ? "ticket is" : "tickets are"} running late` : null}
+            {lateness.late > 0 && lateness.due > 0 ? " · " : null}
+            {lateness.due > 0 ? `${lateness.due} at their usual time` : null}
+          </p>
+        )}
         <p className="ml-auto text-xs text-ink-500" aria-live="polite">
           {stale ? <span className="font-semibold text-bad-500">Connection problem — showing last known tickets. {describeError(error)}</span> : lastUpdated ? `Updated ${new Date(lastUpdated).toLocaleTimeString()}` : "Connecting…"}
         </p>
@@ -120,7 +143,7 @@ export function KitchenScreen({ outletId, canUpdate }: { outletId: string; canUp
                 {columns[col.id].length === 0 ? (
                   <p className="p-4 text-center text-sm text-ink-500">No tickets</p>
                 ) : (
-                  columns[col.id].map((t) => <TicketCard key={t.id} ticket={t} now={now} pending={pending.has(t.id)} canUpdate={canUpdate} onAction={(to) => void act(t, to)} />)
+                  columns[col.id].map((t) => <TicketCard key={t.id} ticket={t} now={now} expectations={expectations} pending={pending.has(t.id)} canUpdate={canUpdate} onAction={(to) => void act(t, to)} />)
                 )}
               </div>
             </section>

@@ -148,7 +148,7 @@ export async function listKOTs(db: PrismaClient, ctx: AccessContext, filter: { o
     include: {
       station: { select: { id: true, name: true } },
       order: { select: { id: true, channel: true, source: true, covers: true, notes: true, createdAt: true, table: { select: { code: true } } } },
-      items: { include: { orderItem: { select: { notes: true, modifiers: { select: { name: true } } } } } },
+      items: { include: { orderItem: { select: { menuItemId: true, notes: true, modifiers: { select: { name: true } } } } } },
     },
   });
   return rows.reverse(); // the board reads oldest first
