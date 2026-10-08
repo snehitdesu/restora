@@ -5,6 +5,7 @@ import Link from "next/link";
 import { SideNav } from "@/components/layout/SideNav";
 import { OutletSwitcher } from "@/components/layout/OutletSwitcher";
 import { LogoutButton } from "@/components/layout/LogoutButton";
+import { SearchPalette } from "@/components/layout/SearchPalette";
 import { Icon } from "@/components/ui/Icon";
 import { BrandMark, Wordmark, TAGLINE } from "@/components/layout/BrandMark";
 import type { NavItem } from "@/lib/nav";
@@ -49,6 +50,7 @@ export function AppShell({ shell, nav, unread, children }: { shell: ShellData; n
           </button>
           <OutletSwitcher outlets={shell.outlets} outletId={shell.outletId} />
           <div className="ml-auto flex items-center gap-1.5 sm:gap-2.5">
+            <SearchPalette />
             {unread !== null && (
               <Link href="/notifications" className="relative inline-flex h-9 w-9 items-center justify-center rounded-md text-ink-600 transition-colors hover:bg-ink-100 hover:text-ink-900" aria-label={`${unread} unread notifications`}>
                 <Icon name="bell" className="h-5 w-5" />

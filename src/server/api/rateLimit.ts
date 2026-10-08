@@ -87,6 +87,8 @@ export const RATE_POLICIES = {
   webhook: { name: "webhook", limit: 600, windowMs: 60_000 },
   export: { name: "export", limit: 20, windowMs: 60_000 },
   report: { name: "report", limit: 120, windowMs: 60_000 },
+  // The search box fires as people type (debounced); a runaway client is not a person.
+  search: { name: "search", limit: 240, windowMs: 60_000 },
   // Calls that reach an external provider or device (test connection / test print / test message).
   integrationAction: { name: "integration-action", limit: 30, windowMs: 60_000 },
   // Guest QR ordering (anonymous). Guests behind restaurant Wi-Fi share one IP,
