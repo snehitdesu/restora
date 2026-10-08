@@ -69,7 +69,7 @@ export async function claimJobRun(db: PrismaClient, name: string, scopeKey: stri
   return again.count === 1;
 }
 
-async function finishJobRun(db: PrismaClient, name: string, scopeKey: string, runDate: string, status: "SUCCESS" | "FAILED", extra: Record<string, unknown>, now = new Date()) {
+export async function finishJobRun(db: PrismaClient, name: string, scopeKey: string, runDate: string, status: "SUCCESS" | "FAILED", extra: Record<string, unknown>, now = new Date()) {
   const row = await db.jobRun.findUnique({ where: { name_scopeKey_runDate: { name, scopeKey, runDate } } });
   const d = readDetail(row?.detail ?? null);
   await db.jobRun.updateMany({ where: { name, scopeKey, runDate }, data: { status, finishedAt: now, detail: JSON.stringify({ ...d, ...extra }) } });
@@ -118,5 +118,16 @@ export async function runNightlyPosRepull(db: PrismaClient = prisma, now = new D
 
 /** All scheduled jobs; called from the worker tick (cheap when nothing is due). */
 export async function runScheduledJobs(db: PrismaClient = prisma, now = new Date()) {
-  return { posRepull: await runNightlyPosRepull(db, now) };
+  const posRepull = await runNightlyPosRepull(db, now);
+  // Group 6 automations (campaigns, feedback requests, booking messages, birthday / win-back offers, the 9 AM summary).
+  // Loaded lazily: they import this module's claim helpers. A failure there never costs the POS re-pull its result.
+  const { runGrowthJobs } = await import("@/server/services/lifecycle");
+  let growth: Awaited<ReturnType<typeof runGrowthJobs>> | null = null;
+  try {
+    growth = await runGrowthJobs(db, now);
+  } catch (e) {
+    inc("restora_job_failures_total", { type: "growth" });
+    log.error("growth jobs failed", { event: "growth_jobs_failed", error: e });
+  }
+  return { posRepull, growth };
 }
