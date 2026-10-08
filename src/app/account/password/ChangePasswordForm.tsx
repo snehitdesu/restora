@@ -33,7 +33,7 @@ export function ChangePasswordForm({ email }: { email: string }) {
   }
 
   return (
-    <form onSubmit={submit} className="space-y-4" noValidate>
+    <form method="post" onSubmit={submit} className="space-y-4" noValidate>
       <input type="hidden" name="username" autoComplete="username" value={email} readOnly />
       <PasswordInput id="current-password" label="Current password" value={current} onChange={setCurrent} autoComplete="current-password" />
       <PasswordInput id="new-password" label="New password" value={next} onChange={setNext} autoComplete="new-password" hint={PASSWORD_HINT} />

@@ -32,7 +32,7 @@ export function ForgotPasswordForm() {
       {message ? (
         <FormAlert tone="success">{message}</FormAlert>
       ) : (
-        <form onSubmit={submit} className="space-y-4" noValidate>
+        <form method="post" onSubmit={submit} className="space-y-4" noValidate>
           <div>
             <label htmlFor="email" className="block text-sm font-medium text-ink-700">Email</label>
             <input id="email" type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} className={inputClass} />

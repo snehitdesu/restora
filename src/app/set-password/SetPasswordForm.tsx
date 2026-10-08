@@ -54,7 +54,7 @@ export function SetPasswordForm() {
     );
   }
   return (
-    <form onSubmit={submit} className="space-y-4" noValidate>
+    <form method="post" onSubmit={submit} className="space-y-4" noValidate>
       <PasswordInput id="new-password" label="New password" value={password} onChange={setPassword} autoComplete="new-password" hint={PASSWORD_HINT} />
       <PasswordInput id="confirm-password" label="Repeat new password" value={confirm} onChange={setConfirm} autoComplete="new-password" />
       {error && <FormAlert>{error}</FormAlert>}
