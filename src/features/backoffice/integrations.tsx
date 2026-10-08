@@ -18,9 +18,10 @@ import { Icon } from "@/components/ui/Icon";
 import { Card, PageHeader, Tabs } from "@/components/ui/Page";
 import { DataTable } from "@/components/ui/Table";
 import { ActionButton } from "@/components/ui/Confirm";
-import { Checkbox, Field, FormAlert, FormDialog, Input, Select, formError, opt } from "@/components/ui/Form";
+import { Checkbox, Field, FormAlert, FormDialog, Input, Select, Textarea, formError, opt } from "@/components/ui/Form";
 import { ErrorState, LoadingState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
+import { AccountingMappingCard, AccountingSyncCard, SheetsPanel } from "@/features/backoffice/integrationsSync";
 
 type Mode = "MOCK" | "SANDBOX" | "LIVE" | "UNAVAILABLE";
 type Connection = { id: string; kind: string; provider: string; outletId: string | null; externalRef: string | null; status: string; mode: Mode; declaredMode: string; configured: boolean; hasWebhookSecret: boolean; hasCredentials: boolean; config: Record<string, unknown> | null; lastCheckedAt: string | null; lastSuccessAt: string | null; lastFailureAt: string | null; lastError: string | null };
@@ -33,7 +34,7 @@ export function ModeBadge({ mode }: { mode: Mode | string }) {
   return <Badge tone={MODE_TONE[mode as Mode] ?? "neutral"}>{mode}</Badge>;
 }
 
-const PROVIDERS: Record<string, string[]> = { PAYMENT: ["razorpay", "mock"], AGGREGATOR: ["zomato", "swiggy", "mock"], POS: ["petpooja", "mock"], MESSAGING: ["twilio", "mock"], ACCOUNTING: ["generic", "tally"] };
+const PROVIDERS: Record<string, string[]> = { PAYMENT: ["razorpay", "mock"], AGGREGATOR: ["zomato", "swiggy", "mock"], POS: ["petpooja", "mock"], MESSAGING: ["twilio", "mock"], ACCOUNTING: ["generic", "tally", "zoho", "tally_gateway", "zoho_books"], SHEETS: ["google_sheets", "mock"] };
 
 function ConnectionDialog({ open, onClose, onDone, initial }: { open: boolean; onClose: () => void; onDone: () => void; initial?: Connection }) {
   const { outlets } = useShell();
@@ -51,6 +52,17 @@ function ConnectionDialog({ open, onClose, onDone, initial }: { open: boolean; o
   const tpl = (initial?.config?.templates ?? {}) as Record<string, boolean>;
   const [channel, setChannel] = useState(String(initial?.config?.channel ?? "SMS"));
   const [templates, setTemplates] = useState({ ORDER_CONFIRMED: Boolean(tpl.ORDER_CONFIRMED), ORDER_READY: Boolean(tpl.ORDER_READY), PAYMENT_RECEIVED: Boolean(tpl.PAYMENT_RECEIVED) });
+  const cfg = (initial?.config ?? {}) as Record<string, string>;
+  const [tallyUrl, setTallyUrl] = useState(cfg.gatewayUrl ?? "");
+  const [tallyCompany, setTallyCompany] = useState(cfg.company ?? "");
+  const [zohoOrg, setZohoOrg] = useState(cfg.organizationId ?? "");
+  const [zohoDc, setZohoDc] = useState(cfg.dataCenter ?? "in");
+  const [zohoClientId, setZohoClientId] = useState("");
+  const [zohoClientSecret, setZohoClientSecret] = useState("");
+  const [zohoRefresh, setZohoRefresh] = useState("");
+  const [sheetId, setSheetId] = useState(cfg.spreadsheetId ?? "");
+  const [gEmail, setGEmail] = useState("");
+  const [gKey, setGKey] = useState("");
   const webhookKind = ["PAYMENT", "AGGREGATOR", "POS"].includes(kind);
   const twilio = kind === "MESSAGING" && provider === "twilio";
   return (
@@ -63,6 +75,9 @@ function ConnectionDialog({ open, onClose, onDone, initial }: { open: boolean; o
           ...(webhookSecret ? { webhookSecret } : {}),
           ...(twilio && accountSid && authToken ? { credentials: { accountSid: accountSid.trim(), authToken: authToken.trim(), ...(opt(smsFrom) ? { smsFrom: opt(smsFrom) } : {}), ...(opt(whatsappFrom) ? { whatsappFrom: opt(whatsappFrom) } : {}) } } : {}),
           ...(kind === "MESSAGING" ? { config: { channel, templates } } : {}),
+          ...(provider === "tally_gateway" ? { config: { gatewayUrl: tallyUrl.trim(), company: tallyCompany.trim() } } : {}),
+          ...(provider === "zoho_books" ? { config: { organizationId: zohoOrg.trim(), dataCenter: zohoDc }, ...(zohoClientId && zohoClientSecret && zohoRefresh ? { credentials: { clientId: zohoClientId.trim(), clientSecret: zohoClientSecret.trim(), refreshToken: zohoRefresh.trim() } } : {}) } : {}),
+          ...(kind === "SHEETS" && provider === "google_sheets" ? { config: { spreadsheetId: sheetId.trim() }, ...(gEmail && gKey ? { credentials: { clientEmail: gEmail.trim(), privateKey: gKey.trim() } } : {}) } : {}),
         },
       })}
       onDone={onDone}>
@@ -84,6 +99,28 @@ function ConnectionDialog({ open, onClose, onDone, initial }: { open: boolean; o
           <Field label="Auth token" name="authToken"><Input type="password" autoComplete="off" value={authToken} onChange={(e) => setAuthToken(e.target.value)} /></Field>
           <Field label="SMS sender (+E.164)" name="smsFrom"><Input value={smsFrom} onChange={(e) => setSmsFrom(e.target.value)} placeholder="+1…" /></Field>
           <Field label="WhatsApp sender (+E.164)" name="whatsappFrom"><Input value={whatsappFrom} onChange={(e) => setWhatsappFrom(e.target.value)} placeholder="+1…" /></Field>
+        </div>
+      )}
+      {provider === "tally_gateway" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Tally gateway address" name="gatewayUrl" required hint="Must be one of the addresses the deployment allows (TALLY_GATEWAY_URLS)"><Input value={tallyUrl} onChange={(e) => setTallyUrl(e.target.value)} placeholder="http://192.168.1.20:9000" /></Field>
+          <Field label="Company name in Tally" name="company" required><Input value={tallyCompany} onChange={(e) => setTallyCompany(e.target.value)} maxLength={120} /></Field>
+        </div>
+      )}
+      {provider === "zoho_books" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Zoho organisation id" name="organizationId" required><Input value={zohoOrg} onChange={(e) => setZohoOrg(e.target.value)} inputMode="numeric" /></Field>
+          <Field label="Data centre" name="dataCenter"><Select value={zohoDc} onChange={(e) => setZohoDc(e.target.value)}><option value="in">India (.in)</option><option value="com">US (.com)</option><option value="eu">Europe (.eu)</option><option value="au">Australia (.com.au)</option><option value="jp">Japan (.jp)</option></Select></Field>
+          <Field label="Client id" name="clientId" hint={initial?.hasCredentials ? "Credentials are set (hidden): fill all three to replace" : undefined}><Input autoComplete="off" value={zohoClientId} onChange={(e) => setZohoClientId(e.target.value)} /></Field>
+          <Field label="Client secret" name="clientSecret"><Input type="password" autoComplete="off" value={zohoClientSecret} onChange={(e) => setZohoClientSecret(e.target.value)} /></Field>
+          <Field label="Refresh token" name="refreshToken" className="sm:col-span-2"><Input type="password" autoComplete="off" value={zohoRefresh} onChange={(e) => setZohoRefresh(e.target.value)} /></Field>
+        </div>
+      )}
+      {kind === "SHEETS" && provider === "google_sheets" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label="Spreadsheet id" name="spreadsheetId" required hint="From its address: docs.google.com/spreadsheets/d/<id>"><Input value={sheetId} onChange={(e) => setSheetId(e.target.value)} /></Field>
+          <Field label="Service account e-mail" name="clientEmail" hint={initial?.hasCredentials ? "Credentials are set (hidden): fill both to replace. Share the sheet with this account." : "Share the sheet with this account (Editor)"}><Input autoComplete="off" value={gEmail} onChange={(e) => setGEmail(e.target.value)} /></Field>
+          <Field label="Service account private key" name="privateKey" className="sm:col-span-2"><Textarea rows={3} autoComplete="off" value={gKey} onChange={(e) => setGKey(e.target.value)} placeholder="-----BEGIN PRIVATE KEY-----…" className="font-mono text-xs" /></Field>
         </div>
       )}
       {kind === "MESSAGING" && (
@@ -129,9 +166,9 @@ function AccountingExportCard() {
   };
   return (
     <Card title="Accounting export">
-      <p className="mb-3 text-sm text-ink-600">Balanced vouchers (sales, credit notes, receipts, refunds, expenses, vendor bills and payments, with reversals) from the books. Each document is exported once per format — a later export contains only what is new. File export only: there is no live connection to an accounting system.</p>
+      <p className="mb-3 text-sm text-ink-600">Balanced vouchers (sales, credit notes, receipts, refunds, expenses, vendor bills and payments, with reversals) from the books. Each document is exported once per format — a later export contains only what is new. This is the file export; use the sync below to send vouchers straight to Tally or Zoho Books.</p>
       <div className="grid gap-3 sm:grid-cols-4">
-        <Field label="Format" name="format"><Select value={format} onChange={(e) => setFormat(e.target.value)}><option value="generic">Generic CSV</option><option value="tally">Tally XML</option></Select></Field>
+        <Field label="Format" name="format"><Select value={format} onChange={(e) => setFormat(e.target.value)}><option value="generic">Generic CSV</option><option value="tally">Tally XML</option><option value="zoho">Zoho Books CSV</option></Select></Field>
         <Field label="From" name="acc-from"><Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
         <Field label="To" name="acc-to"><Input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></Field>
         <div className="flex items-end"><Button variant="primary" onClick={run} loading={busy} disabled={!from || !to || from > to}><Icon name="download" /> Export</Button></div>
@@ -150,7 +187,7 @@ function AccountingExportCard() {
 export function IntegrationsScreen() {
   const { outlets } = useShell();
   const toast = useToast();
-  const [tab, setTab] = useState<"connections" | "outbox" | "accounting" | "audit">("connections");
+  const [tab, setTab] = useState<"connections" | "outbox" | "accounting" | "sheets" | "audit">("connections");
   const data = useQuery<Overview>("/api/integrations");
   const outbox = useQuery<Delivery[]>(tab === "outbox" ? "/api/integrations/deliveries" : null, { take: 100 });
   const audit = useQuery<AuditRow[]>(tab === "audit" ? "/api/integrations/audit" : null);
@@ -160,8 +197,8 @@ export function IntegrationsScreen() {
   const dep = data.data.deployment;
   return (
     <>
-      <PageHeader title="Integrations" subtitle="Payment gateway, ordering platforms, customer messaging, accounting" actions={<Button variant="primary" onClick={() => setEditing("new")}><Icon name="plus" /> Connect</Button>} />
-      <Tabs label="Integration sections" value={tab} onChange={setTab} options={[{ value: "connections", label: "Connections" }, { value: "outbox", label: "Outbox" }, { value: "accounting", label: "Accounting" }, { value: "audit", label: "History" }]} />
+      <PageHeader title="Integrations" subtitle="Payment gateway, ordering platforms, customer messaging, accounting, spreadsheets" actions={<Button variant="primary" onClick={() => setEditing("new")}><Icon name="plus" /> Connect</Button>} />
+      <Tabs label="Integration sections" value={tab} onChange={setTab} options={[{ value: "connections", label: "Connections" }, { value: "outbox", label: "Outbox" }, { value: "accounting", label: "Accounting" }, { value: "sheets", label: "Spreadsheets" }, { value: "audit", label: "History" }]} />
       {tab === "connections" && (
         <div className="space-y-4">
           <Card title="Payment gateway (deployment)">
@@ -199,7 +236,8 @@ export function IntegrationsScreen() {
             { key: "r", header: "", cell: (d) => (d.status === "FAILED" && d.attempts < d.maxAttempts ? <ActionButton size="sm" action={() => api(`/api/integrations/deliveries/${d.id}/retry`, { method: "POST", body: {} })} success="Retried" onDone={outbox.reload}>Retry</ActionButton> : null) },
           ]} />
       )}
-      {tab === "accounting" && <AccountingExportCard />}
+      {tab === "accounting" && <div className="space-y-4"><AccountingExportCard /><AccountingMappingCard /><AccountingSyncCard connections={data.data.connections} /></div>}
+      {tab === "sheets" && <SheetsPanel connections={data.data.connections} />}
       {tab === "audit" && (
         <DataTable label="Integration history" rows={audit.data ?? []} rowKey={(a) => a.id} loading={audit.loading} error={audit.error} onRetry={audit.reload} empty="No history yet"
           columns={[

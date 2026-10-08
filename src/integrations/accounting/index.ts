@@ -9,9 +9,11 @@
  *    Debit, Credit, Party, Narration, Source key).
  *  - tally:   Tally ERP / TallyPrime XML import envelope (vouchers with
  *    ALLLEDGERENTRIES.LIST; debits negative with ISDEEMEDPOSITIVE=Yes).
+ *  - zoho:    Zoho Books manual-journal import CSV.
  *
- * There is NO live API sync to Tally / Zoho / QuickBooks: no partner
- * credentials are available, so only file export exists.
+ * Direct sync (sync.ts: a TallyPrime XML gateway, the Zoho Books API) is built
+ * and contract-tested against local emulators only: no Tally company or Zoho
+ * organisation has been connected, so it is never reported as LIVE-verified.
  */
 export type VoucherType =
   | "SALES" | "CREDIT_NOTE" | "RECEIPT" | "REFUND" | "EXPENSE" | "EXPENSE_VOID"
@@ -30,7 +32,7 @@ export type Voucher = {
 };
 
 export interface AccountingFormat {
-  readonly name: "generic" | "tally";
+  readonly name: "generic" | "tally" | "zoho";
   readonly mime: string;
   readonly extension: string;
   render(vouchers: Voucher[]): string;
@@ -81,8 +83,49 @@ export class TallyAccountingFormat implements AccountingFormat {
   }
 }
 
+/**
+ * Zoho Books manual-journal import CSV: one row per journal line, rows of one
+ * journal share the Journal Date + Reference Number (the voucher's stable
+ * source key). The columns follow Zoho Books' manual-journal import; Zoho's
+ * import wizard maps columns by name, so check the mapping once against your
+ * Zoho organisation before the first import. Amounts in INR, 2 decimals.
+ */
+export class ZohoBooksAccountingFormat implements AccountingFormat {
+  readonly name = "zoho" as const;
+  readonly mime = "text/csv";
+  readonly extension = "csv";
+  render(vouchers: Voucher[]): string {
+    const rows = [["Journal Date", "Reference Number", "Notes", "Journal Type", "Currency", "Account", "Description", "Contact Name", "Debit", "Credit"]];
+    for (const v of ordered(vouchers)) for (const l of v.lines) rows.push([v.date, v.sourceKey, `${v.type} ${v.number}: ${v.narration}`.slice(0, 500), "both", "INR", l.ledger, v.narration, v.party ?? "", l.debit ? amt(l.debit) : "", l.credit ? amt(l.credit) : ""]);
+    return rows.map((r) => r.map(csvCell).join(",")).join("\r\n") + "\r\n";
+  }
+}
+
+export const ACCOUNTING_FORMATS = ["generic", "tally", "zoho"] as const;
+export type AccountingFormatName = (typeof ACCOUNTING_FORMATS)[number];
+
 export function getAccountingFormat(name?: string): AccountingFormat {
-  return (name ?? "generic").toLowerCase() === "tally" ? new TallyAccountingFormat() : new GenericAccountingFormat();
+  const n = (name ?? "generic").toLowerCase();
+  return n === "tally" ? new TallyAccountingFormat() : n === "zoho" ? new ZohoBooksAccountingFormat() : new GenericAccountingFormat();
+}
+
+/** The accountant's names for RESTORA's ledgers and parties (organization setting). */
+export type AccountingMap = { ledgers: Record<string, string>; parties: Record<string, string> };
+
+/**
+ * Rename ledgers and parties to the books' own names. Amounts, dates, numbers
+ * and source keys never change, so balance and duplicate protection hold.
+ * An unmapped name passes through unchanged.
+ */
+export function applyAccountingMap(vouchers: Voucher[], map: AccountingMap | null | undefined): Voucher[] {
+  if (!map) return vouchers;
+  const ledger = (n: string) => map.ledgers[n] ?? n;
+  return vouchers.map((v) => ({
+    ...v,
+    party: v.party === undefined ? undefined : map.parties[v.party] ?? v.party,
+    // "Vendor - <party>" ledgers follow the party mapping unless the ledger itself is mapped.
+    lines: v.lines.map((l) => ({ ...l, ledger: map.ledgers[l.ledger] ?? (l.ledger.startsWith("Vendor - ") && map.parties[l.ledger.slice(9)] ? `Vendor - ${map.parties[l.ledger.slice(9)]}` : ledger(l.ledger)) })),
+  }));
 }
 
 /** A voucher is balanced when Σ debit = Σ credit (to the paisa). */

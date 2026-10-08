@@ -123,7 +123,7 @@ describe("inventory: transfers", () => {
 
   it("the sending outlet dispatches (one call with line quantities); the other end sees no dispatch", async () => {
     routes = { ...baseRoutes, "GET /api/inventory/transfers/t1": () => transfer("DRAFT"), "POST /api/inventory/transfers/t1/dispatch": () => ({ id: "t1", status: "DISPATCHED" }) };
-    renderAs(<TransferDetail id="t1" />, ["inventory.view", "inventory.transfer"]);
+    renderAs(<TransferDetail id="t1" />, ["inventory.view", "inventory.transfer", "master.view"]);
     await userEvent.click(await screen.findByRole("button", { name: /Dispatch/ }));
     const dialog = await screen.findByRole("dialog");
     const qty = await within(dialog).findByLabelText(/Dispatch qty Tomato/);
@@ -136,12 +136,12 @@ describe("inventory: transfers", () => {
 
   it("receiving is offered only at the receiving outlet", async () => {
     routes = { ...baseRoutes, "GET /api/inventory/transfers/t1": () => transfer("DISPATCHED"), "POST /api/inventory/transfers/t1/receive": () => ({}) };
-    const { unmount } = renderAs(<TransferDetail id="t1" />, ["inventory.view", "inventory.transfer"], OUT_A);
+    const { unmount } = renderAs(<TransferDetail id="t1" />, ["inventory.view", "inventory.transfer", "master.view"], OUT_A);
     await screen.findByText(/Receiving happens at Bandra/);
     expect(screen.queryByRole("button", { name: /Receive/ })).not.toBeInTheDocument();
     unmount();
 
-    renderAs(<TransferDetail id="t1" />, ["inventory.view", "inventory.transfer"], OUT_B);
+    renderAs(<TransferDetail id="t1" />, ["inventory.view", "inventory.transfer", "master.view"], OUT_B);
     await userEvent.click(await screen.findByRole("button", { name: /Receive/ }));
     const dialog = await screen.findByRole("dialog");
     await userEvent.type(await within(dialog).findByLabelText(/Damaged qty Tomato/), "1");
@@ -152,7 +152,7 @@ describe("inventory: transfers", () => {
 
   it("view-only users get no actions", async () => {
     routes = { ...baseRoutes, "GET /api/inventory/transfers/t1": () => transfer("DRAFT") };
-    renderAs(<TransferDetail id="t1" />, ["inventory.view"]);
+    renderAs(<TransferDetail id="t1" />, ["inventory.view", "master.view"]);
     await screen.findByRole("table", { name: "Transfer lines" });
     expect(screen.queryByRole("button", { name: /Dispatch|Cancel/ })).not.toBeInTheDocument();
   });
@@ -186,7 +186,7 @@ describe("inventory: stock counts", () => {
       "GET /api/inventory/counts/sc1": () => count("COUNTING"),
       "POST /api/inventory/counts/sc1/entries": () => count("COUNTING", [{ id: "c1", materialId: "m-tom", bookQty: "10", physicalQty: "8", variance: "-2", costImpact: "-80" }, { id: "c2", materialId: "m-oil", bookQty: "5", physicalQty: "5", variance: "0", costImpact: "0" }]),
     };
-    renderAs(<StockCountDetail id="sc1" />, ["inventory.view", "inventory.count"]);
+    renderAs(<StockCountDetail id="sc1" />, ["inventory.view", "master.view", "reports.view", "inventory.count"]);
     const input = await screen.findByLabelText(/Physical qty Tomato/);
     expect(screen.getByRole("button", { name: "Submit for review" })).toBeInTheDocument();
     await userEvent.clear(input);
@@ -202,12 +202,12 @@ describe("inventory: stock counts", () => {
 
   it("approval requires the adjustment permission", async () => {
     routes = { ...baseRoutes, "GET /api/inventory/counts/sc1": () => count("REVIEW") };
-    const { unmount } = renderAs(<StockCountDetail id="sc1" />, ["inventory.view", "inventory.count"]);
+    const { unmount } = renderAs(<StockCountDetail id="sc1" />, ["inventory.view", "master.view", "reports.view", "inventory.count"]);
     await screen.findByRole("table", { name: "Count sheet" });
     expect(screen.queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Physical qty/)).not.toBeInTheDocument(); // read-only outside COUNTING
     unmount();
-    renderAs(<StockCountDetail id="sc1" />, ["inventory.view", "inventory.count", "inventory.approve_adjustment"]);
+    renderAs(<StockCountDetail id="sc1" />, ["inventory.view", "master.view", "reports.view", "inventory.count", "inventory.approve_adjustment"]);
     expect(await screen.findByRole("button", { name: "Approve & post adjustments" })).toBeInTheDocument();
   });
 
@@ -226,7 +226,7 @@ describe("inventory: wastage", () => {
     expect(screen.queryByRole("button", { name: /Record wastage/ })).not.toBeInTheDocument();
     unmount();
 
-    renderAs(<WastageScreen />, ["inventory.view", "inventory.wastage"]);
+    renderAs(<WastageScreen />, ["inventory.view", "master.view", "inventory.wastage"]);
     await userEvent.click(await screen.findByRole("button", { name: /Record wastage/ }));
     const dialog = await screen.findByRole("dialog");
     await userEvent.selectOptions(within(dialog).getByLabelText(/Reason/), "EXPIRED");
@@ -241,7 +241,7 @@ describe("inventory: wastage", () => {
 
   it("keeps the dialog open with the server's validation message", async () => {
     routes = { ...baseRoutes, "GET /api/inventory/wastage": () => ({ items: [], nextCursor: null }), "POST /api/inventory/wastage": () => ({ __status: 422, error: { code: "ValidationError", message: "Each material may appear only once per wastage document" } }) };
-    renderAs(<WastageScreen />, ["inventory.view", "inventory.wastage"]);
+    renderAs(<WastageScreen />, ["inventory.view", "master.view", "inventory.wastage"]);
     await userEvent.click(await screen.findByRole("button", { name: /Record wastage/ }));
     const dialog = await screen.findByRole("dialog");
     await userEvent.click(within(dialog).getByRole("button", { name: "Save draft" }));
@@ -271,6 +271,25 @@ describe("inventory: production", () => {
     await userEvent.click(within(dialog).getByRole("button", { name: "Complete batch" }));
     await waitFor(() => expect(posts()).toHaveLength(1));
     expect(posts()[0].body).toEqual({ actualQty: 1.9 });
+  });
+
+  it("a completed batch shows its department, who made it, the yield against the plan and (for cost viewers) the batch cost", async () => {
+    const done = { id: "p2", number: "PRD-0002", status: "COMPLETED", outletId: OUT_A, departmentId: "d-kit", outputMaterialId: "m-oil", recipeVersionId: "rv", plannedQty: "2", actualQty: "1.9", batchNo: null, expiryDate: null, completedAt: "2026-09-01T12:00:00Z", createdAt: "2026-09-01T10:00:00Z", lines: [{ id: "a", materialId: "m-tom", qty: "1" }], plannedByName: "Kiran Kitchen", completedByName: "Manoj Manager", yieldVariance: { qty: -0.1, pct: -5 } };
+    routes = { ...baseRoutes, "GET /api/inventory/production/p2": () => ({ ...done, costing: { inputCost: 40, unitCost: 21.05, inputs: [{ materialId: "m-tom", qty: 1, rate: 40, cost: 40 }] } }) };
+    const { unmount } = renderAs(<ProductionDetail id="p2" />, ["inventory.view", "inventory.produce", "reports.view"]);
+    expect(await screen.findByText("Batch cost")).toBeInTheDocument();
+    expect(screen.getByText("₹21.05")).toBeInTheDocument();
+    expect(screen.getByText("-0.1 (-5%)")).toBeInTheDocument();
+    expect(screen.getByText("Manoj Manager")).toBeInTheDocument();
+    expect(await screen.findByText("Kitchen")).toBeInTheDocument();
+    unmount();
+
+    // The kitchen: the server leaves costing out, so no money is shown.
+    routes = { ...baseRoutes, "GET /api/inventory/production/p2": () => ({ ...done, costing: null }) };
+    renderAs(<ProductionDetail id="p2" />, ["inventory.view", "inventory.produce"]);
+    expect(await screen.findByText("Kiran Kitchen")).toBeInTheDocument();
+    expect(screen.queryByText("Batch cost")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/₹/);
   });
 });
 

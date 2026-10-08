@@ -4,6 +4,10 @@ import { createRouter } from "@/server/api/router";
 import * as A from "@/server/services/analytics";
 import { financeOverview } from "@/server/services/financeAnalytics";
 import { businessInsights } from "@/server/services/insights";
+import { menuEngineering, foodCostLeakage } from "@/server/services/menuEngineering";
+import { departmentPnl, dailyCosting } from "@/server/services/departmentCosting";
+import { consumptionVariance } from "@/server/services/variance";
+import { countVarianceTrend } from "@/server/services/inventoryInsights";
 import { NotFoundError, ValidationError } from "@/server/db/scope";
 import { normalizeDates } from "@/server/services/reports";
 import { assertOutletInOrg } from "@/server/db/outletGuard";
@@ -22,6 +26,7 @@ const filter = z
     granularity: z.enum(["day", "week", "month"]).optional(),
     limit: z.coerce.number().int().min(1).max(100).optional(),
     lookbackDays: z.coerce.number().int().min(1).max(365).optional(),
+    departmentId: z.string().max(64).optional(),
   })
   .refine((f) => !f.from || !f.to || f.from <= f.to, { message: "`from` must be on or before `to`", path: ["from"] })
   .refine((f) => !f.from || !f.to || f.to.getTime() - f.from.getTime() <= MAX_RANGE_DAYS * 86400000, { message: `The period may cover at most ${MAX_RANGE_DAYS} days`, path: ["to"] });
@@ -54,6 +59,11 @@ const metrics = {
   "negative-stock": A.negativeStockReport,
   unmapped: A.unmappedSalesSummary,
   finance: financeOverview,
+  "menu-engineering": menuEngineering,
+  leakage: foodCostLeakage,
+  "consumption-variance": consumptionVariance,
+  "department-pnl": departmentPnl,
+  "count-variance-trend": countVarianceTrend,
 } as const;
 
 async function parseFilter(ctx: Parameters<typeof normalizeDates>[1], query: Record<string, unknown>) {
@@ -75,6 +85,15 @@ export const { GET } = createRouter([
       const q = z.object({ outletId: z.string().min(1, "outletId is required") }).safeParse(query);
       if (!q.success) throw new ValidationError("Invalid insight filters", q.error.flatten());
       return businessInsights(prisma, ctx, { outletId: q.data.outletId });
+    },
+  },
+  {
+    // Business days as "YYYY-MM-DD" in the outlet's timezone (not normalized to instants).
+    method: "GET",
+    path: "daily-costing",
+    handler: async ({ ctx, query }) => {
+      if (typeof query.outletId === "string" && query.outletId) await assertOutletInOrg(prisma, ctx, query.outletId);
+      return dailyCosting(prisma, ctx, query as never);
     },
   },
   {

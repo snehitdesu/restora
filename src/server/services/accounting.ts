@@ -31,7 +31,7 @@ import { authorizedOutletIds } from "@/server/services/analytics";
 import { taxSummary } from "@/server/services/invoicing";
 import { localDate } from "@/domain/time";
 import { D, money, num } from "@/domain/money";
-import { getAccountingFormat, isBalanced, ordered, type Voucher, type VoucherLine } from "@/integrations/accounting";
+import { applyAccountingMap, getAccountingFormat, isBalanced, ordered, type AccountingMap, type Voucher, type VoucherLine } from "@/integrations/accounting";
 
 const m2 = (v: unknown) => num(money(D(v as never)));
 const dr = (ledger: string, amount: number): VoucherLine => ({ ledger, debit: amount, credit: 0 });
@@ -40,11 +40,17 @@ const cashLedger = (method: string) => (method === "CASH" || method === "PETTY_C
 const reverse = (v: Voucher, type: Voucher["type"], key: string, date: string, narration: string): Voucher => ({ ...v, sourceKey: key, type, date, narration, number: `${v.number}-R`, lines: v.lines.map((l) => ({ ledger: l.ledger, debit: l.credit, credit: l.debit })) });
 
 const exportSchema = z.object({
-  format: z.enum(["generic", "tally"]).default("generic"),
+  format: z.enum(["generic", "tally", "zoho"]).default("generic"),
   outletId: z.string().min(1).optional(),
   from: z.coerce.date(),
   to: z.coerce.date(),
 }).refine((f) => f.from <= f.to, { message: "`from` must be on or before `to`" }).refine((f) => f.to.getTime() - f.from.getTime() <= 400 * 86400000, { message: "At most 400 days per export" });
+
+/** The organization's ledger / party mapping (applied by exports and sync; callers authorize). */
+export async function mappingFor(db: PrismaClient, organizationId: string): Promise<AccountingMap | null> {
+  const row = await db.accountingMapping.findUnique({ where: { organizationId } });
+  return row ? { ledgers: JSON.parse(row.ledgers), parties: JSON.parse(row.parties) } : null;
+}
 
 /** All vouchers for the period (current state of the books). */
 export async function buildVouchers(db: PrismaClient, ctx: AccessContext, ids: string[], range: { from: Date; to: Date }) {
@@ -116,6 +122,8 @@ export async function exportAccounting(ctx: AccessContext, input: z.input<typeof
   const ids = authorizedOutletIds(ctx, { outletId: f.outletId }, "finance.view");
   assertCan(ctx, "export.run", f.outletId);
   if (!ids.length) throw new ValidationError("No outlet to export");
+  // An org-wide role passes the outlet-membership check for ANY id: a named outlet must exist in this organization.
+  if (f.outletId && !(await db.outlet.findFirst({ where: { id: f.outletId, organizationId: ctx.organizationId }, select: { id: true } }))) throw new NotFoundError("Outlet not found");
   const fmt = getAccountingFormat(f.format);
   const { current, reversals } = await buildVouchers(db, ctx, ids, f);
   const keyOf = (sourceKey: string) => `acct:${fmt.name}:${sourceKey}`;
@@ -126,7 +134,9 @@ export async function exportAccounting(ctx: AccessContext, input: z.input<typeof
   if (!batch.length) return { empty: true as const, format: fmt.name, skippedAlreadyExported: skipped };
 
   const batchId = randomUUID();
-  const file = fmt.render(batch);
+  // The books' own ledger / party names (organization mapping); the reconciliation below uses RESTORA's.
+  const mapped = new Map(applyAccountingMap(batch, await mappingFor(db, ctx.organizationId)).map((v) => [v.sourceKey, v]));
+  const file = fmt.render([...mapped.values()]);
   const checksum = createHash("sha256").update(file).digest("hex");
   // Claim the batch atomically: the "already exported" read above ran outside any
   // transaction, so a concurrent export of the same period may have sent some of
@@ -137,7 +147,8 @@ export async function exportAccounting(ctx: AccessContext, input: z.input<typeof
     const raced = await tx.integrationDelivery.count({ where: { organizationId: ctx.organizationId, kind: "ACCOUNTING_VOUCHER", status: "SENT", idempotencyKey: { in: batch.map((v) => keyOf(v.sourceKey)) } } });
     if (raced) throw new ConflictError("Another export just exported some of these vouchers; run the export again");
     for (const v of ordered(batch)) {
-      const data = { status: "SENT", payload: JSON.stringify(v), batchId, providerRef: batchId, sentAt: new Date(), attempts: 1, lastError: null };
+      // The payload is what went into the file, so a re-download is byte-identical even if the mapping changes later.
+      const data = { status: "SENT", payload: JSON.stringify(mapped.get(v.sourceKey) ?? v), batchId, providerRef: batchId, sentAt: new Date(), attempts: 1, lastError: null };
       await tx.integrationDelivery.upsert({
         where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: keyOf(v.sourceKey) } },
         create: { organizationId: ctx.organizationId, outletId: f.outletId ?? null, kind: "ACCOUNTING_VOUCHER", provider: fmt.name, mode: "LIVE", idempotencyKey: keyOf(v.sourceKey), sourceType: v.type, sourceId: v.sourceKey, ...data },

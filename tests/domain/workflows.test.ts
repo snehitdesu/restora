@@ -143,11 +143,14 @@ describe("stock transfer", () => {
 });
 
 describe("stock issue", () => {
-  it("issues stock and is idempotent", async () => {
+  it("moves stock to a department (outlet total unchanged) and is idempotent", async () => {
     const before = await balance(outletA, mChicken);
-    const issue = await createIssue(ctx, { outletId: outletA, lines: [{ materialId: mChicken, qty: 5 }] });
+    const kitchen = (await prisma.department.create({ data: { organizationId: orgId, outletId: outletA, name: `Kitchen ${RUN}`, kind: "KITCHEN" } })).id;
+    const issue = await createIssue(ctx, { outletId: outletA, toDepartmentId: kitchen, lines: [{ materialId: mChicken, qty: 5 }] });
     await postIssue(ctx, issue.id);
-    expect(await balance(outletA, mChicken)).toBeCloseTo(before - 5, 6);
+    expect(await balance(outletA, mChicken)).toBeCloseTo(before, 6);
+    const inKitchen = await prisma.inventoryLedger.aggregate({ where: { outletId: outletA, materialId: mChicken, departmentId: kitchen }, _sum: { qty: true } });
+    expect(num(inKitchen._sum.qty!)).toBe(5);
     const rows = await prisma.inventoryLedger.count({ where: { sourceId: issue.id } });
     await postIssue(ctx, issue.id); // idempotent
     expect(await prisma.inventoryLedger.count({ where: { sourceId: issue.id } })).toBe(rows);

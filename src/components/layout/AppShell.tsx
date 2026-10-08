@@ -23,7 +23,7 @@ export function AppShell({ shell, nav, unread, children }: { shell: ShellData; n
       <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded-md focus:bg-paper focus:px-3 focus:py-2 focus:shadow-pop">
         Skip to content
       </a>
-      <aside className={`fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-espresso-700 bg-espresso text-paper transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
+      <aside className={`print:hidden fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-espresso-700 bg-espresso text-paper transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
         <div className="flex h-16 shrink-0 items-center justify-between gap-2 border-b border-espresso-700 px-4">
           <Link href="/dashboard" onClick={() => setOpen(false)} className="flex items-center gap-2.5 rounded-md outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-400">
             <BrandMark className="h-8 w-8" decorative />
@@ -43,7 +43,7 @@ export function AppShell({ shell, nav, unread, children }: { shell: ShellData; n
       {open && <div className="fixed inset-0 z-30 bg-espresso/50 backdrop-blur-sm lg:hidden" onClick={() => setOpen(false)} aria-hidden />}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-ink-300 bg-paper/90 px-4 backdrop-blur supports-[backdrop-filter]:bg-paper/80 lg:px-6">
+        <header className="print:hidden sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-ink-300 bg-paper/90 px-4 backdrop-blur supports-[backdrop-filter]:bg-paper/80 lg:px-6">
           <button type="button" className="rounded-md p-1.5 text-ink-600 hover:bg-ink-100 lg:hidden" onClick={() => setOpen(true)} aria-label="Open navigation" aria-expanded={open}>
             <Icon name="menu" className="h-5 w-5" />
           </button>

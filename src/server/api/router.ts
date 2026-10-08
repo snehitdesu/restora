@@ -104,6 +104,33 @@ export function assertSameOrigin(req: NextRequest) {
   throw new ForbiddenError("Cross-origin request rejected");
 }
 
+/** Request fields that name an outlet (query and JSON body). */
+const OUTLET_FIELDS = ["outletId", "fromOutletId", "toOutletId"] as const;
+
+/**
+ * Every outlet a request names must belong to the caller's organization:
+ * 404 otherwise (a foreign outlet id is not confirmed to exist). Services
+ * check outlet MEMBERSHIP (assertOutletAccess), but an org-wide role passes
+ * that check for any id, so without this an owner of organization X could
+ * create X-owned rows pointing at organization Y's outlet. Ownership only:
+ * a transfer may name a sister outlet the sender is not a member of.
+ */
+export async function assertNamedOutletsInOrg(ctx: AccessContext, query: Record<string, string>, body: unknown) {
+  const ids = new Set<string>();
+  const take = (src: unknown) => {
+    if (!src || typeof src !== "object" || Array.isArray(src)) return;
+    for (const f of OUTLET_FIELDS) {
+      const v = (src as Record<string, unknown>)[f];
+      if (typeof v === "string" && v) ids.add(v);
+    }
+  };
+  take(query);
+  take(body);
+  if (!ids.size) return;
+  const found = await prisma.outlet.findMany({ where: { id: { in: [...ids] }, organizationId: ctx.organizationId }, select: { id: true } });
+  if (found.length !== ids.size) throw new NotFoundError("Outlet not found");
+}
+
 /** Could some concrete path match both patterns? (Same length; each segment equal or a parameter.) */
 function overlaps(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((s, i) => s === b[i] || s.startsWith(":") || b[i].startsWith(":"));
@@ -187,12 +214,13 @@ export function createRouter(routes: Route[]) {
           }
         }
       }
+      const query = Object.fromEntries(req.nextUrl.searchParams.entries());
+      await assertNamedOutletsInOrg(current.ctx, query, body);
       // Step-up gate last, immediately before the handler: a request rejected for
-      // origin/size/JSON never records a REAUTH_USED for an action that did not run.
+      // origin/size/JSON/tenant never records a REAUTH_USED for an action that did not run.
       if (hit.r.reauth) {
         await requireFreshAuth(prisma, { session: current.session, organizationId: current.user.organizationId }, hit.r.reauth, { method, path, ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined });
       }
-      const query = Object.fromEntries(req.nextUrl.searchParams.entries());
       const result = await hit.r.handler({ ctx: current.ctx, user: current.user, params: hit.params!, query, body: body ?? {}, req });
       const durationMs = performance.now() - started;
       if (result instanceof Response) {

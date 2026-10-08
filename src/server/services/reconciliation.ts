@@ -9,6 +9,7 @@
  *   GATEWAY    payment provider's settlement report vs local payments
  *   AGGREGATOR aggregator settlement report vs expected payouts (AggregatorOrder)
  *   VENDOR     vendor bills vs vendor payments (data-integrity check)
+ *   SALES      revenue billed per channel vs declared by the manager (moneyDesk.ts)
  *
  * A run creates/refreshes a DRAFT (lines are recomputed from source data) and
  * may finalize it. COMPLETED reconciliations are locked: re-running is refused.
@@ -32,7 +33,7 @@ import { processPOSOrder } from "@/server/services/pos";
 import { D, money, num } from "@/domain/money";
 import { outletBusinessDay, type BusinessDateInput } from "@/server/services/businessDay";
 
-export type ReconciliationKind = "PAYMENTS" | "POS" | "GATEWAY" | "AGGREGATOR" | "VENDOR";
+export type ReconciliationKind = "PAYMENTS" | "POS" | "GATEWAY" | "AGGREGATOR" | "VENDOR" | "SALES";
 export const RECON_RULES = { mismatchTolerance: 1 };
 
 /**
@@ -104,6 +105,20 @@ export async function completeReconciliationTx(tx: Tx, ctx: AccessContext, recon
     });
   }
   return tx.reconciliation.findUniqueOrThrow({ where: { id: recon.id }, include: { lines: true } });
+}
+
+/**
+ * Unlock a COMPLETED reconciliation back to DRAFT. Only the day-close reopen
+ * (moneyDesk.reopenDay) calls this, inside its audited transaction; the
+ * lines stay until the next save recomputes them.
+ */
+export async function reopenReconciliationTx(tx: Tx, ctx: AccessContext, reconciliationId: string, reason: string) {
+  const recon = await tx.reconciliation.findUnique({ where: { id: reconciliationId } });
+  if (!recon || recon.organizationId !== ctx.organizationId) throw new NotFoundError("Reconciliation not found");
+  if (recon.status !== "COMPLETED") return recon;
+  const updated = await tx.reconciliation.update({ where: { id: recon.id }, data: { status: "DRAFT" } });
+  await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Reconciliation", entityId: recon.id, outletId: recon.outletId, before: { status: "COMPLETED" }, after: { status: "DRAFT", kind: recon.kind, reopened: true, reason } });
+  return updated;
 }
 
 export async function completeReconciliation(ctx: AccessContext, reconciliationId: string, db: Client = prisma) {

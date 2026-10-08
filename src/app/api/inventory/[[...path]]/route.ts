@@ -5,7 +5,12 @@ import { assertOutletAccess } from "@/server/db/scope";
 import { assertCan } from "@/server/auth/rbac";
 import { stockByOutlet, lowStock, stockMovement, recordOpeningStock, adjustStock } from "@/server/services/inventory";
 import { listUnmappedSales, resolveUnmappedSale } from "@/server/services/unmapped";
-import { createWastage, postWastage, cancelWastage, listWastage } from "@/server/services/wastage";
+import { createWastage, createDishWastage, postWastage, cancelWastage, listWastage } from "@/server/services/wastage";
+import { stockMatrix } from "@/server/services/departmentCosting";
+import { lookupStockLabel } from "@/server/services/stockLabels";
+import { labelSheet } from "@/server/services/inventoryInsights";
+import { getWorksheet, saveWorksheetEntry, recordWorksheetWastage } from "@/server/services/productionWorksheet";
+import { recordManualSales, listManualSales } from "@/server/services/manualSales";
 import { createProductionBatch, startProductionBatch, completeProductionBatch, cancelProductionBatch, listProductionBatches } from "@/server/services/production";
 import {
   createTransfer, dispatchTransfer, receiveTransfer, cancelTransfer,
@@ -13,6 +18,7 @@ import {
   createStockCount, startStockCount, enterStockCounts, submitStockCountForReview, approveStockCount, cancelStockCount,
 } from "@/server/services/stockOps";
 import { listLedger } from "@/server/services/adminQueries";
+import { canSeeStockValue } from "@/server/services/costVisibility";
 import { num } from "@/domain/money";
 import { listTransfers, getTransfer, listIssues, getIssue, listStockCounts, getStockCount, getWastage, getProductionBatch } from "@/server/services/documentQueries";
 
@@ -43,9 +49,11 @@ export const { GET, POST } = createRouter([
       // Additive display fields (name / sku / unit / reorder level) resolved in one bounded query.
       const materials = await prisma.material.findMany({ where: { organizationId: ctx.organizationId, id: { in: rows.map((r) => r.materialId) } }, select: { id: true, name: true, sku: true, reorderLevel: true, active: true, categoryId: true, baseUnit: { select: { code: true } } } });
       const byId = new Map(materials.map((m) => [m.id, m]));
+      // A kitchen login sees quantities only (proposal pp. 8, 12).
+      const costs = canSeeStockValue(ctx, outletId);
       return rows.map((r) => {
         const m = byId.get(r.materialId);
-        return { materialId: r.materialId, quantity: num(r.quantity), avgCost: num(r.avgCost), value: num(r.value), name: m?.name ?? null, sku: m?.sku ?? null, unit: m?.baseUnit?.code ?? null, reorderLevel: m ? num(m.reorderLevel) : 0, active: m?.active ?? false, categoryId: m?.categoryId ?? null };
+        return { materialId: r.materialId, quantity: num(r.quantity), avgCost: costs ? num(r.avgCost) : null, value: costs ? num(r.value) : null, name: m?.name ?? null, sku: m?.sku ?? null, unit: m?.baseUnit?.code ?? null, reorderLevel: m ? num(m.reorderLevel) : 0, active: m?.active ?? false, categoryId: m?.categoryId ?? null };
       });
     },
   },
@@ -62,10 +70,22 @@ export const { GET, POST } = createRouter([
     handler: async ({ ctx, query }) => {
       const q = outletQuery.extend({ materialId: z.string().min(1), take: z.coerce.number().int().positive().max(500).default(100) }).parse(query);
       canViewInventory(ctx, q.outletId);
-      return stockMovement(prisma, ctx, q.outletId, q.materialId, q.take);
+      const rows = await stockMovement(prisma, ctx, q.outletId, q.materialId, q.take);
+      return canSeeStockValue(ctx, q.outletId) ? rows : rows.map((r) => ({ ...r, rate: null, amount: null }));
     },
   },
   { method: "GET", path: "ledger", handler: ({ ctx, query }) => listLedger(prisma, ctx, query as never) },
+  // Materials x departments (values only for logins that may see costs).
+  { method: "GET", path: "matrix", handler: ({ ctx, query }) => stockMatrix(prisma, ctx, outletQuery.parse(query)) },
+  // QR stock labels: the sheet to print (SKU only) and the scan / typed-code look-up.
+  { method: "GET", path: "labels", handler: ({ ctx, query }) => labelSheet(prisma, ctx, query as never) },
+  { method: "GET", path: "labels/lookup", handler: ({ ctx, query }) => lookupStockLabel(prisma, ctx, query as never) },
+  // ---- dish production worksheet / manual sales log ----
+  { method: "GET", path: "worksheet", handler: ({ ctx, query }) => getWorksheet(prisma, ctx, query as never) },
+  { method: "POST", path: "worksheet", handler: ({ ctx, body }) => saveWorksheetEntry(ctx, body as never) },
+  { method: "POST", path: "worksheet/wastage", handler: ({ ctx, body, req }) => recordWorksheetWastage(ctx, body as never, idemKey(req)) },
+  { method: "GET", path: "manual-sales", handler: ({ ctx, query }) => listManualSales(prisma, ctx, query as never) },
+  { method: "POST", path: "manual-sales", handler: ({ ctx, body, req }) => recordManualSales(ctx, body as never, idemKey(req)) },
   // ---- opening stock / manual adjustments ----
   { method: "POST", path: "opening-stock", handler: ({ ctx, body }) => recordOpeningStock(ctx, body as never) },
   { method: "POST", path: "adjustments", handler: ({ ctx, body, req }) => adjustStock(ctx, body as never, idemKey(req)) },
@@ -76,12 +96,13 @@ export const { GET, POST } = createRouter([
   { method: "GET", path: "wastage", handler: ({ ctx, query }) => listWastage(prisma, ctx, { ...listQuery.extend({ outletId: z.string() }).parse(query), ...status.parse(query) } as never) },
   { method: "GET", path: "wastage/:id", handler: ({ ctx, params }) => getWastage(prisma, ctx, params.id) },
   { method: "POST", path: "wastage", handler: ({ ctx, body, req }) => createWastage(ctx, body as never, undefined, idemKey(req)) },
+  { method: "POST", path: "wastage/dish", handler: ({ ctx, body, req }) => createDishWastage(ctx, body as never, undefined, idemKey(req)) },
   { method: "POST", path: "wastage/:id/post", handler: ({ ctx, params }) => postWastage(ctx, params.id) },
   { method: "POST", path: "wastage/:id/cancel", handler: ({ ctx, params }) => cancelWastage(ctx, params.id) },
   // ---- production ----
-  { method: "GET", path: "production", handler: ({ ctx, query }) => listProductionBatches(prisma, ctx, { ...listQuery.extend({ outletId: z.string() }).parse(query), ...status.parse(query) } as never) },
+  { method: "GET", path: "production", handler: ({ ctx, query }) => listProductionBatches(prisma, ctx, { ...listQuery.extend({ outletId: z.string(), departmentId: z.string().optional() }).parse(query), ...status.parse(query) } as never) },
   { method: "GET", path: "production/:id", handler: ({ ctx, params }) => getProductionBatch(prisma, ctx, params.id) },
-  { method: "POST", path: "production", handler: ({ ctx, body }) => createProductionBatch(ctx, body as never) },
+  { method: "POST", path: "production", handler: ({ ctx, body, req }) => createProductionBatch(ctx, body as never, undefined, idemKey(req)) },
   { method: "POST", path: "production/:id/start", handler: ({ ctx, params }) => startProductionBatch(ctx, params.id) },
   { method: "POST", path: "production/:id/complete", handler: ({ ctx, params, body }) => completeProductionBatch(ctx, params.id, body as never) },
   { method: "POST", path: "production/:id/cancel", handler: ({ ctx, params }) => cancelProductionBatch(ctx, params.id) },

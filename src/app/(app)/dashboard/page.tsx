@@ -27,7 +27,7 @@ async function tile<T>(allowed: boolean, fn: () => Promise<T>): Promise<Tile<T>>
   }
 }
 
-function Stat({ label, value, hint, emphasis = false, tone = "brand" }: { label: string; value: React.ReactNode; hint?: string; emphasis?: boolean; tone?: "brand" | "accent" | "ok" | "warn" | "bad" | "neutral" }) {
+function Stat({ label, value, hint, emphasis = false, tone = "brand" }: { label: string; value: React.ReactNode; hint?: React.ReactNode; emphasis?: boolean; tone?: "brand" | "accent" | "ok" | "warn" | "bad" | "neutral" }) {
   const rail = { brand: "before:bg-brand-500", accent: "before:bg-vanilla-300", ok: "before:bg-ok-500", warn: "before:bg-warn-500", bad: "before:bg-bad-500", neutral: "before:bg-ink-300" }[tone];
   return (
     <div className={`relative overflow-hidden rounded-lg border bg-paper p-4 before:absolute before:inset-y-0 before:left-0 before:w-1 before:content-[''] ${rail} ${emphasis ? "border-ink-900 shadow-print sm:p-5" : "border-ink-200 shadow-card"}`}>
@@ -99,7 +99,7 @@ export default async function DashboardPage() {
         <section aria-label="Supporting metrics" className="grid grid-cols-2 gap-3 lg:grid-cols-3">
           {sales && <Stat tone="accent" label="Average order value" value={sales.ok ? formatMoney(sales.value.aov) : unavailable} hint="Settled orders today" />}
           {tables && <Stat tone="ok" label="Open tables" value={tables.ok ? `${availableTables} / ${tables.value.length}` : unavailable} hint="Available now" />}
-          {stockAlerts && <Stat tone={stockAlerts.ok && stockAlerts.value.length > 0 ? "warn" : "ok"} label="Low stock" value={stockAlerts.ok ? stockAlerts.value.length : unavailable} hint="At or below reorder level" />}
+          {stockAlerts && <Stat tone={stockAlerts.ok && stockAlerts.value.length > 0 ? "warn" : "ok"} label="Low stock" value={stockAlerts.ok ? stockAlerts.value.length : unavailable} hint={has.has("purchase.view") ? <>At or below reorder level · <Link href="/procurement/reorder" className="text-brand-600 hover:underline">Open reorder</Link></> : "At or below reorder level"} />}
         </section>
       )}
 

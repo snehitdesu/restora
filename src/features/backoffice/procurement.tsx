@@ -16,6 +16,7 @@ import { useShell, useOutletId } from "@/lib/shellContext";
 import { createKeyedSubmitter, newIdempotencyKey } from "@/lib/idempotency";
 import { formatDate, formatDateTime, formatMoney, formatQty, shortRef } from "@/lib/format";
 import { IndentStatus, PurchaseOrderStatus, GRNStatus, PurchaseBillStatus, VendorPaymentMethod, INDENT_TRANSITIONS, PURCHASE_ORDER_TRANSITIONS, GRN_TRANSITIONS, PURCHASE_BILL_TRANSITIONS } from "@/constants/enums";
+import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Field, FormDialog, Input, Select, Textarea, opt } from "@/components/ui/Form";
@@ -27,13 +28,14 @@ import { DocumentList, TransitionBar, cancelConfirm, type Doc } from "@/features
 import { LineEditor, emptyLine, toApiLines, type LineDraft, type LineField } from "@/features/backoffice/LineEditor";
 import { VendorSelect, materialLabel, unitOf, useDepartments, useMaterials, useVendors, vendorLabel } from "@/features/backoffice/lookups";
 
-function ProcureNav() {
+export function ProcureNav() {
   const { can } = useShell();
   return (
     <SubNav
       label="Procurement"
       items={[
-        { href: "/procurement/indents", label: "Indents", hidden: !can("purchase.view") },
+        { href: "/procurement/reorder", label: "Reorder", hidden: !can("purchase.view") },
+        { href: "/procurement/indents", label: "Indents", hidden: !can("purchase.view") && !can("indent.create") },
         { href: "/procurement/purchase-orders", label: "Purchase orders", hidden: !can("purchase.view") },
         { href: "/procurement/grns", label: "Goods receipts", hidden: !can("purchase.view") },
         { href: "/procurement/bills", label: "Bills", hidden: !can("purchase.view") },
@@ -44,9 +46,9 @@ function ProcureNav() {
 }
 
 type IndentLine = { id: string; materialId: string; qty: string; unitId: string | null };
-type Indent = Doc & { departmentId: string | null; notes: string | null; outletId: string; lines?: IndentLine[]; _count?: { lines: number } };
+type Indent = Doc & { departmentId: string | null; notes: string | null; outletId: string; source?: string | null; lines?: IndentLine[]; _count?: { lines: number } };
 type POLine = { id: string; materialId: string; qty: string; rate: string; taxPct: string; receivedQty: string };
-type PO = Doc & { vendorId: string; outletId: string; expectedDate: string | null; subtotal: string; tax: string; total: string; notes: string | null; approvedAt: string | null; lines?: POLine[]; receipts?: Array<{ id: string; number: string; status: string; receivedAt: string }>; _count?: { lines: number; receipts: number } };
+type PO = Doc & { vendorId: string; outletId: string; source?: string | null; expectedDate: string | null; subtotal: string; tax: string; total: string; notes: string | null; approvedAt: string | null; lines?: POLine[]; receipts?: Array<{ id: string; number: string; status: string; receivedAt: string }>; _count?: { lines: number; receipts: number } };
 type GRNLine = { id: string; materialId: string; qty: string; rate: string; damagedQty: string; batchNo: string | null; expiryDate: string | null };
 type GRN = Doc & { vendorId: string; poId: string | null; outletId: string; receivedAt: string; postedAt: string | null; notes: string | null; lines?: GRNLine[]; bills?: Array<{ id: string; number: string; status: string }>; _count?: { lines: number } };
 type BillLine = { id: string; materialId: string; qty: string; rate: string; taxPct: string };
@@ -55,6 +57,9 @@ type Bill = Doc & { vendorId: string; grnId: string | null; outletId: string; bi
 type DueRow = { vendorId: string; vendorName: string; openBills: number; billed: number; paid: number; due: number; overdue: number };
 
 const numberCol = <T extends Doc>(): Column<T> => ({ key: "number", header: "Number", cell: (r) => <span className="font-medium text-ink-900">{r.number}</span> });
+/** Documents raised from the reorder screen carry source "REORDER". */
+const sourceBadge = (source?: string | null) => (source === "REORDER" ? <Badge tone="info" className="ml-2">From reorder</Badge> : null);
+const numberWithSourceCol = <T extends Doc & { source?: string | null }>(): Column<T> => ({ key: "number", header: "Number", cell: (r) => <span className="font-medium text-ink-900">{r.number}{sourceBadge(r.source)}</span> });
 const statusCol = <T extends Doc>(): Column<T> => ({ key: "status", header: "Status", cell: (r) => <StatusBadge status={r.status} /> });
 const createdCol = <T extends Doc>(tz?: string): Column<T> => ({ key: "createdAt", header: "Created", cell: (r) => formatDateTime(r.createdAt, tz) });
 
@@ -82,7 +87,7 @@ function CreateIndentDialog({ open, onClose, onDone }: { open: boolean; onClose:
   const [departmentId, setDepartmentId] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([emptyLine(indentFields)]);
   return (
-    <FormDialog open={open} onClose={onClose} title="New purchase indent" size="lg" submitLabel="Create indent"
+    <FormDialog open={open} onClose={onClose} title="New indent" size="lg" submitLabel="Create indent"
       onSubmit={() => api<Indent>("/api/procurement/indents", { method: "POST", body: { outletId, departmentId: opt(departmentId), lines: toApiLines(lines, indentFields) } })}
       onDone={(r) => { setLines([emptyLine(indentFields)]); onDone(r.id); }}>
       <Field label="Department" name="departmentId">
@@ -102,10 +107,10 @@ export function IndentsScreen() {
   const [rk, setRk] = useState(0);
   return (
     <>
-      <PageHeader title="Purchase indents" subtitle="Internal purchase requests for this outlet" actions={can("purchase.create") && <Button variant="primary" onClick={() => setOpen(true)}><Icon name="plus" /> New indent</Button>} />
+      <PageHeader title="Indents" subtitle="Requests to the store or for purchase: the kitchen raises them, the store fulfils them" actions={can("indent.create") && <Button variant="primary" onClick={() => setOpen(true)}><Icon name="plus" /> New indent</Button>} />
       <ProcureNav />
       <DocumentList<Indent> label="Indents" endpoint="/api/procurement/indents" statuses={IndentStatus.values} reloadKey={rk} detailHref={(r) => `/procurement/indents/${r.id}`}
-        columns={[numberCol(), statusCol(), { key: "lines", header: "Lines", numeric: true, cell: (r) => r._count?.lines ?? "—" }, createdCol(outlet?.timezone)]} />
+        columns={[numberWithSourceCol(), statusCol(), { key: "lines", header: "Lines", numeric: true, cell: (r) => r._count?.lines ?? "—" }, createdCol(outlet?.timezone)]} />
       <CreateIndentDialog open={open} onClose={() => setOpen(false)} onDone={() => setRk((k) => k + 1)} />
     </>
   );
@@ -125,10 +130,10 @@ export function IndentDetail({ id }: { id: string }) {
             actions={
               <TransitionBar status={d.status as IndentStatus} table={INDENT_TRANSITIONS} onDone={q.reload}
                 specs={{
-                  SUBMITTED: { label: "Submit", permission: "purchase.create", action: t("SUBMITTED") },
+                  SUBMITTED: { label: "Submit", permission: "indent.create", action: t("SUBMITTED") },
                   APPROVED: { label: "Approve", permission: "purchase.approve", action: t("APPROVED"), variant: "success" },
                   CLOSED: { label: "Close", permission: "purchase.create", action: t("CLOSED"), variant: "secondary", confirm: { title: "Close indent?", message: "Closing marks the indent fulfilled." } },
-                  CANCELLED: { label: "Cancel", permission: "purchase.create", action: t("CANCELLED"), confirm: cancelConfirm("indent") },
+                  CANCELLED: { label: "Cancel", permission: d.status === "APPROVED" ? "purchase.create" : "indent.create", action: t("CANCELLED"), confirm: cancelConfirm("indent") },
                 }}
                 extra={d.status === "APPROVED" && can("purchase.create") && <Button onClick={() => setPoOpen(true)}><Icon name="cart" /> Create PO</Button>}
               />
@@ -198,7 +203,7 @@ export function PurchaseOrdersScreen() {
       <ProcureNav />
       <DocumentList<PO> label="Purchase orders" endpoint="/api/procurement/purchase-orders" statuses={PurchaseOrderStatus.values} vendorFilter reloadKey={rk} detailHref={(r) => `/procurement/purchase-orders/${r.id}`}
         columns={[
-          numberCol(), statusCol(),
+          numberWithSourceCol(), statusCol(),
           { key: "vendor", header: "Vendor", cell: (r) => vendorLabel(vendors.byId, r.vendorId) },
           { key: "expected", header: "Expected", cell: (r) => formatDate(r.expectedDate, outlet?.timezone) },
           { key: "receipts", header: "GRNs", numeric: true, cell: (r) => r._count?.receipts ?? 0 },

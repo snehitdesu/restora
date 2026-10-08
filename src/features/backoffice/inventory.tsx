@@ -30,26 +30,33 @@ import { LoadingState, ErrorState } from "@/components/ui/States";
 import { DateRangeFilter, FilterBar, SearchInput, SelectFilter, rangeToQuery, type DateRange } from "@/components/ui/Filters";
 import { DocumentList, TransitionBar, cancelConfirm, type Doc } from "@/features/backoffice/documents";
 import { LineEditor, emptyLine, toApiLines, type LineDraft, type LineField } from "@/features/backoffice/LineEditor";
-import { MaterialSelect, materialLabel, unitOf, useDepartments, useMaterials, type DepartmentRow } from "@/features/backoffice/lookups";
+import { MaterialSelect, materialLabel, unitOf, useCanSeeCost, useDepartments, useMaterials, type DepartmentRow } from "@/features/backoffice/lookups";
+import { ProductionNav } from "@/features/backoffice/kitchen";
 import { ActionButton } from "@/components/ui/Confirm";
 
 // ---------------- types (API shapes) ----------------
 
-export type StockRow = { materialId: string; quantity: number; avgCost: number; value: number; name: string | null; sku: string | null; unit: string | null; reorderLevel: number; active: boolean; categoryId: string | null };
+export type StockRow = { materialId: string; quantity: number; avgCost: number | null; value: number | null; name: string | null; sku: string | null; unit: string | null; reorderLevel: number; active: boolean; categoryId: string | null };
 type LowStockRow = { materialId: string; sku: string; name: string; quantity: number; reorderLevel: number };
-export type LedgerRow = { id: string; createdAt: string; materialId: string; materialName: string; sku: string; unit: string | null; txnType: string; qty: number; rate: number; amount: number; sourceType: string | null; sourceId: string | null; departmentId: string | null; batchNo: string | null; note: string | null };
+export type LedgerRow = { id: string; createdAt: string; materialId: string; materialName: string; sku: string; unit: string | null; txnType: string; qty: number; rate: number | null; amount: number | null; sourceType: string | null; sourceId: string | null; departmentId: string | null; batchNo: string | null; note: string | null };
 
 type TransferLine = { id: string; materialId: string; requestedQty: string; dispatchedQty: string; receivedQty: string; damagedQty: string };
 type Transfer = Doc & { fromOutletId: string; toOutletId: string; notes: string | null; dispatchedAt: string | null; receivedAt: string | null; lines?: TransferLine[]; _count?: { lines: number } };
 type IssueLine = { id: string; materialId: string; qty: string };
 type Issue = Doc & { outletId: string; fromDepartmentId: string | null; toDepartmentId: string | null; notes: string | null; issuedAt: string | null; lines?: IssueLine[]; _count?: { lines: number } };
-type CountLine = { id: string; materialId: string; bookQty: string; physicalQty: string; variance: string; costImpact: string };
+type CountLine = { id: string; materialId: string; bookQty: string; physicalQty: string; variance: string; costImpact: string | null };
 type StockCount = Doc & { outletId: string; departmentId: string | null; frozenAt: string | null; approvedAt: string | null; lines?: CountLine[]; _count?: { lines: number } };
-type WastageLine = { id: string; materialId: string; qty: string; estCost: string };
-type Wastage = Doc & { outletId: string; departmentId: string | null; reason: string; notes: string | null; lines: WastageLine[] };
+type WastageLine = { id: string; materialId: string; qty: string; estCost: string | null };
+type Wastage = Doc & { outletId: string; departmentId: string | null; reason: string; notes: string | null; menuItemId?: string | null; dishQty?: string | null; occurredAt?: string | null; lines: WastageLine[] };
 type ProductionLine = { id: string; materialId: string; qty: string };
-type Batch = Doc & { outletId: string; outputMaterialId: string; recipeVersionId: string | null; plannedQty: string; actualQty: string; batchNo: string | null; expiryDate: string | null; completedAt: string | null; lines: ProductionLine[] };
-type RecipeRow = { id: string; name: string; outputType: string; outputMaterialId: string | null; active: boolean };
+type Batch = Doc & { outletId: string; departmentId?: string | null; outputMaterialId: string; recipeVersionId: string | null; plannedQty: string; actualQty: string; batchNo: string | null; expiryDate: string | null; completedAt: string | null; lines: ProductionLine[] };
+/** The detail read adds people, yield and (for cost viewers, once completed) what the batch cost. */
+type BatchDetail = Batch & {
+  plannedByName?: string | null; completedByName?: string | null;
+  yieldVariance?: { qty: number; pct: number | null } | null;
+  costing?: { inputCost: number; unitCost: number | null; inputs: Array<{ materialId: string; qty: number; rate: number; cost: number }> } | null;
+};
+type RecipeRow = { id: string; name: string; outputType: string; outputMaterialId: string | null; active: boolean; stocked?: boolean };
 
 // ---------------- shared helpers ----------------
 
@@ -80,9 +87,9 @@ function deptName(depts: DepartmentRow[] | undefined, id: string | null): string
   return depts?.find((d) => d.id === id)?.name ?? `#${shortRef(id)}`;
 }
 
-function DepartmentSelect({ depts, value, onChange, empty = "—" }: { depts: DepartmentRow[] | undefined; value: string; onChange: (v: string) => void; empty?: string }) {
+function DepartmentSelect({ depts, value, onChange, empty = "—", required }: { depts: DepartmentRow[] | undefined; value: string; onChange: (v: string) => void; empty?: string; required?: boolean }) {
   return (
-    <Select value={value} onChange={(e) => onChange(e.target.value)}>
+    <Select value={value} onChange={(e) => onChange(e.target.value)} required={required}>
       <option value="">{empty}</option>
       {(depts ?? []).filter((d) => d.active || d.id === value).map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
     </Select>
@@ -98,6 +105,7 @@ type StockView = "all" | "low" | "negative";
 export function StockScreen() {
   const router = useRouter();
   const { outletId, can } = useShell();
+  const showCost = useCanSeeCost();
   const [dialog, setDialog] = useState<null | "opening" | "adjust">(null);
   const stock = useQuery<StockRow[]>(outletId ? "/api/inventory/stock" : null, { outletId: outletId ?? undefined });
   const low = useQuery<LowStockRow[]>(outletId ? "/api/inventory/low-stock" : null, { outletId: outletId ?? undefined });
@@ -106,7 +114,7 @@ export function StockScreen() {
   // "Low" is the server's reorder-level check (/low-stock), not recomputed here.
   const lowIds = useMemo(() => new Set((low.data ?? []).map((r) => r.materialId)), [low.data]);
   const rows = stock.data ?? [];
-  const totalValue = rows.reduce((a, r) => a + r.value, 0);
+  const totalValue = rows.reduce((a, r) => a + (r.value ?? 0), 0);
   const negative = rows.filter((r) => r.quantity < 0);
   const term = search.toLowerCase();
   const visible = rows
@@ -122,13 +130,14 @@ export function StockScreen() {
           {can("inventory.adjust") && <Button onClick={() => setDialog("opening")}>Opening stock</Button>}
           {can("inventory.adjust") && <Button onClick={() => setDialog("adjust")}>Adjust stock</Button>}
           <Link href="/inventory/ledger" className="text-sm text-brand-600 hover:underline">Open ledger →</Link>
+          {can("purchase.view") && <Link href="/procurement/reorder" className="text-sm text-brand-600 hover:underline">Open reorder →</Link>}
         </div>
       } />
       {dialog === "opening" && <OpeningStockDialog onClose={() => setDialog(null)} onDone={stock.reload} />}
       {dialog === "adjust" && <AdjustStockDialog onClose={() => setDialog(null)} onDone={stock.reload} />}
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Materials with stock history" value={stock.data ? rows.length : "…"} />
-        <Stat label="Stock value" value={stock.data ? formatMoney(totalValue) : "…"} hint="Quantity × weighted average cost" />
+        {showCost && <Stat label="Stock value" value={stock.data ? formatMoney(totalValue) : "…"} hint="Quantity × weighted average cost" />}
         <Stat label="At / below reorder level" value={low.data ? low.data.length : "…"} tone={low.data?.length ? "bad" : undefined} />
         <Stat label="Negative balances" value={stock.data ? negative.length : "…"} tone={negative.length ? "bad" : undefined} hint={negative.length ? "Needs a stock count" : undefined} />
       </div>
@@ -149,8 +158,10 @@ export function StockScreen() {
           { key: "qty", header: "On hand", numeric: true, cell: (r) => <span className={`text-base font-semibold tabular-nums ${r.quantity < 0 ? "text-bad-600" : "text-ink-900"}`}>{formatQty(r.quantity)} <span className="text-xs font-medium text-ink-500">{r.unit ?? ""}</span></span> },
           { key: "reorder", header: "Reorder at", numeric: true, cell: (r) => (r.reorderLevel > 0 ? formatQty(r.reorderLevel) : "—") },
           { key: "flag", header: "Status", cell: (r) => (r.quantity < 0 ? <Badge tone="bad">Negative</Badge> : lowIds.has(r.materialId) ? <Badge tone="warn">Low</Badge> : <Badge tone="ok">Healthy</Badge>) },
-          { key: "avg", header: "Avg cost", numeric: true, cell: (r) => formatMoney(r.avgCost) },
-          { key: "value", header: "Value", numeric: true, cell: (r) => formatMoney(r.value) },
+          ...(showCost ? [
+            { key: "avg", header: "Avg cost", numeric: true, cell: (r: StockRow) => formatMoney(r.avgCost) },
+            { key: "value", header: "Value", numeric: true, cell: (r: StockRow) => formatMoney(r.value) },
+          ] : []),
         ]}
       />
       <UnmappedSalesCard />
@@ -288,6 +299,7 @@ function MapUnmappedDialog({ sale, onClose, onDone }: { sale: UnmappedRow; onClo
 
 export function MaterialStockDetail({ materialId }: { materialId: string }) {
   const { outletId, outlet } = useShell();
+  const showCost = useCanSeeCost();
   const materials = useMaterials();
   const stock = useQuery<StockRow[]>(outletId ? "/api/inventory/stock" : null, { outletId: outletId ?? undefined });
   const [txnType, setTxnType] = useState("");
@@ -302,8 +314,8 @@ export function MaterialStockDetail({ materialId }: { materialId: string }) {
       <PageHeader title={title} subtitle={row?.sku ?? m?.sku ?? undefined} back={{ href: "/inventory", label: "Stock" }} />
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="On hand" value={stock.data ? `${formatQty(row?.quantity ?? 0)} ${unit}` : "…"} tone={row && row.quantity < 0 ? "bad" : undefined} />
-        <Stat label="Avg cost" value={stock.data ? formatMoney(row?.avgCost ?? 0) : "…"} />
-        <Stat label="Value" value={stock.data ? formatMoney(row?.value ?? 0) : "…"} />
+        {showCost && <Stat label="Avg cost" value={stock.data ? formatMoney(row?.avgCost ?? 0) : "…"} />}
+        {showCost && <Stat label="Value" value={stock.data ? formatMoney(row?.value ?? 0) : "…"} />}
         <Stat label="Reorder level" value={m ? formatQty(m.reorderLevel) : row ? formatQty(row.reorderLevel) : "…"} />
       </div>
       {stock.error ? <ErrorState error={stock.error} onRetry={stock.reload} compact /> : null}
@@ -323,13 +335,16 @@ export function MaterialStockDetail({ materialId }: { materialId: string }) {
 // ============================================================
 
 function LedgerTable({ rows, loading, error, onRetry, tz, showMaterial = true, filtered }: { rows: LedgerRow[]; loading: boolean; error: unknown; onRetry: () => void; tz?: string; showMaterial?: boolean; filtered: boolean }) {
+  const showCost = useCanSeeCost();
   const cols: Column<LedgerRow>[] = [
     { key: "at", header: "When", cell: (r) => formatDateTime(r.createdAt, tz) },
     ...(showMaterial ? [{ key: "m", header: "Material", cell: (r: LedgerRow) => <Link className="text-brand-600 hover:underline" href={`/inventory/stock/${r.materialId}`}>{r.materialName} <span className="text-ink-500">({r.sku})</span></Link> }] : []),
     { key: "t", header: "Type", cell: (r) => humanize(r.txnType) },
     { key: "q", header: "Qty", numeric: true, cell: (r) => <SignedQty qty={r.qty} unit={r.unit} /> },
-    { key: "rate", header: "Rate", numeric: true, cell: (r) => formatMoney(r.rate) },
-    { key: "amt", header: "Amount", numeric: true, cell: (r) => formatMoney(r.amount) },
+    ...(showCost ? [
+      { key: "rate", header: "Rate", numeric: true, cell: (r: LedgerRow) => formatMoney(r.rate) },
+      { key: "amt", header: "Amount", numeric: true, cell: (r: LedgerRow) => formatMoney(r.amount) },
+    ] : []),
     {
       key: "src", header: "Source", cell: (r) => {
         const href = ledgerSourceHref(r.sourceType, r.sourceId);
@@ -534,15 +549,15 @@ function CreateIssueDialog({ open, onClose, onDone }: { open: boolean; onClose: 
   const [lines, setLines] = useState<LineDraft[]>([emptyLine(issueFields)]);
   return (
     <FormDialog open={open} onClose={onClose} title="New stock issue" size="lg" submitLabel="Create issue (draft)"
-      description="Issuing stock writes ISSUE rows to the ledger when the document is posted."
+      description="An issue moves stock from one department (or stock not yet assigned to one) to another. Posting writes an ISSUE row out of the source and one into the destination at the same cost; the outlet's total stock does not change."
       onSubmit={() => {
         const body = { outletId, fromDepartmentId: opt(from), toDepartmentId: opt(to), notes: opt(notes), lines: toApiLines(lines, issueFields) };
         return submitKeyed(body, (idempotencyKey) => api<Issue>("/api/inventory/issues", { method: "POST", body, idempotencyKey }));
       }}
       onDone={(r) => { setLines([emptyLine(issueFields)]); onDone(r.id); }}>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="From department" name="fromDepartmentId"><DepartmentSelect depts={depts.data} value={from} onChange={setFrom} /></Field>
-        <Field label="To department" name="toDepartmentId"><DepartmentSelect depts={depts.data} value={to} onChange={setTo} /></Field>
+        <Field label="From department" name="fromDepartmentId" hint="Empty = stock not assigned to a department (where goods receipts land)"><DepartmentSelect depts={depts.data} value={from} onChange={setFrom} empty="Unassigned stock" /></Field>
+        <Field label="To department" name="toDepartmentId" required><DepartmentSelect depts={depts.data} value={to} onChange={setTo} empty="Select…" required /></Field>
       </div>
       <Field label="Notes" name="notes"><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={1000} /></Field>
       <LineEditor fields={issueFields} lines={lines} onChange={setLines} materials={materials.items} />
@@ -645,6 +660,7 @@ export function changedEntries(lines: CountLine[], drafts: Record<string, string
 
 export function StockCountDetail({ id }: { id: string }) {
   const { can, outlet, outletId } = useShell();
+  const showCost = useCanSeeCost();
   const q = useQuery<StockCount>(`/api/inventory/counts/${id}`);
   const materials = useMaterials();
   const depts = useDepartments(outletId);
@@ -692,7 +708,7 @@ export function StockCountDetail({ id }: { id: string }) {
             <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
               <Stat label="Materials" value={lines.length} />
               <Stat label="With variance" value={withVariance} tone={withVariance ? "bad" : undefined} />
-              <Stat label="Net cost impact" value={formatMoney(totalImpact)} tone={totalImpact < 0 ? "bad" : undefined} hint="Server-computed at average cost" />
+              {showCost && <Stat label="Net cost impact" value={formatMoney(totalImpact)} tone={totalImpact < 0 ? "bad" : undefined} hint="Server-computed at average cost" />}
               <Stat label="Frozen" value={formatDateTime(d.frozenAt, outlet?.timezone)} />
             </div>
             <Card className="mb-4"><Details cols={4} items={[["Department", d.departmentId ? deptName(depts.data, d.departmentId) : "Whole outlet"], ["Created", formatDateTime(d.createdAt, outlet?.timezone)], ["Approved", formatDateTime(d.approvedAt, outlet?.timezone)]]} /></Card>
@@ -716,7 +732,7 @@ export function StockCountDetail({ id }: { id: string }) {
                       ) : formatQty(l.physicalQty),
                   },
                   { key: "v", header: "Variance", numeric: true, cell: (l) => <SignedQty qty={toNumber(l.variance)} /> },
-                  { key: "c", header: "Cost impact", numeric: true, cell: (l) => <span className={toNumber(l.costImpact) < 0 ? "text-bad-500" : ""}>{formatMoney(l.costImpact)}</span> },
+                  ...(showCost ? [{ key: "c", header: "Cost impact", numeric: true, cell: (l: CountLine) => <span className={toNumber(l.costImpact) < 0 ? "text-bad-500" : ""}>{formatMoney(l.costImpact)}</span> }] : []),
                 ]} />
             )}
           </>
@@ -736,26 +752,46 @@ const wastageCost = (w: Wastage) => w.lines.reduce((a, l) => a + toNumber(l.estC
 function CreateWastageDialog({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: (id: string) => void }) {
   const [submitKeyed] = useState(() => createKeyedSubmitter("wst"));
   const outletId = useOutletId();
+  const { can } = useShell();
   const materials = useMaterials(open);
   const depts = useDepartments(open ? outletId : null);
+  const dishes = useQuery<Array<{ id: string; name: string; active: boolean }>>(open && can("menu.view") ? "/api/menu" : null, { activeOnly: "true" });
+  const [mode, setMode] = useState<"materials" | "dish">("materials");
   const [reason, setReason] = useState<string>("SPOILAGE");
   const [departmentId, setDepartmentId] = useState("");
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([emptyLine(wastageFields)]);
+  const [menuItemId, setMenuItemId] = useState("");
+  const [dishQty, setDishQty] = useState("");
   return (
     <FormDialog open={open} onClose={onClose} title="Record wastage" size="lg" submitLabel="Save draft"
-      description="Wastage is saved as a draft; stock is deducted only when it is posted."
+      description={mode === "dish" ? "Whole dishes: the recipe is taken out of stock at plate cost when the draft is posted." : "Wastage is saved as a draft; stock is deducted only when it is posted."}
       onSubmit={() => {
+        if (mode === "dish") {
+          const body = { outletId, menuItemId, qty: Number(dishQty), reason, departmentId: opt(departmentId), notes: opt(notes) };
+          return submitKeyed(body, (idempotencyKey) => api<Wastage>("/api/inventory/wastage/dish", { method: "POST", body, idempotencyKey }));
+        }
         const body = { outletId, reason, departmentId: opt(departmentId), notes: opt(notes), lines: toApiLines(lines, wastageFields) };
         return submitKeyed(body, (idempotencyKey) => api<Wastage>("/api/inventory/wastage", { method: "POST", body, idempotencyKey }));
       }}
-      onDone={(r) => { setLines([emptyLine(wastageFields)]); onDone(r.id); }}>
+      onDone={(r) => { setLines([emptyLine(wastageFields)]); setMenuItemId(""); setDishQty(""); onDone(r.id); }}>
+      {can("menu.view") && <Tabs label="What was wasted" value={mode} onChange={setMode} options={[{ value: "materials", label: "Ingredients" }, { value: "dish", label: "Whole dishes" }]} />}
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Reason" name="reason" required><Select value={reason} onChange={(e) => setReason(e.target.value)}>{WastageReason.values.map((r) => <option key={r} value={r}>{humanize(r)}</option>)}</Select></Field>
-        <Field label="Department" name="departmentId"><DepartmentSelect depts={depts.data} value={departmentId} onChange={setDepartmentId} /></Field>
+        <Field label="Department" name="departmentId" hint={mode === "dish" ? "Defaults to the department that makes the dish" : undefined}><DepartmentSelect depts={depts.data} value={departmentId} onChange={setDepartmentId} /></Field>
       </div>
+      {mode === "dish" ? (
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Field label="Dish" name="menuItemId" required className="sm:col-span-2">
+            <Select value={menuItemId} onChange={(e) => setMenuItemId(e.target.value)} required>
+              <option value="">Select dish…</option>
+              {(dishes.data ?? []).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </Select>
+          </Field>
+          <Field label="Portions" name="qty" required><Input type="number" inputMode="decimal" min="0" step="any" required value={dishQty} onChange={(e) => setDishQty(e.target.value)} /></Field>
+        </div>
+      ) : <LineEditor fields={wastageFields} lines={lines} onChange={setLines} materials={materials.items} />}
       <Field label="Notes" name="notes"><Textarea value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={1000} /></Field>
-      <LineEditor fields={wastageFields} lines={lines} onChange={setLines} materials={materials.items} />
     </FormDialog>
   );
 }
@@ -763,6 +799,7 @@ function CreateWastageDialog({ open, onClose, onDone }: { open: boolean; onClose
 export function WastageScreen() {
   const router = useRouter();
   const { can, outlet } = useShell();
+  const showCost = useCanSeeCost();
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -771,8 +808,8 @@ export function WastageScreen() {
         columns={[
           numberCol(), statusCol(),
           { key: "reason", header: "Reason", cell: (r) => humanize(r.reason) },
-          { key: "lines", header: "Lines", numeric: true, cell: (r) => r.lines.length },
-          { key: "cost", header: "Cost", numeric: true, cell: (r) => (r.status === "POSTED" ? formatMoney(wastageCost(r)) : "—") },
+          { key: "what", header: "What", cell: (r) => (r.dishQty ? `${formatQty(r.dishQty)} × dish` : `${r.lines.length} material${r.lines.length === 1 ? "" : "s"}`) },
+          ...(showCost ? [{ key: "cost", header: "Cost", numeric: true, cell: (r: Wastage) => (r.status === "POSTED" ? formatMoney(wastageCost(r)) : "—") }] : []),
           createdCol(outlet?.timezone),
         ]} />
       <CreateWastageDialog open={open} onClose={() => setOpen(false)} onDone={(id) => router.push(`/inventory/wastage/${id}`)} />
@@ -782,6 +819,7 @@ export function WastageScreen() {
 
 export function WastageDetail({ id }: { id: string }) {
   const { outlet, outletId } = useShell();
+  const showCost = useCanSeeCost();
   const q = useQuery<Wastage>(`/api/inventory/wastage/${id}`);
   const materials = useMaterials();
   const depts = useDepartments(outletId);
@@ -798,13 +836,13 @@ export function WastageDetail({ id }: { id: string }) {
                 }} />
             } />
           <Card className="mb-4">
-            <Details cols={4} items={[["Reason", humanize(d.reason)], ["Department", deptName(depts.data, d.departmentId)], ["Created", formatDateTime(d.createdAt, outlet?.timezone)], ["Cost", d.status === "POSTED" ? <strong key="c">{formatMoney(wastageCost(d))}</strong> : "Set when posted"], ["Notes", d.notes]]} />
+            <Details cols={4} items={[["Reason", humanize(d.reason)], ["Department", deptName(depts.data, d.departmentId)], ["Created", formatDateTime(d.createdAt, outlet?.timezone)], d.occurredAt ? ["Happened", formatDateTime(d.occurredAt, outlet?.timezone)] : null, showCost && ["Cost", d.status === "POSTED" ? <strong key="c">{formatMoney(wastageCost(d))}</strong> : "Set when posted"], ["Notes", d.notes]]} />
           </Card>
           <DataTable label="Wastage lines" rows={d.lines} rowKey={(l) => l.id}
             columns={[
               { key: "m", header: "Material", cell: (l) => materialLabel(materials.byId, l.materialId) },
               { key: "q", header: "Qty", numeric: true, cell: (l) => `${formatQty(l.qty)} ${unitOf(materials.byId, l.materialId)}` },
-              { key: "c", header: "Est. cost", numeric: true, cell: (l) => (d.status === "POSTED" ? formatMoney(l.estCost) : "—") },
+              ...(showCost ? [{ key: "c", header: "Est. cost", numeric: true, cell: (l: WastageLine) => (d.status === "POSTED" ? formatMoney(l.estCost) : "—") }] : []),
             ]} />
         </>
       )}
@@ -819,23 +857,31 @@ export function WastageDetail({ id }: { id: string }) {
 function CreateBatchDialog({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: (id: string) => void }) {
   const outletId = useOutletId();
   const { can } = useShell();
+  const [submitKeyed] = useState(() => createKeyedSubmitter("prd"));
   const recipes = useQuery<RecipeRow[]>(open && can("recipe.view") ? "/api/recipes" : null, { outputType: "SUB_RECIPE", take: 500 });
+  const depts = useDepartments(open ? outletId : null);
+  const [departmentId, setDepartmentId] = useState("");
   const [recipeId, setRecipeId] = useState("");
   const [plannedQty, setPlannedQty] = useState("");
   const [batchNo, setBatchNo] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
-  const list = (recipes.data ?? []).filter((r) => r.active && r.outputMaterialId);
+  // Only batch-produced sub-recipes: dishes draw on their prepared stock, so producing them consumes the ingredients once.
+  const list = (recipes.data ?? []).filter((r) => r.active && r.outputMaterialId && r.stocked);
   return (
     <FormDialog open={open} onClose={onClose} title="Plan production batch" submitLabel="Create batch"
       description="Input quantities are planned from the recipe version in effect; stock moves only when the batch is completed."
-      onSubmit={() => api<Batch>("/api/inventory/production", { method: "POST", body: { outletId, recipeId, plannedQty: Number(plannedQty), batchNo: opt(batchNo), expiryDate: opt(expiryDate) } })} onDone={(r) => onDone(r.id)}>
-      <Field label="Sub-recipe" name="recipeId" required hint={!can("recipe.view") ? "Viewing recipes requires recipe access." : recipes.data && !list.length ? "No active sub-recipes with an output material." : undefined}>
+      onSubmit={() => {
+        const body = { outletId, recipeId, departmentId: opt(departmentId), plannedQty: Number(plannedQty), batchNo: opt(batchNo), expiryDate: opt(expiryDate) };
+        return submitKeyed(body, (idempotencyKey) => api<Batch>("/api/inventory/production", { method: "POST", body, idempotencyKey }));
+      }} onDone={(r) => onDone(r.id)}>
+      <Field label="Sub-recipe" name="recipeId" required hint={!can("recipe.view") ? "Viewing recipes requires recipe access." : recipes.data && !list.length ? "No batch-produced sub-recipes yet: mark one as made in batches on its recipe page." : "Only sub-recipes made in batches (held as prepared stock) are listed."}>
         <Select value={recipeId} onChange={(e) => setRecipeId(e.target.value)} required>
           <option value="">Select sub-recipe…</option>
           {list.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
         </Select>
       </Field>
       <div className="grid gap-3 sm:grid-cols-3">
+        <Field label="Department" name="departmentId" hint="Ingredients leave it; the batch goes into it" className="sm:col-span-3"><DepartmentSelect depts={depts.data} value={departmentId} onChange={setDepartmentId} empty="Unassigned stock" /></Field>
         <Field label="Planned qty" name="plannedQty" required><Input type="number" inputMode="decimal" step="any" min="0" required value={plannedQty} onChange={(e) => setPlannedQty(e.target.value)} /></Field>
         <Field label="Batch no." name="batchNo"><Input value={batchNo} onChange={(e) => setBatchNo(e.target.value)} maxLength={60} /></Field>
         <Field label="Expiry" name="expiryDate"><Input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} /></Field>
@@ -846,18 +892,21 @@ function CreateBatchDialog({ open, onClose, onDone }: { open: boolean; onClose: 
 
 export function ProductionScreen() {
   const router = useRouter();
-  const { can, outlet } = useShell();
+  const { can, outlet, outletId } = useShell();
   const materials = useMaterials();
+  const depts = useDepartments(outletId);
   const [open, setOpen] = useState(false);
   return (
     <>
-      <PageHeader title="Production" subtitle="Batches that turn raw materials into semi-finished stock" actions={can("inventory.produce") && <Button variant="primary" onClick={() => setOpen(true)}><Icon name="plus" /> Plan batch</Button>} />
+      <PageHeader title="Production" subtitle="Batches that turn raw materials into prepared stock (gravies, sauces, doughs)" actions={can("inventory.produce") && <Button variant="primary" onClick={() => setOpen(true)}><Icon name="plus" /> Plan batch</Button>} />
+      <ProductionNav />
       <DocumentList<Batch> label="Production batches" endpoint="/api/inventory/production" statuses={ProductionStatus.values} detailHref={(r) => `/inventory/production/${r.id}`}
         columns={[
           numberCol(), statusCol(),
           { key: "out", header: "Output", cell: (r) => materialLabel(materials.byId, r.outputMaterialId) },
           { key: "plan", header: "Planned", numeric: true, cell: (r) => `${formatQty(r.plannedQty)} ${unitOf(materials.byId, r.outputMaterialId)}` },
           { key: "act", header: "Actual", numeric: true, cell: (r) => (r.status === "COMPLETED" ? formatQty(r.actualQty) : "—") },
+          { key: "dept", header: "Department", cell: (r) => deptName(depts.data, r.departmentId ?? null) },
           { key: "batch", header: "Batch", cell: (r) => r.batchNo ?? "—" },
           createdCol(outlet?.timezone),
         ]} />
@@ -894,8 +943,9 @@ function CompleteBatchDialog({ open, onClose, onDone, batch }: { open: boolean; 
 
 export function ProductionDetail({ id }: { id: string }) {
   const { can, outlet } = useShell();
-  const q = useQuery<Batch>(`/api/inventory/production/${id}`);
+  const q = useQuery<BatchDetail>(`/api/inventory/production/${id}`);
   const materials = useMaterials();
+  const depts = useDepartments(q.data?.outletId ?? null);
   const [completing, setCompleting] = useState(false);
   const t = (action: string) => () => api(`/api/inventory/production/${id}/${action}`, { method: "POST" });
   return (
@@ -915,12 +965,27 @@ export function ProductionDetail({ id }: { id: string }) {
           <Card className="mb-4">
             <Details cols={4} items={[
               ["Output", d.outputMaterialId ? <Link key="o" className="text-brand-600 hover:underline" href={`/inventory/stock/${d.outputMaterialId}`}>{materialLabel(materials.byId, d.outputMaterialId)}</Link> : "—"],
-              ["Planned", `${formatQty(d.plannedQty)} ${unitOf(materials.byId, d.outputMaterialId)}`], ["Actual", d.status === "COMPLETED" ? formatQty(d.actualQty) : "—"], ["Completed", formatDateTime(d.completedAt, outlet?.timezone)],
+              ["Planned", `${formatQty(d.plannedQty)} ${unitOf(materials.byId, d.outputMaterialId)}`], ["Actual", d.status === "COMPLETED" ? `${formatQty(d.actualQty)} ${unitOf(materials.byId, d.outputMaterialId)}` : "—"],
+              ["Yield vs plan", d.yieldVariance ? `${d.yieldVariance.qty > 0 ? "+" : ""}${formatQty(d.yieldVariance.qty)}${d.yieldVariance.pct === null ? "" : ` (${d.yieldVariance.pct > 0 ? "+" : ""}${d.yieldVariance.pct}%)`}` : "—"],
+              ["Department", deptName(depts.data, d.departmentId ?? null)], ["Planned by", d.plannedByName ?? "—"], ["Completed by", d.completedByName ?? "—"], ["Completed", formatDateTime(d.completedAt, outlet?.timezone)],
               ["Batch no.", d.batchNo], ["Expiry", formatDate(d.expiryDate, outlet?.timezone)], ["Created", formatDateTime(d.createdAt, outlet?.timezone)],
             ]} />
           </Card>
+          {d.costing && (
+            <div className="mb-4 grid grid-cols-2 gap-3 sm:max-w-md">
+              <Stat label="Batch cost" value={formatMoney(d.costing.inputCost)} hint="inputs at average cost" />
+              <Stat label={`Cost per ${unitOf(materials.byId, d.outputMaterialId) || "unit"}`} value={d.costing.unitCost === null ? "—" : formatMoney(d.costing.unitCost)} hint="batch cost ÷ actual output" />
+            </div>
+          )}
           <DataTable label="Production inputs" rows={d.lines} rowKey={(l) => l.id} empty="No inputs"
-            columns={[{ key: "m", header: "Input material", cell: (l) => materialLabel(materials.byId, l.materialId) }, { key: "q", header: d.status === "COMPLETED" ? "Consumed" : "Planned", numeric: true, cell: (l) => `${formatQty(l.qty)} ${unitOf(materials.byId, l.materialId)}` }]} />
+            columns={[
+              { key: "m", header: "Input material", cell: (l) => materialLabel(materials.byId, l.materialId) },
+              { key: "q", header: d.status === "COMPLETED" ? "Consumed" : "Planned", numeric: true, cell: (l) => `${formatQty(l.qty)} ${unitOf(materials.byId, l.materialId)}` },
+              ...(d.costing ? [
+                { key: "r", header: "Rate", numeric: true, cell: (l: ProductionLine) => { const c = d.costing?.inputs.find((i) => i.materialId === l.materialId); return c ? formatMoney(c.rate) : "—"; } },
+                { key: "c", header: "Cost", numeric: true, cell: (l: ProductionLine) => { const c = d.costing?.inputs.find((i) => i.materialId === l.materialId); return c ? formatMoney(c.cost) : "—"; } },
+              ] : []),
+            ]} />
           {completing && <CompleteBatchDialog open onClose={() => setCompleting(false)} onDone={q.reload} batch={d} />}
         </>
       )}

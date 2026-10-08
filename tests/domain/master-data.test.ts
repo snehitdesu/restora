@@ -8,7 +8,7 @@ import { systemContext } from "@/server/auth/context";
 import { type AccessContext, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
 import {
   createUnit, updateUnit, createUnitConversion, createMaterial, updateMaterial, listMaterials,
-  createVendor, updateVendor, listVendors, linkVendorMaterial, createOutlet, updateOutlet, listOutlets,
+  createVendor, updateVendor, setVendorStatus, listVendors, linkVendorMaterial, createOutlet, updateOutlet, listOutlets,
   createFloor, createTable, updateTable, setTableStatus, rotateTableQr, listTables,
 } from "@/server/services/masterData";
 import { createPurchaseOrder, createGRN, postGRN, createPurchaseBill, payVendor } from "@/server/services/procurement";
@@ -61,6 +61,8 @@ describe("materials", () => {
     await createUnitConversion(admin, { fromUnitId: pc, toUnitId: g, factor: 50, materialId: egg.id }); // material-specific cross-kind is fine
 
     vendorId = (await createVendor(admin, { name: `Grain Co ${RUN}`, gstin: "29ABCDE1234F1ZW", bankAccount: "123456789012", bankIfsc: "HDFC0001234" })).id;
+    // New vendors start PENDING; buying from them (below) needs approval first.
+    await setVendorStatus(admin, vendorId, { status: "ACTIVE" });
     const grn = await createGRN(owner, { outletId: outletA, vendorId, lines: [{ materialId: riceId, qty: 10, rate: 50 }] });
     await postGRN(owner, grn.id);
     await expect(updateMaterial(admin, riceId, { baseUnitId: g })).rejects.toThrow(/Base unit cannot change/);

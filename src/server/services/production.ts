@@ -8,8 +8,14 @@
  *                  one PRODUCTION_OUTPUT row for the output, in ONE transaction)
  *   DRAFT/IN_PROGRESS -> CANCELLED (no stock effect)
  *
+ * Only batch-produced sub-recipes (`Recipe.stocked`) can be produced: dishes
+ * draw on their prepared stock, so the raw materials are consumed once, here.
+ * A batch belongs to a department (optional): its inputs leave that
+ * department's stock and the output enters it.
+ *
  * Inputs are consumed at weighted-average cost; the output is valued at the
- * total input cost / actual output qty. Every ledger row carries a unique
+ * total input cost / actual output qty (a smaller actual yield raises the
+ * per-unit rate; inputs can be corrected to what was really used). Every ledger row carries a unique
  * sourceRef (`production:<id>:in:<material>` / `production:<id>:out`) and the
  * status guard makes completion one-shot, so posting can never happen twice.
  */
@@ -20,9 +26,10 @@ import { prisma } from "@/server/db/client";
 import { type AccessContext, assertOutletAccess, NotFoundError, ValidationError } from "@/server/db/scope";
 import { assertCan } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
-import { appendLedger, currentQuantity, getAvgCost } from "@/server/services/inventory";
+import { appendLedger, currentQuantity, departmentQuantity, getAvgCost } from "@/server/services/inventory";
 import { explodeRecipe, getActiveVersion } from "@/server/services/recipe";
 import { type Client, type Tx, runInTx, assertTransition, nextNumber } from "@/server/services/_workflow";
+import { idempotentCreate, requestHashOf } from "@/server/services/idempotency";
 import { D, dMul, money, num, qty as roundQty } from "@/domain/money";
 
 function actor(ctx: AccessContext): string | null {
@@ -40,34 +47,52 @@ async function loadBatch(tx: Tx | PrismaClient, ctx: AccessContext, batchId: str
 const createSchema = z.object({
   outletId: z.string(),
   recipeId: z.string(),
-  plannedQty: z.number().positive(),
+  plannedQty: z.number().positive().max(1_000_000),
+  /** Department making the batch (must belong to the outlet). */
+  departmentId: z.string().optional(),
   batchNo: z.string().max(60).optional(),
   expiryDate: z.coerce.date().optional(),
 });
 
 /** Plan a batch from the SUB_RECIPE version in effect; input lines are the exploded raw requirements. */
-export async function createProductionBatch(ctx: AccessContext, input: z.input<typeof createSchema>, db: Client = prisma) {
+export async function createProductionBatch(ctx: AccessContext, input: z.input<typeof createSchema>, db: Client = prisma, idempotencyKey?: string) {
   const data = createSchema.parse(input);
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "inventory.produce", data.outletId);
+  return idempotentCreate({
+    key: idempotencyKey,
+    hash: requestHashOf(ctx, "production-batch", data),
+    findPrior: (key) => prisma.productionBatch.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: key } }, include: { lines: true } }),
+    create: (key, hash) => createBatchTx(ctx, data, key, hash, db),
+  });
+}
+
+function createBatchTx(ctx: AccessContext, data: z.infer<typeof createSchema>, key: string | null, hash: string | null, db: Client) {
   return runInTx(db, async (tx) => {
     const outlet = await tx.outlet.findUnique({ where: { id: data.outletId }, select: { organizationId: true } });
     if (!outlet || outlet.organizationId !== ctx.organizationId) throw new NotFoundError("Outlet not found");
     const recipe = await tx.recipe.findUnique({ where: { id: data.recipeId } });
     if (!recipe || recipe.organizationId !== ctx.organizationId) throw new NotFoundError("Recipe not found");
     if (recipe.outputType !== "SUB_RECIPE" || !recipe.outputMaterialId) throw new ValidationError("Only SUB_RECIPE recipes with an output material can be produced");
+    if (!recipe.stocked) throw new ValidationError(`${recipe.name} is made to order: dishes use its ingredients directly. Mark it as batch-produced (prepared stock) before producing it, so the ingredients are not consumed twice.`);
+    if (data.departmentId) {
+      const dept = await tx.department.findUnique({ where: { id: data.departmentId }, select: { outletId: true, organizationId: true, active: true } });
+      if (!dept || dept.organizationId !== ctx.organizationId || dept.outletId !== data.outletId) throw new ValidationError("Department not in this outlet");
+      if (!dept.active) throw new ValidationError("Department is inactive");
+    }
     const version = await getActiveVersion(tx, ctx, recipe.id);
-    const requirements = await explodeRecipe(tx, ctx, version.id, data.plannedQty);
+    const requirements = await explodeRecipe(tx, ctx, version.id, data.plannedQty, { stock: true });
+    if (!requirements.size) throw new ValidationError(`${recipe.name}'s recipe has no ingredients`);
     const number = await nextNumber(tx, tx.productionBatch, { outletId: data.outletId }, "PRD");
     const batch = await tx.productionBatch.create({
       data: {
-        organizationId: ctx.organizationId, outletId: data.outletId, number, recipeVersionId: version.id, outputMaterialId: recipe.outputMaterialId,
-        plannedQty: D(data.plannedQty), batchNo: data.batchNo, expiryDate: data.expiryDate, status: "DRAFT", createdById: actor(ctx),
+        organizationId: ctx.organizationId, outletId: data.outletId, departmentId: data.departmentId, number, recipeVersionId: version.id, outputMaterialId: recipe.outputMaterialId,
+        plannedQty: D(data.plannedQty), batchNo: data.batchNo, expiryDate: data.expiryDate, status: "DRAFT", createdById: actor(ctx), idempotencyKey: key, requestHash: hash,
         lines: { create: [...requirements].map(([materialId, q]) => ({ organizationId: ctx.organizationId, materialId, qty: roundQty(q) })) },
       },
       include: { lines: true },
     });
-    await writeAudit(tx, ctx, { action: "CREATE", entityType: "ProductionBatch", entityId: batch.id, outletId: data.outletId, after: { recipeVersionId: version.id, plannedQty: data.plannedQty } });
+    await writeAudit(tx, ctx, { action: "CREATE", entityType: "ProductionBatch", entityId: batch.id, outletId: data.outletId, after: { recipeVersionId: version.id, plannedQty: data.plannedQty, departmentId: data.departmentId ?? null } });
     return batch;
   });
 }
@@ -83,7 +108,7 @@ export async function startProductionBatch(ctx: AccessContext, batchId: string, 
 }
 
 const completeSchema = z.object({
-  actualQty: z.number().positive(),
+  actualQty: z.number().positive().max(1_000_000),
   /** Actual quantities used, if different from the plan (materials must be planned inputs). */
   consumed: z.array(z.object({ materialId: z.string(), qty: z.number().nonnegative() })).optional(),
 });
@@ -103,7 +128,9 @@ export async function completeProductionBatch(ctx: AccessContext, batchId: strin
     const inputs = batch.lines.map((l) => ({ line: l, qty: overrides.get(l.materialId) ?? D(l.qty) })).filter((i) => i.qty.gt(0));
     const shortages: string[] = [];
     for (const i of inputs) {
-      const onHand = await currentQuantity(tx, ctx, batch.outletId, i.line.materialId);
+      const onHand = batch.departmentId
+        ? await departmentQuantity(tx, ctx, batch.outletId, batch.departmentId, i.line.materialId)
+        : await currentQuantity(tx, ctx, batch.outletId, i.line.materialId);
       if (onHand.lt(i.qty)) shortages.push(`${i.line.materialId}: need ${num(i.qty)}, have ${num(onHand)}`);
     }
     if (shortages.length) throw new ValidationError(`Insufficient stock for production: ${shortages.join("; ")}`);
@@ -112,7 +139,7 @@ export async function completeProductionBatch(ctx: AccessContext, batchId: strin
     for (const i of inputs) {
       const rate = await getAvgCost(tx, ctx, batch.outletId, i.line.materialId);
       await appendLedger(tx, ctx, {
-        outletId: batch.outletId, materialId: i.line.materialId, magnitude: i.qty, rate, txnType: "PRODUCTION_CONSUMPTION",
+        outletId: batch.outletId, departmentId: batch.departmentId, materialId: i.line.materialId, magnitude: i.qty, rate, txnType: "PRODUCTION_CONSUMPTION",
         sourceType: "PRODUCTION", sourceId: batch.id, sourceRef: `production:${batch.id}:in:${i.line.materialId}`, note: `Production ${batch.number}`,
       });
       inputCost = inputCost.plus(dMul(i.qty, rate));
@@ -120,7 +147,7 @@ export async function completeProductionBatch(ctx: AccessContext, batchId: strin
     }
     const outputRate = money(inputCost.div(data.actualQty));
     await appendLedger(tx, ctx, {
-      outletId: batch.outletId, materialId: batch.outputMaterialId, magnitude: data.actualQty, rate: outputRate, txnType: "PRODUCTION_OUTPUT",
+      outletId: batch.outletId, departmentId: batch.departmentId, materialId: batch.outputMaterialId, magnitude: data.actualQty, rate: outputRate, txnType: "PRODUCTION_OUTPUT",
       sourceType: "PRODUCTION", sourceId: batch.id, sourceRef: `production:${batch.id}:out`, batchNo: batch.batchNo ?? undefined, expiryDate: batch.expiryDate ?? undefined, note: `Production ${batch.number}`,
     });
     const updated = await tx.productionBatch.update({ where: { id: batchId }, data: { status: "COMPLETED", actualQty: D(data.actualQty), completedAt: new Date() } });
@@ -142,12 +169,12 @@ export async function cancelProductionBatch(ctx: AccessContext, batchId: string,
   });
 }
 
-export async function listProductionBatches(db: PrismaClient, ctx: AccessContext, filter: { outletId: string; status?: ProductionStatus; take?: number; cursor?: string }) {
+export async function listProductionBatches(db: PrismaClient, ctx: AccessContext, filter: { outletId: string; status?: ProductionStatus; departmentId?: string; take?: number; cursor?: string }) {
   assertOutletAccess(ctx, filter.outletId);
   assertCan(ctx, "inventory.view", filter.outletId);
   const take = Math.min(filter.take ?? 50, 200);
   const rows = await db.productionBatch.findMany({
-    where: { organizationId: ctx.organizationId, outletId: filter.outletId, ...(filter.status ? { status: filter.status } : {}) },
+    where: { organizationId: ctx.organizationId, outletId: filter.outletId, ...(filter.status ? { status: filter.status } : {}), ...(filter.departmentId ? { departmentId: filter.departmentId } : {}) },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: take + 1,
     include: { lines: true },

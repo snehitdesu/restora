@@ -36,7 +36,8 @@ beforeAll(async () => {
   const vendorId = (await prisma.vendor.create({ data: { organizationId: orgId, name: `PV ${RUN}` } })).id;
   const grn = await createGRN(ctx, { outletId: outletA, vendorId, lines: [{ materialId: mGinger, qty: 10, rate: 100 }, { materialId: mGarlic, qty: 10, rate: 150 }, { materialId: mOil, qty: 50, rate: 120 }] });
   await postGRN(ctx, grn.id);
-  const r = await createRecipe(ctx, { name: "GGP", outputType: "SUB_RECIPE", outputMaterialId: mGGP, yieldQty: 1, lines: [
+  // Batch-produced (group 3): only prepared-stock sub-recipes can be produced.
+  const r = await createRecipe(ctx, { name: "GGP", outputType: "SUB_RECIPE", outputMaterialId: mGGP, stocked: true, yieldQty: 1, lines: [
     { componentType: "MATERIAL", materialId: mGinger, qty: 0.5 }, { componentType: "MATERIAL", materialId: mGarlic, qty: 0.5 },
   ] });
   ggpRecipe = r.recipe.id;
@@ -83,7 +84,8 @@ describe("production batches", () => {
     await expect(startProductionBatch(mgrB, batch.id)).rejects.toBeInstanceOf(ForbiddenError);
     await expect(startProductionBatch(org2, batch.id)).rejects.toBeInstanceOf(NotFoundError);
     await expect(createProductionBatch(org2, { outletId: outletA, recipeId: ggpRecipe, plannedQty: 1 })).rejects.toBeInstanceOf(NotFoundError);
-    await expect(createProductionBatch(member("KITCHEN", outletA), { outletId: outletA, recipeId: ggpRecipe, plannedQty: 1 })).rejects.toBeInstanceOf(ForbiddenError);
+    // The kitchen records its own production (proposal p. 8); a cashier cannot.
+    await expect(createProductionBatch(member("CASHIER", outletA), { outletId: outletA, recipeId: ggpRecipe, plannedQty: 1 })).rejects.toBeInstanceOf(ForbiddenError);
     const page = await listProductionBatches(prisma, mgrA, { outletId: outletA, take: 2 });
     expect(page.items).toHaveLength(2);
   });

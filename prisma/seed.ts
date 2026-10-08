@@ -50,14 +50,14 @@ async function deleteAll() {
     prisma.inventoryIssueLine, prisma.inventoryIssue,
     prisma.wastageLine, prisma.wastage,
     prisma.stockCountLine, prisma.stockCount,
-    prisma.productionLine, prisma.productionBatch,
+    prisma.productionLine, prisma.productionBatch, prisma.dishProduction,
     prisma.recipeLine, prisma.recipeVersion, prisma.recipe,
     prisma.menuItemModifierGroup, prisma.modifierOption, prisma.modifierGroup, prisma.menuItemVariant, prisma.menuItem, prisma.menuCategory,
     prisma.vendorMaterial, prisma.vendor,
     prisma.outletMaterialCost, prisma.material, prisma.materialCategory, prisma.unitConversion, prisma.unit,
     prisma.restaurantTable, prisma.floor, prisma.kitchenStation, prisma.department,
     prisma.attendance, prisma.shift, prisma.leaveRequest, prisma.task,
-    prisma.expense, prisma.pettyCashTxn, prisma.cashDrawerSession, prisma.reconciliationLine, prisma.reconciliation,
+    prisma.expense, prisma.pettyCashTxn, prisma.cashDrawerSession, prisma.reconciliationLine, prisma.reconciliation, prisma.bankDeposit, prisma.dayClose,
     prisma.aggregatorOrder, prisma.aggregatorSettlement, prisma.aggregator,
     prisma.anomaly, prisma.notification, prisma.auditLog, prisma.webhookEvent, prisma.unmappedSale, prisma.integrationConnection, prisma.syncJob, prisma.exportJob,
     prisma.session, prisma.membership, prisma.user, prisma.outlet, prisma.organization,
@@ -296,12 +296,13 @@ async function main() {
   // ---------------- F. Recipes + versions + nested sub-recipes ----------------
   type Line = { m?: string; sub?: string; qty: number; wastage?: number };
   const recipeIdByName: Record<string, string> = {};
-  async function createRecipe(name: string, outputType: "MENU_ITEM" | "SUB_RECIPE", opts: { menuItem?: string; outputMaterial?: string; yieldQty: number; yieldUnit: string; lines: Line[] }) {
+  async function createRecipe(name: string, outputType: "MENU_ITEM" | "SUB_RECIPE", opts: { menuItem?: string; outputMaterial?: string; stocked?: boolean; yieldQty: number; yieldUnit: string; lines: Line[] }) {
     const recipe = await prisma.recipe.create({
       data: {
         organizationId: orgId, name, outputType,
         menuItemId: opts.menuItem ? menuByName[opts.menuItem] : undefined,
         outputMaterialId: opts.outputMaterial ? matByName[opts.outputMaterial].id : undefined,
+        stocked: opts.stocked ?? false,
       },
     });
     recipeIdByName[name] = recipe.id;
@@ -320,7 +321,8 @@ async function main() {
   }
 
   // Sub-recipes first (gravy nests the ginger-garlic paste => 3-level nesting)
-  await createRecipe("Ginger Garlic Paste", "SUB_RECIPE", { outputMaterial: "Ginger Garlic Paste", yieldQty: 1, yieldUnit: "kg", lines: [{ m: "Ginger", qty: 0.5 }, { m: "Garlic", qty: 0.5 }] });
+  // Ginger-garlic paste is made in batches (production below) and held as prepared stock: dishes draw on it.
+  await createRecipe("Ginger Garlic Paste", "SUB_RECIPE", { outputMaterial: "Ginger Garlic Paste", stocked: true, yieldQty: 1, yieldUnit: "kg", lines: [{ m: "Ginger", qty: 0.5 }, { m: "Garlic", qty: 0.5 }] });
   await createRecipe("Biryani Masala Prep", "SUB_RECIPE", { outputMaterial: "Biryani Masala Prep", yieldQty: 1, yieldUnit: "kg", lines: [{ m: "Coriander Seeds", qty: 0.3 }, { m: "Cumin", qty: 0.2 }, { m: "Red Chilli Powder", qty: 0.15 }, { m: "Garam Masala", qty: 0.15 }, { m: "Turmeric", qty: 0.1 }, { m: "Salt", qty: 0.1 }] });
   await createRecipe("Butter Chicken Gravy Prep", "SUB_RECIPE", { outputMaterial: "Butter Chicken Gravy Prep", yieldQty: 5, yieldUnit: "kg", lines: [{ m: "Tomato", qty: 2.5 }, { m: "Butter", qty: 0.5 }, { m: "Cream", qty: 0.4 }, { m: "Cashew", qty: 0.3 }, { m: "Onion", qty: 0.5 }, { sub: "Ginger Garlic Paste", qty: 0.2 }, { m: "Red Chilli Powder", qty: 0.05 }, { m: "Salt", qty: 0.05 }] });
 

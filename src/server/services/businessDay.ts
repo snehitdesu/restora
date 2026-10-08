@@ -10,8 +10,18 @@ import { businessDayRange, businessDateKey, utcOffsetMinutes } from "@/domain/ti
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
+/** "YYYY-MM-DD" that is a real calendar date ("2026-02-30" is a 422, not a 500). */
+export const businessDateString = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Business date must be YYYY-MM-DD")
+  .refine((s) => !Number.isNaN(Date.parse(`${s}T00:00:00Z`)) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s, "Not a calendar date");
 /** Accepts "YYYY-MM-DD" (a calendar date) or an instant (mapped to its local date). */
-export const businessDateInput = z.union([z.string().regex(/^\d{4}-\d{2}-\d{2}$/), z.coerce.date()]);
+export const businessDateInput = z.union([
+  businessDateString,
+  z.date(),
+  // An instant as a string; a date-only string that failed the calendar check above must not roll over ("02-30" -> "03-02").
+  z.string().refine((s) => !/^\d{4}-\d{2}-\d{2}$/.test(s), "Not a calendar date").pipe(z.coerce.date()),
+]);
 export type BusinessDateInput = z.infer<typeof businessDateInput>;
 
 export async function outletTimeZone(db: Db, ctx: AccessContext, outletId: string): Promise<string> {

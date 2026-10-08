@@ -41,8 +41,8 @@ function FinanceNav() {
   const fv = !can("finance.view");
   return (
     <SubNav label="Finance" items={[
-      { href: "/finance", label: "Overview", hidden: fv }, { href: "/finance/payments", label: "Payments & refunds", hidden: fv }, { href: "/finance/expenses", label: "Expenses", hidden: fv },
-      { href: "/finance/petty-cash", label: "Petty cash", hidden: fv && !can("finance.petty_cash") }, { href: "/finance/drawer", label: "Cash drawer", hidden: fv }, { href: "/finance/reconciliation", label: "Reconciliation", hidden: fv },
+      { href: "/finance/money-desk", label: "Money desk", hidden: fv }, { href: "/finance", label: "Overview", hidden: fv }, { href: "/finance/payments", label: "Payments & refunds", hidden: fv }, { href: "/finance/expenses", label: "Expenses", hidden: fv },
+      { href: "/finance/petty-cash", label: "Petty cash", hidden: fv && !can("finance.petty_cash") }, { href: "/finance/drawer", label: "Cash drawer", hidden: fv }, { href: "/finance/reconciliation", label: "Reconciliation", hidden: fv }, { href: "/finance/aggregators", label: "Aggregators", hidden: fv },
     ]} />
   );
 }
@@ -86,7 +86,8 @@ export function FinanceOverviewScreen() {
       {closing.error ? <ErrorState error={closing.error} onRetry={closing.reload} /> : !c ? <LoadingState /> : (
         <>
           <div className={`mb-3 rounded-md border px-3 py-2 text-sm ${c.readyToClose ? "border-ok-100 bg-ok-50 text-ok-700" : "border-warn-100 bg-warn-50 text-warn-700"}`} role="status">
-            {c.readyToClose ? `${formatDate(c.businessDate)} is ready to close.` : <>Not ready to close: {c.blockers.join(" · ")}</>}
+            {c.readyToClose ? `${formatDate(c.businessDate)} is ready to close.` : <>Not ready to close: {c.blockers.join(" · ")}</>}{" "}
+            <a href="/finance/money-desk" className="font-medium underline">Close the day on the money desk →</a>
           </div>
           <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
             <Stat label="Net sales" value={formatMoney(c.sales.netSales)} hint={`${c.sales.orders} orders · AOV ${formatMoney(c.sales.aov)}`} />

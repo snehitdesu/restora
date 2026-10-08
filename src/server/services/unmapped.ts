@@ -78,7 +78,7 @@ export async function resolveUnmappedSale(ctx: AccessContext, saleId: string, in
       assertCan(ctx, "inventory.adjust", sale.outletId);
       const version = await getActiveVersionForMenuItem(tx, ctx, item.id);
       if (!version) throw new ValidationError(`${item.name} has no approved recipe yet — approve one, or map without consuming`);
-      const exploded = await explodeRecipe(tx, ctx, version.id, D(sale.qty));
+      const exploded = await explodeRecipe(tx, ctx, version.id, D(sale.qty), { stock: true });
       for (const [materialId, q] of exploded) {
         if (q.lte(0)) continue;
         const rate = await getAvgCost(tx, ctx, sale.outletId, materialId);

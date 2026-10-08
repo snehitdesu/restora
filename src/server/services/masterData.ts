@@ -20,14 +20,14 @@ import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { gstinSchema } from "@/domain/gst";
-import { UnitKind, TableStatus } from "@/constants/enums";
+import { UnitKind, TableStatus, VendorStatus, VENDOR_STATUS_TRANSITIONS } from "@/constants/enums";
 import { prisma } from "@/server/db/client";
 import { type AccessContext, assertOutletAccess, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
 import { assertCan, can, type Permission } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
-import { type Client, type Tx, runInTx } from "@/server/services/_workflow";
+import { type Client, type Tx, runInTx, assertTransition } from "@/server/services/_workflow";
 import { isValidTimeZone } from "@/domain/time";
-import { D, money } from "@/domain/money";
+import { D, money, type Decimalish } from "@/domain/money";
 import { textContains } from "@/server/db/search";
 
 function assertOrgWide(ctx: AccessContext, permission: Permission) {
@@ -146,10 +146,17 @@ const materialSchema = z.object({
   taxPct: z.number().min(0).max(28).default(0),
   minStock: z.number().nonnegative().default(0),
   reorderLevel: z.number().nonnegative().default(0),
+  /** Order-up-to level for the reorder engine; null = the reorder level is the par. */
+  parLevel: z.number().nonnegative().nullable().optional(),
   preferredVendorId: z.string().optional(),
   perishable: z.boolean().default(false),
   trackBatch: z.boolean().default(false),
 });
+
+/** A par (order-up-to) level below the reorder point would never be ordered up to. */
+function assertParLevel(reorderLevel: Decimalish, parLevel: Decimalish | null | undefined) {
+  if (parLevel != null && D(parLevel).lt(D(reorderLevel))) throw new ValidationError("The par level (order up to) cannot be below the reorder level");
+}
 
 async function assertMaterialRefs(tx: Tx, ctx: AccessContext, d: { baseUnitId?: string; purchaseUnitId?: string; categoryId?: string; preferredVendorId?: string }) {
   if (d.baseUnitId) {
@@ -164,10 +171,11 @@ async function assertMaterialRefs(tx: Tx, ctx: AccessContext, d: { baseUnitId?: 
 export async function createMaterial(ctx: AccessContext, input: z.input<typeof materialSchema>, db: Client = prisma) {
   const data = materialSchema.parse(input);
   assertOrgWide(ctx, "master.manage");
+  assertParLevel(data.reorderLevel, data.parLevel);
   return runInTx(db, async (tx) => {
     await assertMaterialRefs(tx, ctx, data);
     const m = await unique(
-      () => tx.material.create({ data: { organizationId: ctx.organizationId, ...data, taxPct: D(data.taxPct), minStock: D(data.minStock), reorderLevel: D(data.reorderLevel), createdById: ctx.userId === "system" ? null : ctx.userId } }),
+      () => tx.material.create({ data: { organizationId: ctx.organizationId, ...data, taxPct: D(data.taxPct), minStock: D(data.minStock), reorderLevel: D(data.reorderLevel), parLevel: data.parLevel == null ? null : D(data.parLevel), createdById: ctx.userId === "system" ? null : ctx.userId } }),
       `SKU "${data.sku}" already exists`
     );
     await writeAudit(tx, ctx, { action: "CREATE", entityType: "Material", entityId: m.id, after: { sku: data.sku, name: data.name, baseUnitId: data.baseUnitId } });
@@ -184,8 +192,9 @@ export async function updateMaterial(ctx: AccessContext, materialId: string, pat
       throw new ValidationError("Base unit cannot change after stock has moved (ledger quantities are in the base unit)");
     }
     await assertMaterialRefs(tx, ctx, data);
+    assertParLevel(data.reorderLevel ?? m.reorderLevel, data.parLevel !== undefined ? data.parLevel : m.parLevel);
     const updated = await unique(
-      () => tx.material.update({ where: { id: materialId }, data: { ...data, ...(data.taxPct !== undefined ? { taxPct: D(data.taxPct) } : {}), ...(data.minStock !== undefined ? { minStock: D(data.minStock) } : {}), ...(data.reorderLevel !== undefined ? { reorderLevel: D(data.reorderLevel) } : {}) } }),
+      () => tx.material.update({ where: { id: materialId }, data: { ...data, ...(data.taxPct !== undefined ? { taxPct: D(data.taxPct) } : {}), ...(data.minStock !== undefined ? { minStock: D(data.minStock) } : {}), ...(data.reorderLevel !== undefined ? { reorderLevel: D(data.reorderLevel) } : {}), ...(data.parLevel !== undefined ? { parLevel: data.parLevel === null ? null : D(data.parLevel) } : {}) } }),
       `SKU "${data.sku}" already exists`
     );
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Material", entityId: materialId, before: { sku: m.sku, name: m.name, active: m.active, baseUnitId: m.baseUnitId }, after: data });
@@ -234,34 +243,74 @@ const vendorSchema = z.object({
   bankIfsc: z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC").optional(),
   paymentTerms: z.string().max(20).optional(),
   creditLimit: z.number().nonnegative().default(0),
+  upiId: z.string().trim().regex(/^[\w.-]{2,256}@[a-zA-Z][a-zA-Z0-9]{1,63}$/, "Invalid UPI id (name@bank)").optional(),
   notes: z.string().max(1000).optional(),
 });
 
-/** Bank details are only visible to vendor managers. */
-function maskVendor<T extends { bankAccount: string | null; bankIfsc: string | null }>(ctx: AccessContext, v: T): T {
+/** Bank / UPI details are only visible to vendor managers. */
+function maskVendor<T extends { bankAccount: string | null; bankIfsc: string | null; upiId?: string | null }>(ctx: AccessContext, v: T): T {
   if (can(ctx, "vendor.manage")) return v;
-  return { ...v, bankAccount: v.bankAccount ? `••••${v.bankAccount.slice(-4)}` : null, bankIfsc: v.bankIfsc ? "••••" : null };
+  return { ...v, bankAccount: v.bankAccount ? `••••${v.bankAccount.slice(-4)}` : null, bankIfsc: v.bankIfsc ? "••••" : null, ...(v.upiId !== undefined ? { upiId: v.upiId ? "••••" : null } : {}) };
 }
 
+/**
+ * New vendors start PENDING (proposal module 01: "must be approved before
+ * anyone can buy from them"); approval is setVendorStatus(ACTIVE).
+ */
 export async function createVendor(ctx: AccessContext, input: z.input<typeof vendorSchema>, db: Client = prisma) {
   const data = vendorSchema.parse(input);
   assertOrgWide(ctx, "vendor.manage");
   return runInTx(db, async (tx) => {
-    const v = await unique(() => tx.vendor.create({ data: { organizationId: ctx.organizationId, ...data, creditLimit: money(data.creditLimit), createdById: ctx.userId === "system" ? null : ctx.userId } }), `Vendor "${data.name}" already exists`);
-    await writeAudit(tx, ctx, { action: "CREATE", entityType: "Vendor", entityId: v.id, after: { name: data.name, gstin: data.gstin } });
+    const v = await unique(() => tx.vendor.create({ data: { organizationId: ctx.organizationId, ...data, creditLimit: money(data.creditLimit), status: "PENDING", active: false, createdById: ctx.userId === "system" ? null : ctx.userId } }), `Vendor "${data.name}" already exists`);
+    await writeAudit(tx, ctx, { action: "CREATE", entityType: "Vendor", entityId: v.id, after: { name: data.name, gstin: data.gstin, status: "PENDING" } });
     return v;
   });
 }
 
-export async function updateVendor(ctx: AccessContext, vendorId: string, patch: Partial<z.input<typeof vendorSchema>> & { active?: boolean }, db: Client = prisma) {
-  const data = vendorSchema.partial().extend({ active: z.boolean().optional() }).parse(patch);
-  assertOrgWide(ctx, "vendor.manage");
+const statusSchema = z.object({ status: VendorStatus.zod, reason: z.string().trim().max(300).optional() });
+
+/**
+ * Move a vendor through VENDOR_STATUS_TRANSITIONS. Approving (-> ACTIVE) is the
+ * purchase approval gate and needs purchase.approve held org-wide; the other
+ * moves need vendor.manage org-wide. Blacklisting needs a reason. Paying dues
+ * to an inactive or blacklisted vendor stays possible (money owed is owed).
+ */
+export async function setVendorStatus(ctx: AccessContext, vendorId: string, input: z.input<typeof statusSchema>, db: Client = prisma) {
+  const data = statusSchema.parse(input);
+  assertOrgWide(ctx, data.status === "ACTIVE" ? "purchase.approve" : "vendor.manage");
+  if (data.status === "BLACKLISTED" && (data.reason ?? "").length < 3) throw new ValidationError("Give a reason for blacklisting the vendor");
   return runInTx(db, async (tx) => {
     const v = await loadOrg(await tx.vendor.findUnique({ where: { id: vendorId } }), ctx, "Vendor");
+    const from: VendorStatus = VendorStatus.is(v.status) ? v.status : "ACTIVE";
+    if (from === data.status) return v;
+    assertTransition(VENDOR_STATUS_TRANSITIONS, from, data.status, "vendor status");
+    const approving = data.status === "ACTIVE";
+    const updated = await tx.vendor.update({
+      where: { id: vendorId },
+      data: { status: data.status, active: approving, statusReason: data.reason ?? null, ...(approving ? { approvedById: ctx.userId === "system" ? null : ctx.userId, approvedAt: new Date() } : {}) },
+    });
+    await writeAudit(tx, ctx, { action: approving ? "APPROVE" : "UPDATE", entityType: "Vendor", entityId: vendorId, before: { status: from }, after: { status: data.status, reason: data.reason } });
+    return updated;
+  });
+}
+
+export async function updateVendor(ctx: AccessContext, vendorId: string, patch: Partial<z.input<typeof vendorSchema>> & { active?: boolean }, db: Client = prisma) {
+  const { active, ...data } = vendorSchema.partial().extend({ active: z.boolean().optional() }).parse(patch);
+  assertOrgWide(ctx, "vendor.manage");
+  // The old activate / deactivate switch goes through the approval lifecycle.
+  if (active !== undefined) {
+    const current = await loadOrg(await db.vendor.findUnique({ where: { id: vendorId } }), ctx, "Vendor");
+    if (active && current.status !== "ACTIVE" && current.status !== "INACTIVE") throw new ValidationError(`Vendor is ${current.status}: approve it instead`);
+    await setVendorStatus(ctx, vendorId, { status: active ? "ACTIVE" : "INACTIVE" }, db);
+  }
+  return runInTx(db, async (tx) => {
+    const v = await loadOrg(await tx.vendor.findUnique({ where: { id: vendorId } }), ctx, "Vendor");
+    if (!Object.keys(data).length) return v;
     const updated = await unique(() => tx.vendor.update({ where: { id: vendorId }, data: { ...data, ...(data.creditLimit !== undefined ? { creditLimit: money(data.creditLimit) } : {}) } }), `Vendor "${data.name}" already exists`);
-    // Bank changes are a classic fraud vector: audit them without storing the full numbers.
+    // Bank / UPI changes are a classic fraud vector: audit them without storing the details.
     const bankChanged = data.bankAccount !== undefined && data.bankAccount !== v.bankAccount;
-    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Vendor", entityId: vendorId, before: { name: v.name, active: v.active }, after: { ...data, bankAccount: bankChanged ? `changed to ••••${data.bankAccount!.slice(-4)}` : undefined } });
+    const upiChanged = data.upiId !== undefined && data.upiId !== v.upiId;
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Vendor", entityId: vendorId, before: { name: v.name, status: v.status }, after: { ...data, bankAccount: bankChanged ? `changed to ••••${data.bankAccount!.slice(-4)}` : undefined, upiId: upiChanged ? "changed" : undefined } });
     return updated;
   });
 }
@@ -275,7 +324,8 @@ export async function linkVendorMaterial(ctx: AccessContext, input: z.input<type
   return runInTx(db, async (tx) => {
     const vendor = await loadOrg(await tx.vendor.findUnique({ where: { id: data.vendorId } }), ctx, "Vendor");
     await loadOrg(await tx.material.findUnique({ where: { id: data.materialId } }), ctx, "Material");
-    if (!vendor.active) throw new ValidationError("Vendor is inactive");
+    // Materials can be linked while a new vendor awaits approval, not to a dropped one.
+    if (vendor.status === "INACTIVE" || vendor.status === "BLACKLISTED") throw new ValidationError(`Vendor is ${vendor.status.toLowerCase()}`);
     if (data.preferred) {
       await tx.vendorMaterial.updateMany({ where: { materialId: data.materialId, preferred: true }, data: { preferred: false } });
       await tx.material.update({ where: { id: data.materialId }, data: { preferredVendorId: data.vendorId } });
@@ -291,11 +341,11 @@ export async function linkVendorMaterial(ctx: AccessContext, input: z.input<type
   });
 }
 
-export async function listVendors(db: PrismaClient, ctx: AccessContext, query: { search?: string; active?: boolean; take?: number; cursor?: string } = {}) {
+export async function listVendors(db: PrismaClient, ctx: AccessContext, query: { search?: string; active?: boolean; status?: string; take?: number; cursor?: string } = {}) {
   assertCan(ctx, "vendor.view");
-  const q = pageQuery.extend({ search: z.string().max(100).optional(), active: z.boolean().optional() }).parse(query);
+  const q = pageQuery.extend({ search: z.string().max(100).optional(), active: z.boolean().optional(), status: VendorStatus.zod.optional() }).parse(query);
   const rows = await db.vendor.findMany({
-    where: { organizationId: ctx.organizationId, ...(q.active !== undefined ? { active: q.active } : {}), ...(q.search ? { OR: [{ name: textContains(q.search) }, { phone: textContains(q.search) }, { gstin: textContains(q.search) }] } : {}) },
+    where: { organizationId: ctx.organizationId, ...(q.active !== undefined ? { active: q.active } : {}), ...(q.status ? { status: q.status } : {}), ...(q.search ? { OR: [{ name: textContains(q.search) }, { phone: textContains(q.search) }, { gstin: textContains(q.search) }] } : {}) },
     orderBy: [{ name: "asc" }, { id: "asc" }],
     take: q.take + 1,
     ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),

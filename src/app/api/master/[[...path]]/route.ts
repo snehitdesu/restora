@@ -4,7 +4,7 @@ import { createRouter, outletQuery } from "@/server/api/router";
 import {
   createUnit, updateUnit, listUnits, createUnitConversion, createMaterialCategory,
   createMaterial, updateMaterial, listMaterials, getMaterial,
-  createVendor, updateVendor, listVendors, getVendor, linkVendorMaterial,
+  createVendor, updateVendor, setVendorStatus, listVendors, getVendor, linkVendorMaterial,
   createOutlet, updateOutlet, listOutlets,
   createFloor, createTable, updateTable, setTableStatus, rotateTableQr, revokeTableQr, listTables,
 } from "@/server/services/masterData";
@@ -17,7 +17,7 @@ import { listIntegrations, upsertIntegration } from "@/server/services/integrati
 export const runtime = "nodejs";
 
 const bool = z.enum(["true", "false"]).optional().transform((v) => (v === undefined ? undefined : v === "true"));
-const pageQ = z.object({ take: z.coerce.number().int().positive().max(200).optional(), cursor: z.string().optional(), search: z.string().max(100).optional(), active: bool });
+const pageQ = z.object({ take: z.coerce.number().int().positive().max(200).optional(), cursor: z.string().optional(), search: z.string().max(100).optional(), active: bool, status: z.string().max(20).optional() });
 
 export const { GET, POST, PATCH } = createRouter([
   // organization
@@ -45,6 +45,7 @@ export const { GET, POST, PATCH } = createRouter([
   { method: "POST", path: "vendors", handler: ({ ctx, body }) => createVendor(ctx, body as never) },
   { method: "GET", path: "vendors/:id", handler: ({ ctx, params }) => getVendor(prisma, ctx, params.id) },
   { method: "PATCH", path: "vendors/:id", handler: ({ ctx, params, body }) => updateVendor(ctx, params.id, body as never) },
+  { method: "POST", path: "vendors/:id/status", handler: ({ ctx, params, body }) => setVendorStatus(ctx, params.id, body as never) },
   { method: "POST", path: "vendors/:id/materials", handler: ({ ctx, params, body }) => linkVendorMaterial(ctx, { ...(body as object), vendorId: params.id } as never) },
   // outlets
   { method: "GET", path: "outlets", handler: ({ ctx }) => listOutlets(prisma, ctx) },

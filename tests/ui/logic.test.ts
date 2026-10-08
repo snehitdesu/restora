@@ -223,7 +223,9 @@ describe("permission-aware navigation", () => {
     for (const l of ["Kitchen", ...stock, "Staff", "Anomalies", "Audit log"]) expect(labels(["CASHIER"])).not.toContain(l);
 
     expect(labels(["KITCHEN"])).toEqual(expect.arrayContaining(["Kitchen", ...stock, "Tasks"]));
-    for (const l of ["POS", "Customers", "Finance overview", ...purchasing]) expect(labels(["KITCHEN"])).not.toContain(l);
+    // The kitchen raises indents itself (proposal pp. 5, 8); the rest of purchasing stays out of reach.
+    expect(labels(["KITCHEN"])).toContain("Indents");
+    for (const l of ["POS", "Customers", "Finance overview", ...purchasing.filter((p) => p !== "Indents")]) expect(labels(["KITCHEN"])).not.toContain(l);
 
     expect(labels(["STORE"])).toEqual(expect.arrayContaining([...stock, ...purchasing]));
     expect(labels(["STORE"])).not.toContain("Vendor payments"); // no finance.view

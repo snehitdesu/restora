@@ -141,7 +141,9 @@ describe("recipe reads for the back office", () => {
     const lines = await describeCostLines(prisma, admin, cost.lines);
     expect(lines).toEqual([expect.objectContaining({ materialId: flour, name: "Flour", sku: `FL-${RUN}`, unit: "kg", quantity: 0.16, unitCost: 40, cost: 6.4 })]);
 
-    const http = await call(Recipes, "GET", `versions/${pizzaV1}/cost`, { token: kitchenToken, query: { outletId: outletA } });
+    // Plate costs are cost figures: the kitchen reads recipes, not what they cost (proposal pp. 8, 12; group 3).
+    expect((await call(Recipes, "GET", `versions/${pizzaV1}/cost`, { token: kitchenToken, query: { outletId: outletA } })).status).toBe(403);
+    const http = await call(Recipes, "GET", `versions/${pizzaV1}/cost`, { token: mgrToken, query: { outletId: outletA } });
     expect(http.status).toBe(200);
     expect(http.json.data).toMatchObject({ total: 6.4, lines: [{ name: "Flour", unit: "kg" }] });
   });

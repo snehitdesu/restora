@@ -17,6 +17,9 @@ import type { POSProvider } from "@/integrations/pos";
 import type { PaymentProvider } from "@/integrations/payment";
 
 import { vendorAging, vendorStatement, reverseVendorPayment } from "@/server/services/vendorFinance";
+import { aggregatorMargin, createAggregatorCharge, importAggregatorStatement, listAggregators, listAggregatorCharges, listAggregatorStatements, outstandingAggregatorOrders, reconcileAggregatorStatement, reviewAggregatorStatement, saveAggregator, voidAggregatorCharge } from "@/server/services/aggregatorFinance";
+import { RATE_POLICIES } from "@/server/api/rateLimit";
+import { getMoneyDesk, declareSales, recordBankDeposit, voidBankDeposit, closeDay, reopenDay, listDayCloses } from "@/server/services/moneyDesk";
 import { listInvoices, taxSummary } from "@/server/services/invoicing";
 import { authorizedOutletIds } from "@/server/services/analytics";
 
@@ -34,7 +37,7 @@ const idemKey = (req: { headers: Headers }) => req.headers.get("idempotency-key"
 const range = z.object({ from: z.coerce.date().optional(), to: z.coerce.date().optional() });
 const day = outletQuery.extend({ businessDate: businessDateInput });
 const runBody = z.object({ outletId: z.string(), businessDate: businessDateInput, finalize: z.boolean().default(false) });
-const kind = z.enum(["PAYMENTS", "POS", "GATEWAY", "AGGREGATOR", "VENDOR"]);
+const kind = z.enum(["PAYMENTS", "POS", "GATEWAY", "AGGREGATOR", "VENDOR", "SALES"]);
 
 export const { GET, POST } = createRouter([
   // payments / refunds / petty cash / drawer (read-only lists)
@@ -65,6 +68,26 @@ export const { GET, POST } = createRouter([
   { method: "GET", path: "vendor-aging", handler: ({ ctx, query }) => vendorAging(prisma, ctx, z.object({ outletId: z.string().optional(), vendorId: z.string().optional(), asOf: z.coerce.date().optional() }).parse(query)) },
   { method: "GET", path: "vendor-statement", handler: ({ ctx, query }) => vendorStatement(prisma, ctx, query as never) },
   { method: "POST", path: "vendor-payments/:id/reverse", reauth: "finance.void", handler: ({ ctx, params, body }) => reverseVendorPayment(ctx, params.id, z.object({ reason: z.string() }).parse(body).reason) },
+  // money desk (proposal module 06): declared vs POS vs bank, deposits, day close
+  { method: "GET", path: "money-desk", handler: ({ ctx, query }) => getMoneyDesk(prisma, ctx, query as never) },
+  { method: "GET", path: "money-desk/closes", handler: ({ ctx, query }) => listDayCloses(prisma, ctx, query as never) },
+  { method: "POST", path: "money-desk/declare", handler: ({ ctx, body }) => declareSales(ctx, body as never) },
+  { method: "POST", path: "money-desk/deposits", handler: ({ ctx, body, req }) => recordBankDeposit(ctx, body as never, idemKey(req)) },
+  { method: "POST", path: "money-desk/deposits/:id/void", reauth: "finance.void", handler: ({ ctx, params, body }) => voidBankDeposit(ctx, params.id, z.object({ reason: z.string() }).parse(body).reason) },
+  { method: "POST", path: "money-desk/close", handler: ({ ctx, body }) => closeDay(ctx, body as never) },
+  { method: "POST", path: "money-desk/reopen", reauth: "finance.reopen", handler: ({ ctx, body }) => reopenDay(ctx, body as never) },
+  // aggregator control room (proposal p. 9 and p. 17): payout statements, shortfalls, penalty / ad-spend charges, net margin
+  { method: "GET", path: "aggregators", handler: ({ ctx }) => listAggregators(prisma, ctx) },
+  { method: "POST", path: "aggregators", reauth: "settings.manage", handler: ({ ctx, body }) => saveAggregator(ctx, body as never) },
+  { method: "POST", path: "aggregators/statements", rateLimit: RATE_POLICIES.export, handler: ({ ctx, body }) => importAggregatorStatement(ctx, body as never) },
+  { method: "GET", path: "aggregators/statements", handler: ({ ctx, query }) => listAggregatorStatements(prisma, ctx, z.object({ outletId: z.string().min(1), aggregatorId: z.string().optional() }).parse(query)) },
+  { method: "GET", path: "aggregators/reconcile", handler: ({ ctx, query }) => reconcileAggregatorStatement(prisma, ctx, query as never) },
+  { method: "POST", path: "aggregators/review", handler: ({ ctx, body }) => reviewAggregatorStatement(ctx, body as never) },
+  { method: "GET", path: "aggregators/outstanding", handler: ({ ctx, query }) => outstandingAggregatorOrders(prisma, ctx, query as never) },
+  { method: "GET", path: "aggregators/charges", handler: ({ ctx, query }) => listAggregatorCharges(prisma, ctx, z.object({ outletId: z.string().min(1), aggregatorId: z.string().optional(), from: z.coerce.date().optional(), to: z.coerce.date().optional(), includeVoided: z.enum(["true", "false"]).optional().transform((v) => v === "true") }).parse(query)) },
+  { method: "POST", path: "aggregators/charges", handler: ({ ctx, body, req }) => createAggregatorCharge(ctx, body as never, idemKey(req)) },
+  { method: "POST", path: "aggregators/charges/:id/void", reauth: "finance.void", handler: ({ ctx, params, body }) => voidAggregatorCharge(ctx, params.id, z.object({ reason: z.string() }).parse(body).reason) },
+  { method: "GET", path: "aggregators/margin", handler: ({ ctx, query }) => aggregatorMargin(prisma, ctx, query as never) },
   // invoices / tax
   { method: "GET", path: "invoices", handler: ({ ctx, query }) => listInvoices(prisma, ctx, query as never) },
   { method: "GET", path: "tax-summary", handler: ({ ctx, query }) => { const q = range.extend({ outletId: z.string().optional() }).parse(query); return taxSummary(prisma, ctx, { outletIds: authorizedOutletIds(ctx, { outletId: q.outletId }, "finance.view"), from: q.from, to: q.to }); } },

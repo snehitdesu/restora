@@ -8,8 +8,14 @@
  *   through sub-recipes, applying yield scaling, per-line wastage and unit
  *   conversion. Cycles are rejected at runtime (RecipeCycleError) as a
  *   belt-and-braces guard on top of write-time validation.
- * - calculateRecipeCost prices the exploded materials at an outlet's
- *   weighted-average cost.
+ *   With `{ stock: true }` (every caller that MOVES stock: sales, production,
+ *   dish wastage, unmapped-sale replay) a batch-produced sub-recipe
+ *   (`Recipe.stocked`) stops the recursion: the requirement is its prepared
+ *   output material, because the batch already consumed the raw materials.
+ *   Exploding through it as well would consume them twice.
+ * - calculateRecipeCost prices what a sale actually consumes (the stock
+ *   explosion) at an outlet's weighted-average cost; prepared stock that has
+ *   never been produced at the outlet is valued at its recipe's cost.
  */
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { z } from "zod";
@@ -73,17 +79,18 @@ export type ExplosionResult = Map<string, Prisma.Decimal>; // materialId -> qty 
 
 /**
  * Expand a recipe version to raw-material requirements for producing `quantity`
- * of the recipe's output.
+ * of the recipe's output. `stock: true` stops at batch-produced sub-recipes
+ * (see the file header).
  */
 export async function explodeRecipe(
   db: Client,
   ctx: AccessContext,
   recipeVersionId: string,
   quantity: Prisma.Decimal | number | string,
-  _path: string[] = []
+  opts: { stock?: boolean } = {}
 ): Promise<ExplosionResult> {
   const result: ExplosionResult = new Map();
-  await explodeInto(db, ctx, recipeVersionId, D(quantity), result, _path);
+  await explodeInto(db, ctx, recipeVersionId, D(quantity), result, [], opts.stock === true);
   return result;
 }
 
@@ -93,7 +100,8 @@ async function explodeInto(
   recipeVersionId: string,
   quantity: Prisma.Decimal,
   acc: ExplosionResult,
-  path: string[]
+  path: string[],
+  stock: boolean
 ): Promise<void> {
   if (path.length > MAX_DEPTH) throw new RecipeCycleError([...path, recipeVersionId]);
 
@@ -124,8 +132,16 @@ async function explodeInto(
     } else if (line.componentType === "SUB_RECIPE") {
       if (!line.subRecipeId) throw new ValidationError("SUB_RECIPE line missing subRecipeId");
       const subVersion = await getActiveVersion(db, ctx, line.subRecipeId);
-      // `effective` is the required quantity of the sub-recipe's output.
-      await explodeInto(db, ctx, subVersion.id, effective, acc, nextPath);
+      // `effective` is the required quantity of the sub-recipe's output, in its yield unit.
+      if (stock) {
+        const sub = await db.recipe.findUnique({ where: { id: line.subRecipeId }, select: { stocked: true, outputMaterialId: true } });
+        if (sub?.stocked && sub.outputMaterialId) {
+          const inBase = await convertToBase(db, ctx, sub.outputMaterialId, effective, subVersion.yieldUnitId);
+          acc.set(sub.outputMaterialId, (acc.get(sub.outputMaterialId) ?? D(0)).plus(inBase));
+          continue;
+        }
+      }
+      await explodeInto(db, ctx, subVersion.id, effective, acc, nextPath, stock);
     } else {
       throw new ValidationError(`Unknown component type ${line.componentType}`);
     }
@@ -147,7 +163,7 @@ export async function calculateRecipeCost(
   if (!version || version.organizationId !== ctx.organizationId) throw new NotFoundError("Recipe version not found");
   const quantity = opts.quantity !== undefined ? D(opts.quantity) : D(version.yieldQty);
 
-  const exploded = await explodeRecipe(db, ctx, recipeVersionId, quantity);
+  const exploded = await explodeRecipe(db, ctx, recipeVersionId, quantity, { stock: true });
   const costs = await db.outletMaterialCost.findMany({
     where: { organizationId: ctx.organizationId, outletId: opts.outletId, materialId: { in: [...exploded.keys()] } },
   });
@@ -156,12 +172,30 @@ export async function calculateRecipeCost(
   const lines: RecipeCostLine[] = [];
   let total = D(0);
   for (const [materialId, q] of exploded) {
-    const unitCost = costMap.get(materialId) ?? D(0);
+    let unitCost = costMap.get(materialId) ?? D(0);
+    if (unitCost.isZero()) unitCost = (await preparedUnitCost(db, ctx, materialId, opts.outletId)) ?? unitCost;
     const cost = money(dMul(q, unitCost));
     total = total.plus(cost);
     lines.push({ materialId, quantity: roundQty(q), unitCost, cost });
   }
   return { total: money(total), quantity, lines };
+}
+
+/**
+ * Recipe cost of one base unit of a batch-produced material that has no
+ * average cost at the outlet yet (never produced there), or null when the
+ * material is not a stocked sub-recipe output. Recursion ends because recipe
+ * graphs are acyclic (checked on write and on every explosion).
+ */
+async function preparedUnitCost(db: Client, ctx: AccessContext, materialId: string, outletId: string): Promise<Prisma.Decimal | null> {
+  const recipe = await db.recipe.findFirst({ where: { organizationId: ctx.organizationId, outputMaterialId: materialId, outputType: "SUB_RECIPE", stocked: true, active: true }, select: { id: true } });
+  if (!recipe) return null;
+  const version = await findActiveVersion(db, ctx, recipe.id);
+  if (!version) return null;
+  const yieldBase = await convertToBase(db, ctx, materialId, D(version.yieldQty), version.yieldUnitId);
+  if (yieldBase.lte(0)) return null;
+  const cost = await calculateRecipeCost(db, ctx, version.id, { outletId, quantity: version.yieldQty });
+  return dDiv(cost.total, yieldBase);
 }
 
 // ------------------------------------------------------------
@@ -261,9 +295,12 @@ const createRecipeSchema = z.object({
   outputType: RecipeOutputType.zod,
   menuItemId: z.string().optional(),
   outputMaterialId: z.string().optional(),
+  /** SUB_RECIPE only: made in batches and held as prepared stock. */
+  stocked: z.boolean().default(false),
   yieldQty: z.number().positive().default(1),
   yieldUnitId: z.string().optional(),
   servingSize: z.number().positive().default(1),
+  overheadPct: z.number().min(0).max(500).default(0),
   notes: z.string().optional(),
   lines: z.array(z.unknown()).default([]),
 });
@@ -278,18 +315,41 @@ export async function createRecipe(ctx: AccessContext, input: Omit<z.input<typeo
       const item = await tx.menuItem.findUnique({ where: { id: data.menuItemId }, include: { recipe: true } });
       if (!item || item.organizationId !== ctx.organizationId) throw new NotFoundError("Menu item not found");
       if (item.recipe) throw new ValidationError(`${item.name} already has a recipe; add a new version instead`);
+      if (data.stocked) throw new ValidationError("Only sub-recipes can be held as prepared stock");
     } else {
       if (!data.outputMaterialId || data.menuItemId) throw new ValidationError("SUB_RECIPE recipes need outputMaterialId (and no menuItemId)");
       const m = await tx.material.findUnique({ where: { id: data.outputMaterialId } });
       if (!m || m.organizationId !== ctx.organizationId) throw new NotFoundError("Output material not found");
     }
-    const recipe = await tx.recipe.create({ data: { organizationId: ctx.organizationId, name: data.name, outputType: data.outputType, menuItemId: data.menuItemId, outputMaterialId: data.outputMaterialId, createdById: actor(ctx) } });
+    const recipe = await tx.recipe.create({ data: { organizationId: ctx.organizationId, name: data.name, outputType: data.outputType, menuItemId: data.menuItemId, outputMaterialId: data.outputMaterialId, stocked: data.stocked, createdById: actor(ctx) } });
     const version = await tx.recipeVersion.create({
-      data: { organizationId: ctx.organizationId, recipeId: recipe.id, version: 1, status: "DRAFT", yieldQty: D(data.yieldQty), yieldUnitId: data.yieldUnitId, servingSize: D(data.servingSize), notes: data.notes, createdById: actor(ctx) },
+      data: { organizationId: ctx.organizationId, recipeId: recipe.id, version: 1, status: "DRAFT", yieldQty: D(data.yieldQty), yieldUnitId: data.yieldUnitId, servingSize: D(data.servingSize), overheadPct: D(data.overheadPct), notes: data.notes, createdById: actor(ctx) },
     });
     for (const line of data.lines) await insertLine(tx, ctx, version, line as RecipeLineInput);
-    await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "Recipe", entityId: recipe.id, after: { name: data.name, outputType: data.outputType, versionId: version.id } });
+    await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "Recipe", entityId: recipe.id, after: { name: data.name, outputType: data.outputType, stocked: data.stocked, versionId: version.id } });
     return { recipe, version };
+  });
+}
+
+/**
+ * Mark a sub-recipe as batch-produced (dishes draw on its prepared stock) or
+ * made to order (dishes explode through it). Applies to consumption from now
+ * on; stock already moved is never rewritten.
+ */
+export async function setRecipeStocked(ctx: AccessContext, recipeId: string, stocked: boolean, db: Client = prisma) {
+  z.boolean().parse(stocked);
+  assertOrgWide(ctx, "recipe.manage");
+  return runInTx(db, async (tx) => {
+    const recipe = await loadRecipe(tx, ctx, recipeId);
+    if (recipe.outputType !== "SUB_RECIPE" || !recipe.outputMaterialId) throw new ValidationError("Only sub-recipes can be held as prepared stock");
+    if (recipe.stocked === stocked) return recipe;
+    if (!stocked) {
+      const open = await tx.productionBatch.count({ where: { organizationId: ctx.organizationId, outputMaterialId: recipe.outputMaterialId, status: { in: ["DRAFT", "IN_PROGRESS"] } } });
+      if (open) throw new ValidationError(`${recipe.name} has ${open} open production batch(es); complete or cancel them first`);
+    }
+    const updated = await tx.recipe.update({ where: { id: recipeId }, data: { stocked } });
+    await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "Recipe", entityId: recipeId, before: { stocked: recipe.stocked }, after: { stocked } });
+    return updated;
   });
 }
 
@@ -297,6 +357,8 @@ const versionSchema = z.object({
   yieldQty: z.number().positive().optional(),
   yieldUnitId: z.string().optional(),
   servingSize: z.number().positive().optional(),
+  /** Overhead on top of ingredient cost, in % (proposal p. 4). */
+  overheadPct: z.number().min(0).max(500).optional(),
   notes: z.string().optional(),
   effectiveFrom: z.coerce.date().optional(),
   /** Copy lines from this version (default: the latest version). */
@@ -321,6 +383,7 @@ export async function createRecipeVersion(ctx: AccessContext, recipeId: string, 
         organizationId: ctx.organizationId, recipeId, version: (latest?.version ?? 0) + 1, status: "DRAFT",
         yieldQty: data.yieldQty !== undefined ? D(data.yieldQty) : source?.yieldQty ?? D(1),
         yieldUnitId: data.yieldUnitId ?? source?.yieldUnitId, servingSize: data.servingSize !== undefined ? D(data.servingSize) : source?.servingSize ?? D(1),
+        overheadPct: data.overheadPct !== undefined ? D(data.overheadPct) : source?.overheadPct ?? D(0),
         notes: data.notes, ...(data.effectiveFrom ? { effectiveFrom: data.effectiveFrom } : {}), createdById: actor(ctx),
       },
     });
@@ -339,7 +402,7 @@ export async function updateRecipeVersion(ctx: AccessContext, versionId: string,
     const v = await loadDraft(tx, ctx, versionId);
     const updated = await tx.recipeVersion.update({
       where: { id: versionId },
-      data: { ...data, ...(data.yieldQty !== undefined ? { yieldQty: D(data.yieldQty) } : {}), ...(data.servingSize !== undefined ? { servingSize: D(data.servingSize) } : {}) },
+      data: { ...data, ...(data.yieldQty !== undefined ? { yieldQty: D(data.yieldQty) } : {}), ...(data.servingSize !== undefined ? { servingSize: D(data.servingSize) } : {}), ...(data.overheadPct !== undefined ? { overheadPct: D(data.overheadPct) } : {}) },
     });
     await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "RecipeVersion", entityId: versionId, before: { yieldQty: num(v.yieldQty), effectiveFrom: v.effectiveFrom }, after: data });
     return updated;
@@ -485,6 +548,11 @@ export async function describeCostLines(db: Client, ctx: AccessContext, lines: R
 }
 
 /** Theoretical plate cost of a menu item at an outlet (active version, current avg cost) vs its price. */
+/** Plate cost = ingredient cost x (1 + overhead % / 100), to the paisa. */
+export function plateCostOf(ingredients: Prisma.Decimal, overheadPct: Prisma.Decimal.Value) {
+  return money(D(ingredients).times(D(1).plus(dDiv(D(overheadPct), 100))));
+}
+
 export async function menuItemCostAndMargin(db: Client, ctx: AccessContext, menuItemId: string, outletId: string) {
   assertOutletAccess(ctx, outletId);
   const item = await db.menuItem.findUnique({ where: { id: menuItemId } });
@@ -492,9 +560,18 @@ export async function menuItemCostAndMargin(db: Client, ctx: AccessContext, menu
   const version = await getActiveVersionForMenuItem(db, ctx, menuItemId);
   if (!version) throw new ValidationError(`${item.name} has no approved recipe`);
   const cost = await calculateRecipeCost(db, ctx, version.id, { outletId, quantity: 1 });
-  const price = D(item.price);
+  const override = await db.outletMenuItem.findUnique({ where: { outletId_menuItemId: { outletId, menuItemId } }, select: { price: true } });
+  const price = D(override?.price ?? item.price);
+  const plate = plateCostOf(cost.total, version.overheadPct);
   return {
-    menuItemId, versionId: version.id, price: num(price), cost: num(cost.total), margin: num(money(price.minus(cost.total))),
+    menuItemId, versionId: version.id, price: num(price),
+    /** Ingredient cost of one portion. */
+    cost: num(cost.total),
+    overheadPct: num(D(version.overheadPct)), overhead: num(money(plate.minus(cost.total))),
+    /** Ingredients + overhead: what one plate costs to make. */
+    plateCost: num(plate),
+    margin: num(money(price.minus(plate))),
+    /** Food cost % = ingredients / price (overhead is not food). */
     foodCostPct: price.gt(0) ? num(money(cost.total.div(price).times(100))) : 0, lines: cost.lines,
   };
 }

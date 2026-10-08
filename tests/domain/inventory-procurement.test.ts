@@ -34,12 +34,14 @@ import { num } from "@/domain/money";
 const RUN = Date.now().toString(36);
 let orgId: string, A: string, B: string, foreignOrg: string, foreignOutlet: string;
 let sys: AccessContext, manager: AccessContext, store: AccessContext, kitchen: AccessContext, storeB: AccessContext, foreign: AccessContext, both: AccessContext;
-let kg: string, g: string, crate: string, pc: string, vendor: string, vendor2: string;
+let kg: string, g: string, crate: string, pc: string, vendor: string, vendor2: string, kitchenDept: string;
 let tomato: string, rice: string, cheese: string, chicken: string, foreignMaterial: string;
 
 const role = (id: string, outlet: string, r: string): AccessContext => ({ userId: `${id}-${RUN}`, organizationId: orgId, outletIds: [outlet], roles: [r], outletRoles: { [outlet]: [r] }, orgRoles: [], isOrgWide: false, isSuperAdmin: false });
 const qty = async (outletId: string, materialId: string) => num(await currentQuantity(prisma, sys, outletId, materialId));
 const avg = async (outletId: string, materialId: string) => num(await getAvgCost(prisma, sys, outletId, materialId));
+/** On hand not assigned to any department (where receipts land and issues start). */
+const unassigned = async (outletId: string, materialId: string) => num((await prisma.inventoryLedger.aggregate({ where: { outletId, materialId, departmentId: null }, _sum: { qty: true } }))._sum.qty ?? 0);
 let n = 0;
 const key = (p = "k") => `${p}-${RUN}-${++n}-xyz`;
 const mat = (name: string) => prisma.material.create({ data: { organizationId: orgId, sku: `${name}-${RUN}`, name: `${name} ${RUN}`, baseUnitId: kg } }).then((m) => m.id);
@@ -54,6 +56,8 @@ beforeAll(async () => {
   A = (await prisma.outlet.create({ data: { organizationId: orgId, code: `PA${RUN}`, name: "P3 A" } })).id;
   B = (await prisma.outlet.create({ data: { organizationId: orgId, code: `PB${RUN}`, name: "P3 B" } })).id;
   sys = systemContext(orgId, [A, B]);
+  // Issues move stock between departments of an outlet (they net to zero).
+  kitchenDept = (await prisma.department.create({ data: { organizationId: orgId, outletId: A, name: `Kitchen ${RUN}`, kind: "KITCHEN" } })).id;
   manager = role("mgr", A, "MANAGER");
   store = role("store", A, "STORE");
   kitchen = role("kit", A, "KITCHEN");
@@ -107,13 +111,19 @@ describe("units: everything posts in the base unit", () => {
   });
 
   it("issue, transfer and stock count quantities are converted too", async () => {
-    const issue = await createIssue(store, { outletId: A, lines: [{ materialId: tomato, qty: 1, unitId: crate }] });
+    // An issue moves 1 crate (12 kg) from unassigned stock to the kitchen: the outlet total is unchanged.
+    await expect(createIssue(store, { outletId: A, lines: [{ materialId: tomato, qty: 1, unitId: crate }] })).rejects.toThrow(/department receiving/);
+    const issue = await createIssue(store, { outletId: A, toDepartmentId: kitchenDept, lines: [{ materialId: tomato, qty: 1, unitId: crate }] });
     await postIssue(store, issue.id);
-    expect(await qty(A, tomato)).toBe(17);
+    expect(await qty(A, tomato)).toBe(29);
+    const rows = await prisma.inventoryLedger.findMany({ where: { sourceId: issue.id }, orderBy: { qty: "asc" } });
+    expect(rows.map((r) => [r.departmentId, num(r.qty)])).toEqual([[null, -12], [kitchenDept, 12]]);
+    expect(num(rows[0].rate)).toBe(num(rows[1].rate)); // cost follows the stock
+    expect(await avg(A, tomato)).toBeCloseTo((24 * 50 + 5 * 80) / 29, 2); // an internal move never re-averages
     const t = await createTransfer(both, { fromOutletId: A, toOutletId: B, lines: [{ materialId: tomato, requestedQty: 500, unitId: g }] });
     await dispatchTransfer(both, t.id);
     await receiveTransfer(both, t.id);
-    expect(await qty(A, tomato)).toBe(16.5);
+    expect(await qty(A, tomato)).toBe(28.5);
     expect(await qty(B, tomato)).toBe(0.5);
     const outRow = await prisma.inventoryLedger.findFirstOrThrow({ where: { sourceId: t.id, txnType: "TRANSFER_OUT" } });
     const inRow = await prisma.inventoryLedger.findFirstOrThrow({ where: { sourceId: t.id, txnType: "TRANSFER_IN" } });
@@ -123,13 +133,13 @@ describe("units: everything posts in the base unit", () => {
     await startStockCount(store, count.id, { materialIds: [tomato] });
     const after = await enterStockCounts(store, count.id, [{ materialId: tomato, physicalQty: 1, unitId: crate }]); // 12 kg counted
     expect(num(after!.lines[0].physicalQty)).toBe(12);
-    expect(num(after!.lines[0].variance)).toBe(-4.5);
+    expect(num(after!.lines[0].variance)).toBe(-16.5);
     await submitStockCountForReview(store, count.id);
     await expect(approveStockCount(store, count.id)).rejects.toBeInstanceOf(ForbiddenError); // STORE cannot approve adjustments
     await approveStockCount(manager, count.id);
     expect(await qty(A, tomato)).toBe(12);
     const report = await getReport(prisma, manager, "STOCK_COUNT_VARIANCE", { outletId: A });
-    expect(report.rows.find((r) => r.count === count.number)).toMatchObject({ book: 16.5, physical: 12, variance: -4.5 });
+    expect(report.rows.find((r) => r.count === count.number)).toMatchObject({ book: 28.5, physical: 12, variance: -16.5 });
   });
 
   it("an incompatible / unknown unit is refused everywhere — never treated as the base unit", async () => {
@@ -137,7 +147,7 @@ describe("units: everything posts in the base unit", () => {
     await expect(createGRN(store, { outletId: A, vendorId: vendor, lines: bad })).rejects.toThrow(/cannot be converted/);
     await expect(createPurchaseOrder(manager, { outletId: A, vendorId: vendor, lines: bad })).rejects.toThrow(/cannot be converted/);
     await expect(createIndent(store, { outletId: A, lines: [{ materialId: rice, qty: 2, unitId: pc }] })).rejects.toThrow(/cannot be converted/);
-    await expect(createIssue(store, { outletId: A, lines: [{ materialId: rice, qty: 2, unitId: pc }] })).rejects.toThrow(/cannot be converted/);
+    await expect(createIssue(store, { outletId: A, toDepartmentId: kitchenDept, lines: [{ materialId: rice, qty: 2, unitId: pc }] })).rejects.toThrow(/cannot be converted/);
     await expect(createTransfer(both, { fromOutletId: A, toOutletId: B, lines: [{ materialId: rice, requestedQty: 2, unitId: "no-such-unit" }] })).rejects.toThrow(/cannot be converted/);
     await expect(createTransfer(manager, { fromOutletId: A, toOutletId: B, lines: [{ materialId: rice, requestedQty: 2 }] })).rejects.toBeInstanceOf(ForbiddenError); // no access to B
     // The crate conversion is tomato-specific: it does not apply to rice.
@@ -282,12 +292,13 @@ describe("purchase bills", () => {
 describe("stock shortages and transfer receipt rules", () => {
   it("issues and transfer dispatches cannot take more than is on hand (no partial effect)", async () => {
     const onHand = await qty(A, cheese);
-    const issue = await createIssue(store, { outletId: A, lines: [{ materialId: cheese, qty: onHand + 1 }] });
-    await expect(postIssue(store, issue.id)).rejects.toThrow(/Insufficient stock/);
+    const loose = await unassigned(A, cheese); // the issuing side: stock not yet in any department
+    const issue = await createIssue(store, { outletId: A, toDepartmentId: kitchenDept, lines: [{ materialId: cheese, qty: loose + 1 }] });
+    await expect(postIssue(store, issue.id)).rejects.toThrow(/Insufficient stock of .* in unassigned stock/);
     expect(await prisma.inventoryLedger.count({ where: { sourceId: issue.id } })).toBe(0);
     expect((await prisma.inventoryIssue.findUniqueOrThrow({ where: { id: issue.id } })).status).toBe("DRAFT");
     // Two lines of one material that fit only separately are refused together.
-    const split = await createIssue(store, { outletId: A, lines: [{ materialId: cheese, qty: onHand }, { materialId: cheese, qty: 0.5 }] });
+    const split = await createIssue(store, { outletId: A, toDepartmentId: kitchenDept, lines: [{ materialId: cheese, qty: loose }, { materialId: cheese, qty: 0.5 }] });
     await expect(postIssue(store, split.id)).rejects.toThrow(/Insufficient stock/);
     const t = await createTransfer(both, { fromOutletId: A, toOutletId: B, lines: [{ materialId: cheese, requestedQty: onHand + 1 }] });
     await expect(dispatchTransfer(both, t.id)).rejects.toThrow(/Insufficient stock/);
@@ -295,13 +306,14 @@ describe("stock shortages and transfer receipt rules", () => {
   });
 
   it("concurrent issues that fit only one at a time: exactly one posts", async () => {
-    const onHand = await qty(A, cheese); // 2
-    const a = await createIssue(store, { outletId: A, lines: [{ materialId: cheese, qty: onHand * 0.75 }] });
-    const b = await createIssue(store, { outletId: A, lines: [{ materialId: cheese, qty: onHand * 0.75 }] });
+    const onHand = await qty(A, cheese);
+    const loose = await unassigned(A, cheese);
+    const a = await createIssue(store, { outletId: A, toDepartmentId: kitchenDept, lines: [{ materialId: cheese, qty: loose * 0.75 }] });
+    const b = await createIssue(store, { outletId: A, toDepartmentId: kitchenDept, lines: [{ materialId: cheese, qty: loose * 0.75 }] });
     const res = await Promise.allSettled([postIssue(store, a.id), postIssue(store, b.id)]);
     expect(res.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-    expect(await qty(A, cheese)).toBeCloseTo(onHand * 0.25, 6);
-    expect(await qty(A, cheese)).toBeGreaterThanOrEqual(0);
+    expect(await unassigned(A, cheese)).toBeCloseTo(loose * 0.25, 6);
+    expect(await qty(A, cheese)).toBeCloseTo(onHand, 6); // a move, not consumption
   });
 
   it("receive ≤ dispatched, damaged ≤ received, dispatch ≤ requested; only good goods arrive", async () => {

@@ -155,6 +155,7 @@ function OpsPanel({ d, perms }: { d: Summary; perms: ManagerPerms }) {
 }
 
 function AlertsPanel({ d }: { d: Summary }) {
+  const { can } = useShell();
   const inv = d.inventory;
   const fin = d.finance;
   return (
@@ -172,7 +173,10 @@ function AlertsPanel({ d }: { d: Summary }) {
       )}
       {inv && (
         <section aria-label="Inventory alerts" className="space-y-2">
-          <h2 className="text-sm font-semibold">Inventory</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold">Inventory</h2>
+            {can("purchase.view") && <Link href="/procurement/reorder" className="text-xs text-brand-600 hover:underline">Open reorder</Link>}
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <Tile label="Low stock" value={inv.lowStock} hint={inv.criticalStock ? `${inv.criticalStock} critical` : undefined} tone={inv.criticalStock ? "bad" : inv.lowStock ? "warn" : undefined} />
             <Tile label="Negative stock" value={inv.negativeStock} tone={inv.negativeStock ? "bad" : undefined} />

@@ -10,6 +10,8 @@ import { z } from "zod";
 import { type AccessContext, assertOutletAccess, NotFoundError, ForbiddenError } from "@/server/db/scope";
 import { assertCan, can, type Permission } from "@/server/auth/rbac";
 import { authorizedOutletIds } from "@/server/services/analytics";
+import { canSeeStockValue, withoutLineCosts } from "@/server/services/costVisibility";
+import { D, money, num, qty as roundQty } from "@/domain/money";
 
 const listFilter = z.object({
   outletId: z.string().optional(),
@@ -47,8 +49,11 @@ function readable<T extends { organizationId: string; outletId: string }>(ctx: A
 
 // ---------------- procurement ----------------
 
+/** Indents carry no prices: whoever may raise one (the kitchen) may list them. */
+const indentReadPermission = (ctx: AccessContext, outletId?: string): Permission => (can(ctx, "purchase.view", outletId) ? "purchase.view" : "indent.create");
+
 export async function listIndents(db: PrismaClient, ctx: AccessContext, input: DocumentListFilter = {}) {
-  const { f, ids, createdAt } = prep(ctx, input, "purchase.view");
+  const { f, ids, createdAt } = prep(ctx, input, indentReadPermission(ctx, input.outletId));
   const rows = await db.purchaseIndent.findMany({
     where: { organizationId: ctx.organizationId, outletId: { in: ids }, ...(f.status ? { status: f.status } : {}), ...(createdAt ? { createdAt } : {}) },
     orderBy: ORDER, take: f.take + 1, ...cursorArgs(f.cursor), include: { _count: { select: { lines: true } } },
@@ -57,7 +62,8 @@ export async function listIndents(db: PrismaClient, ctx: AccessContext, input: D
 }
 
 export async function getIndent(db: PrismaClient, ctx: AccessContext, id: string) {
-  return readable(ctx, await db.purchaseIndent.findUnique({ where: { id }, include: { lines: true } }), "Indent", "purchase.view");
+  const row = await db.purchaseIndent.findUnique({ where: { id }, include: { lines: true } });
+  return readable(ctx, row, "Indent", indentReadPermission(ctx, row?.outletId));
 }
 
 export async function listPurchaseOrders(db: PrismaClient, ctx: AccessContext, input: DocumentListFilter = {}) {
@@ -151,13 +157,51 @@ export async function listStockCounts(db: PrismaClient, ctx: AccessContext, inpu
 }
 
 export async function getStockCount(db: PrismaClient, ctx: AccessContext, id: string) {
-  return readable(ctx, await db.stockCount.findUnique({ where: { id }, include: { lines: true } }), "Stock count", "inventory.view");
+  const count = readable(ctx, await db.stockCount.findUnique({ where: { id }, include: { lines: true } }), "Stock count", "inventory.view");
+  // Variance in rupees is a cost figure: quantities only for a kitchen login.
+  return canSeeStockValue(ctx, count.outletId) ? count : { ...count, lines: count.lines.map((l) => ({ ...l, costImpact: null })) };
 }
 
 export async function getWastage(db: PrismaClient, ctx: AccessContext, id: string) {
-  return readable(ctx, await db.wastage.findUnique({ where: { id }, include: { lines: true } }), "Wastage document", "inventory.view");
+  const doc = readable(ctx, await db.wastage.findUnique({ where: { id }, include: { lines: true } }), "Wastage document", "inventory.view");
+  return withoutLineCosts(ctx, doc.outletId, doc);
 }
 
+/**
+ * A batch with who planned and completed it, its yield against the plan and,
+ * once completed and for logins that may see costs, what it cost: the
+ * PRODUCTION_CONSUMPTION / PRODUCTION_OUTPUT ledger rows it posted (proposal
+ * p. 8 "costs the batch, and therefore the per-litre rate").
+ */
 export async function getProductionBatch(db: PrismaClient, ctx: AccessContext, id: string) {
-  return readable(ctx, await db.productionBatch.findUnique({ where: { id }, include: { lines: true } }), "Production batch", "inventory.view");
+  const batch = readable(ctx, await db.productionBatch.findUnique({ where: { id }, include: { lines: true } }), "Production batch", "inventory.view");
+  const done = batch.status === "COMPLETED";
+  const [rows, completion] = done
+    ? await Promise.all([
+        db.inventoryLedger.findMany({ where: { organizationId: ctx.organizationId, sourceType: "PRODUCTION", sourceId: batch.id }, select: { materialId: true, txnType: true, qty: true, rate: true, amount: true }, orderBy: { id: "asc" } }),
+        db.auditLog.findFirst({ where: { organizationId: ctx.organizationId, entityType: "ProductionBatch", entityId: batch.id, action: "INVENTORY_MOVEMENT" }, select: { actorId: true } }),
+      ])
+    : [[], null];
+  const people = [batch.createdById, completion?.actorId].filter((x): x is string => Boolean(x));
+  const users = people.length ? await db.user.findMany({ where: { organizationId: ctx.organizationId, id: { in: people } }, select: { id: true, name: true } }) : [];
+  const nameOf = (userId: string | null | undefined) => (userId ? users.find((u) => u.id === userId)?.name ?? null : null);
+  const planned = D(batch.plannedQty);
+  const gap = D(batch.actualQty).minus(planned);
+  let costing: { inputCost: number; unitCost: number | null; inputs: Array<{ materialId: string; qty: number; rate: number; cost: number }> } | null = null;
+  if (done && canSeeStockValue(ctx, batch.outletId)) {
+    const inputs = rows.filter((r) => r.txnType === "PRODUCTION_CONSUMPTION");
+    const output = rows.find((r) => r.txnType === "PRODUCTION_OUTPUT");
+    costing = {
+      inputCost: num(money(inputs.reduce((s, r) => s.plus(D(r.amount).abs()), D(0)))),
+      unitCost: output ? num(D(output.rate)) : null,
+      inputs: inputs.map((r) => ({ materialId: r.materialId, qty: num(roundQty(D(r.qty).abs())), rate: num(D(r.rate)), cost: num(money(D(r.amount).abs())) })),
+    };
+  }
+  return {
+    ...batch,
+    plannedByName: nameOf(batch.createdById),
+    completedByName: nameOf(completion?.actorId),
+    yieldVariance: done ? { qty: num(roundQty(gap)), pct: planned.gt(0) ? num(money(gap.div(planned).times(100))) : null } : null,
+    costing,
+  };
 }

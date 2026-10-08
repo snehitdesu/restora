@@ -25,6 +25,7 @@ import { writeAudit } from "@/server/audit/log";
 import { type Client, type Tx, runInTx } from "@/server/services/_workflow";
 import { raiseAnomaly } from "@/server/services/anomaly";
 import { saveReconciliationTx, completeReconciliationTx } from "@/server/services/reconciliation";
+import { assertDayOpen } from "@/server/services/dayLock";
 import { outletBusinessDay, businessDateInput, type BusinessDateInput } from "@/server/services/businessDay";
 import { D, money, moneyAmount, num } from "@/domain/money";
 import { analyticsInternals as A, authorizedOutletIds, COLLECTED_PAYMENT_STATUSES, type AnalyticsFilter, type PaymentMethodRow, type SalesSummary } from "@/server/services/analytics";
@@ -122,6 +123,8 @@ export async function createExpense(ctx: AccessContext, input: z.input<typeof ex
     findPrior: (key) => prisma.expense.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: key } } }),
     create: (key, hash) => runInTx(db, async (tx) => {
       await assertOutletInOrg(tx, ctx, data.outletId);
+      await assertDayOpen(tx, ctx, data.outletId, data.spentAt ?? new Date(), "an expense");
+      if (data.paidVia === "PETTY_CASH") await assertDayOpen(tx, ctx, data.outletId, new Date(), "a petty-cash payment");
       await ensureDefaultCategories(tx, ctx);
       const cat = await tx.expenseCategory.findUnique({ where: { organizationId_name: { organizationId: ctx.organizationId, name: data.category } } });
       if (!cat || !cat.active) throw new ValidationError(`Unknown or inactive expense category "${data.category}"`);
@@ -161,6 +164,8 @@ export async function voidExpense(ctx: AccessContext, expenseId: string, reason:
     assertOutletAccess(ctx, e.outletId);
     assertCan(ctx, "expense.manage", e.outletId);
     if (e.voidedAt) throw new ValidationError("This expense is already void");
+    await assertDayOpen(tx, ctx, e.outletId, e.spentAt, "voiding this expense");
+    if (e.paidVia === "PETTY_CASH") await assertDayOpen(tx, ctx, e.outletId, new Date(), "returning money to petty cash");
     const updated = await tx.expense.update({ where: { id: expenseId }, data: { voidedAt: new Date(), voidedById: actor(ctx), voidReason: why } });
     if (e.paidVia === "PETTY_CASH") {
       await tx.pettyCashTxn.create({
@@ -237,6 +242,7 @@ export async function recordPettyCash(ctx: AccessContext, input: z.input<typeof 
 function recordPettyCashTx(ctx: AccessContext, data: z.infer<typeof pettyCashSchema>, signed: number, outflow: boolean, key: string | null, hash: string | null, db: Client) {
   return runInTx(db, async (tx) => {
     await assertOutletInOrg(tx, ctx, data.outletId);
+    await assertDayOpen(tx, ctx, data.outletId, new Date(), "petty cash");
     if (data.type === "OPENING") {
       const any = await tx.pettyCashTxn.count({ where: { organizationId: ctx.organizationId, outletId: data.outletId } });
       if (any > 0) throw new ValidationError("Petty cash already has an opening balance; use ADD or ADJUST");
@@ -368,7 +374,8 @@ export async function closeCashDrawer(ctx: AccessContext, sessionId: string, clo
 
 // ---------------- Daily sales/payment reconciliation ----------------
 
-async function expectedByMethod(tx: Tx | PrismaClient, ctx: AccessContext, outletId: string, businessDate: BusinessDateInput) {
+/** Net collections per payment method for an outlet business day (caller authorizes). */
+export async function expectedByMethod(tx: Tx | PrismaClient, ctx: AccessContext, outletId: string, businessDate: BusinessDateInput) {
   const { start, end } = await outletBusinessDay(tx, ctx, outletId, businessDate);
   const [collected, refunds] = await Promise.all([
     tx.payment.groupBy({ by: ["method"], where: { organizationId: ctx.organizationId, outletId, status: { in: COLLECTED_STATUSES }, createdAt: { gte: start, lt: end } }, _sum: { amount: true } }),
@@ -406,7 +413,7 @@ export async function saveDailyReconciliation(ctx: AccessContext, input: z.input
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "finance.reconcile", data.outletId);
   return runInTx(db, async (tx) => {
-    const day = (await outletBusinessDay(tx, ctx, data.outletId, data.businessDate)).date;
+    const day = (await assertDayOpen(tx, ctx, data.outletId, data.businessDate, "the payments reconciliation")).date;
     const expected = await expectedByMethod(tx, ctx, data.outletId, day);
     const expectedMap = new Map(expected.map((e) => [e.method, e.expected]));
     const actualMap = new Map<string, { actual: number; note?: string }>(data.actuals.map((a) => [a.method, a]));

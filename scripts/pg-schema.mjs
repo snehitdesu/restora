@@ -32,7 +32,7 @@ export const DECIMAL_CLASSES = {
 /** Every Decimal field must be classified — a new one fails generation. */
 export const DECIMAL_FIELDS = {
   UnitConversion: { factor: "FACTOR" },
-  Material: { taxPct: "PCT", minStock: "QTY", reorderLevel: "QTY" },
+  Material: { taxPct: "PCT", minStock: "QTY", reorderLevel: "QTY", parLevel: "QTY" },
   OutletMaterialCost: { avgCost: "RATE", lastCost: "RATE" },
   Vendor: { creditLimit: "MONEY" },
   VendorMaterial: { lastRate: "RATE" },
@@ -40,12 +40,12 @@ export const DECIMAL_FIELDS = {
   OutletMenuItem: { price: "MONEY" },
   MenuItemVariant: { priceDelta: "MONEY", consumptionFactor: "FACTOR" },
   ModifierOption: { priceDelta: "MONEY", materialQty: "QTY" },
-  RecipeVersion: { yieldQty: "QTY", servingSize: "QTY" },
+  RecipeVersion: { yieldQty: "QTY", servingSize: "QTY", overheadPct: "PCT" },
   RecipeLine: { qty: "QTY", wastagePct: "PCT" },
   Order: { subtotal: "MONEY", discount: "MONEY", tax: "MONEY", total: "MONEY" },
   // unitPrice: POS imports store the provider's unit price as sent, and
   // lineTotal = money(qty × unitPrice) must stay reproducible from the row.
-  OrderItem: { qty: "QTY", unitPrice: "RATE", discount: "MONEY", taxPct: "PCT", lineTotal: "MONEY" },
+  OrderItem: { qty: "QTY", unitPrice: "RATE", discount: "MONEY", taxPct: "PCT", lineTotal: "MONEY", unitCost: "RATE", lineCost: "MONEY" },
   OrderItemModifier: { priceDelta: "MONEY" },
   Payment: { amount: "MONEY" },
   Refund: { amount: "MONEY" },
@@ -60,9 +60,12 @@ export const DECIMAL_FIELDS = {
   InventoryLedger: { qty: "QTY", rate: "RATE", amount: "MONEY" },
   InventoryTransferLine: { requestedQty: "QTY", dispatchedQty: "QTY", receivedQty: "QTY", damagedQty: "QTY" },
   InventoryIssueLine: { qty: "QTY" },
+  Wastage: { dishQty: "QTY" },
   WastageLine: { qty: "QTY", estCost: "MONEY" },
   StockCountLine: { bookQty: "QTY", physicalQty: "QTY", variance: "QTY", costImpact: "MONEY" },
+  DishProduction: { preparedQty: "QTY", wastedQty: "QTY" },
   ProductionBatch: { plannedQty: "QTY", actualQty: "QTY" },
+  BankDeposit: { amount: "MONEY" },
   ProductionLine: { qty: "QTY" },
   Expense: { amount: "MONEY" },
   PettyCashTxn: { amount: "MONEY" },
@@ -74,6 +77,8 @@ export const DECIMAL_FIELDS = {
   Aggregator: { commissionPct: "PCT" },
   AggregatorOrder: { grossAmount: "MONEY", discount: "MONEY", commission: "MONEY", tax: "MONEY", platformFee: "MONEY", netPayout: "MONEY" },
   AggregatorSettlement: { expectedPayout: "MONEY", actualPayout: "MONEY", difference: "MONEY" },
+  AggregatorStatementLine: { grossAmount: "MONEY", commission: "MONEY", penalty: "MONEY", adSpend: "MONEY", otherDeductions: "MONEY", netPayout: "MONEY" },
+  AggregatorCharge: { amount: "MONEY" },
   UnmappedSale: { qty: "QTY" },
 };
 

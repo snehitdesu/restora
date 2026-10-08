@@ -4,19 +4,42 @@
  * Shared lookups for back-office screens: org master data used to populate
  * pickers and to resolve ids returned by document APIs into names. All reads
  * go through the authorized APIs; a user without the read permission simply
- * gets ids instead of names (the lookup fails closed, not open).
+ * gets ids instead of names (the lookup fails closed, not open). A login that
+ * may see stock but not the material master (the kitchen) gets its materials
+ * from the outlet's stock list instead (names, SKU and unit; no costs).
  */
+import { useMemo } from "react";
 import { useQuery, useAll } from "@/lib/hooks/useApi";
+import { useShell } from "@/lib/shellContext";
 import { Select } from "@/components/ui/Form";
 import { shortRef } from "@/lib/format";
 
-export type MaterialRow = { id: string; sku: string; name: string; active: boolean; baseUnitId: string; baseUnit?: { code: string } | null; category?: { name: string } | null; categoryId: string | null; reorderLevel: string; minStock: string; taxPct: string; perishable: boolean; trackBatch: boolean; purchaseUnitId: string | null; preferredVendorId: string | null };
-export type VendorRow = { id: string; name: string; companyName: string | null; phone: string | null; email: string | null; gstin: string | null; active: boolean; paymentTerms: string | null; creditLimit: string; address: string | null; bankAccount: string | null; bankIfsc: string | null; notes: string | null };
+export type MaterialRow = { id: string; sku: string; name: string; active: boolean; baseUnitId: string; baseUnit?: { code: string } | null; category?: { name: string } | null; categoryId: string | null; reorderLevel: string; minStock: string; parLevel?: string | null; taxPct: string; perishable: boolean; trackBatch: boolean; purchaseUnitId: string | null; preferredVendorId: string | null };
+export type VendorRow = { id: string; name: string; companyName: string | null; phone: string | null; email: string | null; gstin: string | null; active: boolean; status?: string; statusReason?: string | null; upiId?: string | null; approvedAt?: string | null; paymentTerms: string | null; creditLimit: string; address: string | null; bankAccount: string | null; bankIfsc: string | null; notes: string | null };
 export type UnitRow = { id: string; code: string; name: string; kind: string; active: boolean };
 export type DepartmentRow = { id: string; name: string; kind: string; active: boolean; outletId: string };
 
+/** Mirrors the server's canSeeStockValue: a kitchen login works with quantities only. */
+export function useCanSeeCost(): boolean {
+  const { can } = useShell();
+  return can("reports.view") || can("purchase.view") || can("finance.view");
+}
+
+type StockLite = { materialId: string; name: string | null; sku: string | null; unit: string | null; active: boolean; categoryId: string | null; reorderLevel: number };
+
 export function useMaterials(enabled = true) {
-  return useAll<MaterialRow>(enabled ? "/api/master/materials" : null);
+  const { can, outletId } = useShell();
+  const viaStock = !can("master.view") && can("inventory.view");
+  const master = useAll<MaterialRow>(enabled && !viaStock ? "/api/master/materials" : null);
+  const stock = useQuery<StockLite[]>(enabled && viaStock && outletId ? "/api/inventory/stock" : null, { outletId: outletId ?? undefined });
+  const fromStock = useMemo(() => {
+    const items: MaterialRow[] = (stock.data ?? []).filter((r) => r.name).map((r) => ({
+      id: r.materialId, sku: r.sku ?? "", name: r.name!, active: r.active, baseUnitId: "", baseUnit: r.unit ? { code: r.unit } : null, categoryId: r.categoryId,
+      reorderLevel: String(r.reorderLevel), minStock: "0", parLevel: null, taxPct: "0", perishable: false, trackBatch: false, purchaseUnitId: null, preferredVendorId: null,
+    }));
+    return { items, byId: new Map(items.map((m) => [m.id, m])), loading: stock.loading, error: stock.error, truncated: false, reload: stock.reload };
+  }, [stock.data, stock.loading, stock.error, stock.reload]);
+  return viaStock ? fromStock : master;
 }
 export function useVendors(enabled = true) {
   return useAll<VendorRow>(enabled ? "/api/master/vendors" : null);

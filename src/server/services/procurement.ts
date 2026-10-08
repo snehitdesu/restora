@@ -51,24 +51,33 @@ async function validateLines(tx: Tx, ctx: AccessContext, lines: Array<{ material
   for (const l of lines) await resolveUnit(tx, ctx, l.materialId, l.unitId);
 }
 
+export type IndentInput = z.output<typeof indentSchema>;
+
+/** Creation metadata for documents raised by another workflow (the reorder engine). */
+export type CreateMeta = { idempotencyKey?: string | null; requestHash?: string | null; source?: string | null; notes?: string | null; audit?: Record<string, unknown> };
+
 export async function createIndent(ctx: AccessContext, input: z.input<typeof indentSchema>, db: Client = prisma) {
   const data = indentSchema.parse(input);
   assertOutletAccess(ctx, data.outletId);
-  assertCan(ctx, "purchase.create", data.outletId);
-  return runInTx(db, async (tx) => {
-    await assertOutletInOrg(tx, ctx, data.outletId);
-    await validateLines(tx, ctx, data.lines);
-    const number = data.number ?? (await nextNumber(tx, tx.purchaseIndent, { outletId: data.outletId }, "IND"));
-    const indent = await tx.purchaseIndent.create({
-      data: {
-        organizationId: ctx.organizationId, outletId: data.outletId, number, departmentId: data.departmentId, status: "DRAFT",
-        createdById: actor(ctx),
-        lines: { create: data.lines.map((l) => ({ organizationId: ctx.organizationId, materialId: l.materialId, qty: l.qty, unitId: l.unitId })) },
-      },
-    });
-    await writeAudit(tx, ctx, { action: "CREATE", entityType: "PurchaseIndent", entityId: indent.id, outletId: data.outletId });
-    return indent;
+  assertCan(ctx, "indent.create", data.outletId);
+  return runInTx(db, (tx) => createIndentInTx(tx, ctx, data));
+}
+
+/** The indent create inside the caller's transaction (access already checked by the caller). */
+export async function createIndentInTx(tx: Tx, ctx: AccessContext, data: IndentInput, meta: CreateMeta = {}) {
+  await assertOutletInOrg(tx, ctx, data.outletId);
+  await validateLines(tx, ctx, data.lines);
+  const number = data.number ?? (await nextNumber(tx, tx.purchaseIndent, { outletId: data.outletId }, "IND"));
+  const indent = await tx.purchaseIndent.create({
+    data: {
+      organizationId: ctx.organizationId, outletId: data.outletId, number, departmentId: data.departmentId, status: "DRAFT",
+      notes: meta.notes ?? undefined, source: meta.source ?? undefined, idempotencyKey: meta.idempotencyKey ?? undefined, requestHash: meta.requestHash ?? undefined,
+      createdById: actor(ctx),
+      lines: { create: data.lines.map((l) => ({ organizationId: ctx.organizationId, materialId: l.materialId, qty: l.qty, unitId: l.unitId })) },
+    },
   });
+  await writeAudit(tx, ctx, { action: "CREATE", entityType: "PurchaseIndent", entityId: indent.id, outletId: data.outletId, after: meta.audit });
+  return indent;
 }
 
 export function transitionIndent(ctx: AccessContext, indentId: string, to: IndentStatus, db: Client = prisma) {
@@ -76,7 +85,10 @@ export function transitionIndent(ctx: AccessContext, indentId: string, to: Inden
     const indent = await tx.purchaseIndent.findUnique({ where: { id: indentId } });
     if (!indent || indent.organizationId !== ctx.organizationId) throw new NotFoundError("Indent not found");
     assertOutletAccess(ctx, indent.outletId);
-    assertCan(ctx, to === "APPROVED" ? "purchase.approve" : "purchase.create", indent.outletId);
+    // Whoever may raise an indent may submit it or withdraw it before approval;
+    // approving is the approver's, and anything after approval the store's.
+    const raiserMove = to === "SUBMITTED" || (to === "CANCELLED" && (indent.status === "DRAFT" || indent.status === "SUBMITTED"));
+    assertCan(ctx, to === "APPROVED" ? "purchase.approve" : raiserMove ? "indent.create" : "purchase.create", indent.outletId);
     assertTransition(INDENT_TRANSITIONS, indent.status as IndentStatus, to, "indent");
     const updated = await tx.purchaseIndent.update({
       where: { id: indentId },
@@ -120,33 +132,45 @@ export async function createPurchaseOrder(ctx: AccessContext, input: z.input<typ
     key: idempotencyKey,
     hash: requestHashOf(ctx, "purchase-order", data),
     findPrior: (key) => prisma.purchaseOrder.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: key } } }),
-    create: (key, hash) => runInTx(db, async (tx) => {
-      await assertOutletInOrg(tx, ctx, data.outletId);
-      await ensureVendor(tx, ctx, data.vendorId);
-      await validateLines(tx, ctx, data.lines);
-      if (data.indentId) {
-        const indent = await tx.purchaseIndent.findUnique({ where: { id: data.indentId } });
-        if (!indent || indent.organizationId !== ctx.organizationId) throw new NotFoundError("Indent not found");
-        if (indent.outletId !== data.outletId) throw new ValidationError("The indent belongs to a different outlet");
-        if (indent.status !== "APPROVED") throw new ValidationError(`Only an APPROVED indent can be ordered (it is ${indent.status})`);
-      }
-      const number = data.number ?? (await nextNumber(tx, tx.purchaseOrder, { outletId: data.outletId }, "PO"));
-      const totals = poTotals(data.lines.map((l) => ({ qty: l.qty, rate: l.rate, taxPct: l.taxPct ?? 0 })));
-      const po = await tx.purchaseOrder.create({
-        data: {
-          organizationId: ctx.organizationId, outletId: data.outletId, number, vendorId: data.vendorId, status: "DRAFT", indentId: data.indentId, idempotencyKey: key, requestHash: hash,
-          expectedDate: data.expectedDate, notes: data.notes, subtotal: totals.subtotal, tax: totals.tax, total: totals.total, createdById: actor(ctx),
-          lines: { create: data.lines.map((l) => ({ organizationId: ctx.organizationId, materialId: l.materialId, qty: l.qty, rate: l.rate, taxPct: l.taxPct ?? 0, unitId: l.unitId })) },
-        },
-      });
-      if (data.indentId) {
-        await tx.purchaseIndent.update({ where: { id: data.indentId }, data: { status: "CLOSED" } });
-        await writeAudit(tx, ctx, { action: "UPDATE", entityType: "PurchaseIndent", entityId: data.indentId, outletId: data.outletId, before: { status: "APPROVED" }, after: { status: "CLOSED", purchaseOrderId: po.id } });
-      }
-      await writeAudit(tx, ctx, { action: "CREATE", entityType: "PurchaseOrder", entityId: po.id, outletId: data.outletId, after: { indentId: data.indentId } });
-      return po;
-    }),
+    create: (key, hash) => runInTx(db, (tx) => createPurchaseOrderInTx(tx, ctx, data, { idempotencyKey: key, requestHash: hash })),
   });
+}
+
+export type PurchaseOrderInput = z.output<typeof poSchema>;
+export const parsePurchaseOrderInput = (input: z.input<typeof poSchema>): PurchaseOrderInput => poSchema.parse(input);
+export const parseIndentInput = (input: z.input<typeof indentSchema>): IndentInput => indentSchema.parse(input);
+
+/**
+ * The PO create inside the caller's transaction (access already checked by the
+ * caller): the same validation, vendor approval gate ("buy" needs an ACTIVE
+ * vendor) and audit as a hand-made PO.
+ */
+export async function createPurchaseOrderInTx(tx: Tx, ctx: AccessContext, data: PurchaseOrderInput, meta: CreateMeta = {}) {
+  await assertOutletInOrg(tx, ctx, data.outletId);
+  await ensureVendor(tx, ctx, data.vendorId, "buy");
+  await validateLines(tx, ctx, data.lines);
+  if (data.indentId) {
+    const indent = await tx.purchaseIndent.findUnique({ where: { id: data.indentId } });
+    if (!indent || indent.organizationId !== ctx.organizationId) throw new NotFoundError("Indent not found");
+    if (indent.outletId !== data.outletId) throw new ValidationError("The indent belongs to a different outlet");
+    if (indent.status !== "APPROVED") throw new ValidationError(`Only an APPROVED indent can be ordered (it is ${indent.status})`);
+  }
+  const number = data.number ?? (await nextNumber(tx, tx.purchaseOrder, { outletId: data.outletId }, "PO"));
+  const totals = poTotals(data.lines.map((l) => ({ qty: l.qty, rate: l.rate, taxPct: l.taxPct ?? 0 })));
+  const po = await tx.purchaseOrder.create({
+    data: {
+      organizationId: ctx.organizationId, outletId: data.outletId, number, vendorId: data.vendorId, status: "DRAFT", indentId: data.indentId,
+      idempotencyKey: meta.idempotencyKey ?? null, requestHash: meta.requestHash ?? null, source: meta.source ?? undefined,
+      expectedDate: data.expectedDate, notes: data.notes, subtotal: totals.subtotal, tax: totals.tax, total: totals.total, createdById: actor(ctx),
+      lines: { create: data.lines.map((l) => ({ organizationId: ctx.organizationId, materialId: l.materialId, qty: l.qty, rate: l.rate, taxPct: l.taxPct ?? 0, unitId: l.unitId })) },
+    },
+  });
+  if (data.indentId) {
+    await tx.purchaseIndent.update({ where: { id: data.indentId }, data: { status: "CLOSED" } });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "PurchaseIndent", entityId: data.indentId, outletId: data.outletId, before: { status: "APPROVED" }, after: { status: "CLOSED", purchaseOrderId: po.id } });
+  }
+  await writeAudit(tx, ctx, { action: "CREATE", entityType: "PurchaseOrder", entityId: po.id, outletId: data.outletId, after: { indentId: data.indentId, ...meta.audit } });
+  return po;
 }
 
 /**
@@ -169,6 +193,8 @@ export function transitionPurchaseOrder(ctx: AccessContext, poId: string, to: Pu
       const posted = await tx.goodsReceipt.count({ where: { poId, status: "POSTED" } });
       if (posted > 0) throw new ValidationError("A posted GRN exists for this PO; close it instead of cancelling");
     }
+    // A vendor dropped after the PO was raised cannot be bought from.
+    if (to === "SUBMITTED" || to === "APPROVED" || to === "ORDERED") await ensureVendor(tx, ctx, po.vendorId, "buy");
     const updated = await tx.purchaseOrder.update({
       where: { id: poId },
       data: { status: to, approvedById: to === "APPROVED" ? actor(ctx) : undefined, approvedAt: to === "APPROVED" ? new Date() : undefined },
@@ -251,7 +277,7 @@ export async function createGRN(ctx: AccessContext, input: z.input<typeof grnSch
     findPrior: (key) => prisma.goodsReceipt.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: key } } }),
     create: (key, hash) => runInTx(db, async (tx) => {
       await assertOutletInOrg(tx, ctx, data.outletId);
-      await ensureVendor(tx, ctx, data.vendorId);
+      await ensureVendor(tx, ctx, data.vendorId, "buy");
       const { byMaterial } = await grnGoodBase(tx, ctx, data.lines.map((l) => ({ ...l, damagedQty: l.damagedQty ?? 0 }))); // validates materials + units
       if (data.poId) await assertReceivableAgainstPo(tx, ctx, data.poId, data, byMaterial);
       const number = data.number ?? (await nextNumber(tx, tx.goodsReceipt, { outletId: data.outletId }, "GRN"));
@@ -394,7 +420,7 @@ export async function createPurchaseBill(ctx: AccessContext, input: z.input<type
     findPrior: (key) => prisma.purchaseBill.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: key } } }),
     create: (key, hash) => runInTx(db, async (tx) => {
       await assertOutletInOrg(tx, ctx, data.outletId);
-      await ensureVendor(tx, ctx, data.vendorId);
+      await ensureVendor(tx, ctx, data.vendorId, data.grnId ? "bill-received" : "buy");
       await validateLines(tx, ctx, data.lines);
       if (data.vendorInvoiceNo) {
         const dup = await tx.purchaseBill.findUnique({ where: { organizationId_vendorId_vendorInvoiceNo: { organizationId: ctx.organizationId, vendorId: data.vendorId, vendorInvoiceNo: data.vendorInvoiceNo } } });
@@ -500,9 +526,19 @@ function actor(ctx: AccessContext): string | null {
   return ctx.userId === "system" ? null : ctx.userId;
 }
 
-async function ensureVendor(tx: Tx, ctx: AccessContext, vendorId: string) {
+/**
+ * Vendor in this organization. Purpose "buy" (PO, GRN, a bill without a GRN)
+ * needs an ACTIVE vendor: buying from an unapproved, inactive or blacklisted
+ * vendor is blocked. Billing goods already received only refuses a vendor that
+ * was never approved; paying dues ("pay") is always allowed.
+ */
+export async function ensureVendor(tx: Tx, ctx: AccessContext, vendorId: string, purpose: "buy" | "bill-received" | "pay" = "pay") {
   const vendor = await tx.vendor.findUnique({ where: { id: vendorId } });
   if (!vendor || vendor.organizationId !== ctx.organizationId) throw new ValidationError("Vendor not found in organization");
+  if (purpose === "buy" && vendor.status !== "ACTIVE") {
+    throw new ValidationError(vendor.status === "PENDING" ? `Vendor ${vendor.name} is awaiting approval: buying from an unapproved vendor is blocked` : `Vendor ${vendor.name} is ${vendor.status.toLowerCase()}: buying from this vendor is blocked`);
+  }
+  if (purpose === "bill-received" && vendor.status === "PENDING") throw new ValidationError(`Vendor ${vendor.name} is awaiting approval`);
 }
 
 export type VendorDueRow = { vendorId: string; vendorName: string; openBills: number; billed: number; paid: number; due: number; overdue: number };

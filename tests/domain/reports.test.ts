@@ -120,7 +120,20 @@ describe("report registry", () => {
       // Phase 4 finance
       "CASH_DRAWER", "DISCOUNTS", "FINANCE_AUDIT", "INVOICES", "OUTSTANDING_ORDERS", "SALES_VS_PAYMENTS", "TAX_SUMMARY", "VENDOR_AGING",
       // Phase 5 analytics
-      "MATERIAL_CONSUMPTION", "MODIFIER_SALES", "OUTLET_COMPARISON", "PURCHASE_TREND", "SALES_TREND", "STOCK_AGEING", "VARIANT_SALES", "VENDOR_PURCHASING"].sort());
+      "MATERIAL_CONSUMPTION", "MODIFIER_SALES", "OUTLET_COMPARISON", "PURCHASE_TREND", "SALES_TREND", "STOCK_AGEING", "VARIANT_SALES", "VENDOR_PURCHASING",
+      // Groups 3 / 4 (one outlet each)
+      "CONSUMPTION_VARIANCE", "MENU_ENGINEERING", "DEPARTMENT_PNL", "DAILY_COSTING", "STOCK_BY_DEPARTMENT", "SUPPLIER_PRICES", "PURCHASE_PRICE_HISTORY", "COUNT_VARIANCE_TREND"].sort());
+  });
+
+  it("consumption variance: expected (sales) vs actual per material for one outlet, as rows and CSV", async () => {
+    await expect(getReport(prisma, ctx, "CONSUMPTION_VARIANCE", {})).rejects.toBeInstanceOf(ValidationError);
+    const r = await getReport(prisma, mgrA, "CONSUMPTION_VARIANCE", { outletId: outletA });
+    // No dish sold uses batter; the 2 kg spoiled are pure loss at the ₹60 average.
+    expect(r.rows).toEqual([expect.objectContaining({ material: "Batter", sku: `BAT-${RUN}`, expectedQty: 0, wastageQty: 2, countLossQty: 0, actualQty: 2, varianceQty: 2, expectedCost: 0, actualCost: 120, varianceCost: 120, variancePct: "" })]);
+    const csv = await exportReportCSV(mgrA, "CONSUMPTION_VARIANCE", { outletId: outletA });
+    expect(csv.csv.split("\r\n")[0]).toBe("Material,SKU,Unit,Expected qty,Wasted qty,Count loss qty,Actual qty,Variance qty,Expected cost,Actual cost,Variance cost,Variance % of expected");
+    await expect(getReport(prisma, mgrB, "CONSUMPTION_VARIANCE", { outletId: outletA })).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(getReport(prisma, kitchenA, "CONSUMPTION_VARIANCE", { outletId: outletA })).rejects.toBeInstanceOf(ForbiddenError);
   });
 
   it("returns columns in order and rows keyed by column", async () => {
@@ -189,9 +202,17 @@ describe("report security", () => {
   it("multi-outlet reports only include authorized outlets; other orgs see nothing", async () => {
     const b = await getReport(prisma, mgrB, "PAYMENTS");
     expect(b.rows.every((r) => r.outlet === `RPB${RUN}`)).toBe(true);
-    for (const id of REPORT_IDS.filter((r) => r !== "PNL")) {
+    const perOutlet = ["CONSUMPTION_VARIANCE", "MENU_ENGINEERING", "DEPARTMENT_PNL", "DAILY_COSTING", "STOCK_BY_DEPARTMENT", "SUPPLIER_PRICES", "PURCHASE_PRICE_HISTORY", "COUNT_VARIANCE_TREND"];
+    for (const id of REPORT_IDS.filter((r) => r !== "PNL" && !perOutlet.includes(r))) {
       const res = await getReport(prisma, org2, id);
       expect(res.rows).toEqual([]);
+    }
+    // Reports for one outlet: naming this organization's outlet from another organization returns nothing
+    // (daily costing reads the outlet's timezone first, so it answers 404 instead of an empty list).
+    for (const id of perOutlet) {
+      const res = getReport(prisma, org2, id, { outletId: outletA, ...JAN_RANGE });
+      if (id === "DAILY_COSTING") await expect(res).rejects.toBeInstanceOf(NotFoundError);
+      else expect((await res).rows).toEqual([]);
     }
   });
 });

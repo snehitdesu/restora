@@ -34,6 +34,7 @@ export const REAUTH_SCOPES = {
   "payment.refund": "issue a refund",
   "order.void": "cancel an order",
   "finance.void": "cancel a financial document",
+  "finance.reopen": "reopen a closed business day",
   "staff.manage": "change staff accounts or roles",
   "settings.manage": "change restaurant settings",
   "security.manage": "change account security settings",

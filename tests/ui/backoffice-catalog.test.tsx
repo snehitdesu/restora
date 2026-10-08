@@ -193,7 +193,7 @@ describe("menu items", () => {
       "GET /api/recipes/menu-items/m1/margin": () => ({ price: 250, cost: 80, margin: 170, foodCostPct: 32, versionId: "v1" }),
       "POST /api/menu/items/m1/variants": () => ({}), "POST /api/menu/items/m1/modifier-groups/g2": () => ({}), "DELETE /api/menu/items/m1/modifier-groups/g1": () => ({}),
     };
-    renderAs(<MenuItemDetail id="m1" />, ["menu.view", "menu.manage", "recipe.view"], { orgWide: true });
+    renderAs(<MenuItemDetail id="m1" />, ["menu.view", "menu.manage", "recipe.view", "reports.view"], { orgWide: true });
     expect(await screen.findByText("32.0%")).toBeInTheDocument();
     expect(gets("/api/recipes/menu-items/m1/margin")[0].query.get("outletId")).toBe(OUT_A);
     expect(screen.getByText("Required · choose 1")).toBeInTheDocument();
@@ -222,7 +222,7 @@ describe("menu items", () => {
 
   it("without an approved recipe the plate cost explains why", async () => {
     state.routes = { "GET /api/menu": () => [item()], "GET /api/menu/categories": () => cats, "GET /api/menu/modifier-groups": () => [], "GET /api/recipes/menu-items/m1/margin": () => fail(422, "ValidationError", "Paneer Tikka has no approved recipe") };
-    renderAs(<MenuItemDetail id="m1" />, ["menu.view", "recipe.view"]);
+    renderAs(<MenuItemDetail id="m1" />, ["menu.view", "recipe.view", "reports.view"]);
     expect(await screen.findByText("No approved recipe")).toBeInTheDocument();
   });
 
@@ -383,12 +383,20 @@ describe("recipes", () => {
     await userEvent.selectOptions(within(d).getByLabelText(/^Menu item/), "m1");
     await userEvent.click(within(d).getByRole("button", { name: "Create draft" }));
     await waitFor(() => expect(router.push).toHaveBeenCalledWith("/recipes/r7"));
-    expect(posts()[0].body).toEqual({ name: "Paneer Tikka", outputType: "MENU_ITEM", menuItemId: "m1", yieldQty: 1, servingSize: 1 });
+    expect(posts()[0].body).toEqual({ name: "Paneer Tikka", outputType: "MENU_ITEM", menuItemId: "m1", yieldQty: 1, servingSize: 1, overheadPct: 0 });
+  });
+
+  it("the kitchen reads recipe lines but no cost (proposal pp. 8, 12)", async () => {
+    state.routes = { "GET /api/recipes/r1": () => recipe(), "GET /api/recipes/versions/v2/cost": () => cost };
+    renderAs(<RecipeDetail id="r1" />, ["recipe.view", "menu.view", "inventory.view"]);
+    await screen.findByRole("table", { name: "Recipe lines" });
+    expect(screen.queryByRole("table", { name: "Cost breakdown" })).not.toBeInTheDocument();
+    expect(gets("/api/recipes/versions/v2/cost")).toHaveLength(0);
   });
 
   it("viewers see history, lines with names and cost, but no authoring or approval actions", async () => {
     state.routes = { "GET /api/recipes/r1": () => recipe(), "GET /api/recipes/versions/v2/cost": () => cost };
-    renderAs(<RecipeDetail id="r1" />, ["recipe.view"]);
+    renderAs(<RecipeDetail id="r1" />, ["recipe.view", "reports.view"]);
     await screen.findByRole("heading", { name: "Paneer Tikka" });
     const lines = screen.getByRole("table", { name: "Recipe lines" });
     expect(within(lines).getByText("Paneer")).toBeInTheDocument();
@@ -468,7 +476,7 @@ describe("recipes", () => {
 
   it("cost errors (e.g. missing unit conversion) are shown without hiding the recipe", async () => {
     state.routes = { "GET /api/recipes/r1": () => recipe(), "GET /api/recipes/versions/v2/cost": () => fail(422, "ValidationError", "No unit conversion from g to base unit of material mat1") };
-    renderAs(<RecipeDetail id="r1" />, ["recipe.view"]);
+    renderAs(<RecipeDetail id="r1" />, ["recipe.view", "reports.view"]);
     expect(await screen.findByText("No unit conversion from g to base unit of material mat1")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "Recipe lines" })).toBeInTheDocument();
   });
@@ -615,13 +623,26 @@ describe("vendors", () => {
     expect(posts()[1]).toMatchObject({ path: "/api/master/vendors/v1/materials", body: { materialId: "mat1", lastRate: 310, preferred: true } });
   });
 
-  it("deactivation is confirmed and sent as one PATCH", async () => {
-    state.routes = { "GET /api/master/vendors/v1": () => ({ ...vendor(), materials: [] }), "PATCH /api/master/vendors/v1": () => ({}) };
+  it("deactivation is confirmed and sent as one status change", async () => {
+    state.routes = { "GET /api/master/vendors/v1": () => ({ ...vendor(), status: "ACTIVE", materials: [] }), "POST /api/master/vendors/v1/status": () => ({}) };
     renderAs(<VendorDetail id="v1" />, ["vendor.view", "vendor.manage"], { orgWide: true });
     await userEvent.click(await screen.findByRole("button", { name: "Deactivate" }));
     await userEvent.click(within(await screen.findByRole("dialog", { name: "Deactivate Fresh Dairy?" })).getByRole("button", { name: "Deactivate" }));
     await waitFor(() => expect(posts()).toHaveLength(1));
-    expect(posts()[0]).toMatchObject({ method: "PATCH", path: "/api/master/vendors/v1", body: { active: false } });
+    expect(posts()[0]).toMatchObject({ method: "POST", path: "/api/master/vendors/v1/status", body: { status: "INACTIVE" } });
+  });
+
+  it("a pending vendor shows the buying block; only an org-wide approver sees Approve", async () => {
+    state.routes = { "GET /api/master/vendors/v1": () => ({ ...vendor(), active: false, status: "PENDING", materials: [] }), "POST /api/master/vendors/v1/status": () => ({}) };
+    const { unmount } = renderAs(<VendorDetail id="v1" />, ["vendor.view", "vendor.manage"], { orgWide: true });
+    expect(await screen.findByText(/Awaiting approval: purchase orders, goods receipts and direct bills/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    unmount();
+    renderAs(<VendorDetail id="v1" />, ["vendor.view", "vendor.manage", "purchase.approve"], { orgWide: true });
+    await userEvent.click(await screen.findByRole("button", { name: "Approve" }));
+    await userEvent.click(within(await screen.findByRole("dialog", { name: "Approve Fresh Dairy?" })).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]).toMatchObject({ method: "POST", path: "/api/master/vendors/v1/status", body: { status: "ACTIVE" } });
   });
 });
 

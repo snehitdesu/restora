@@ -25,6 +25,7 @@ import { authorizedOutletIds } from "@/server/services/analytics";
 import { ROLE_RANK } from "@/server/services/staff";
 import { isValidTimeZone } from "@/domain/time";
 import { num } from "@/domain/money";
+import { canSeeStockValue } from "@/server/services/costVisibility";
 
 const ORDER = [{ createdAt: "desc" as const }, { id: "desc" as const }];
 const pageInput = z.object({ take: z.coerce.number().int().positive().max(200).default(50), cursor: z.string().max(64).optional() });
@@ -83,7 +84,8 @@ export async function updateOrganization(ctx: AccessContext, patch: z.input<type
 
 export async function listDepartments(db: PrismaClient, ctx: AccessContext, outletId: string) {
   assertOutletAccess(ctx, outletId);
-  assertCan(ctx, "master.view", outletId);
+  // Department names are not sensitive: the kitchen filters its stock and worksheet by them.
+  if (!can(ctx, "inventory.view", outletId)) assertCan(ctx, "master.view", outletId);
   return db.department.findMany({ where: { organizationId: ctx.organizationId, outletId }, orderBy: [{ active: "desc" }, { name: "asc" }], take: 200 });
 }
 
@@ -325,8 +327,10 @@ export async function listLedger(db: PrismaClient, ctx: AccessContext, input: z.
     ...cursorArgs(f.cursor),
     include: { material: { select: { name: true, sku: true, baseUnit: { select: { code: true } } } } },
   });
+  // A kitchen login sees quantities only (proposal pp. 8, 12).
+  const costs = canSeeStockValue(ctx, f.outletId);
   return paged(
-    rows.map(({ material, ...r }) => ({ ...r, qty: num(r.qty), rate: num(r.rate), amount: num(r.amount), materialName: material.name, sku: material.sku, unit: material.baseUnit?.code ?? null })),
+    rows.map(({ material, ...r }) => ({ ...r, qty: num(r.qty), rate: costs ? num(r.rate) : null, amount: costs ? num(r.amount) : null, materialName: material.name, sku: material.sku, unit: material.baseUnit?.code ?? null })),
     f.take
   );
 }

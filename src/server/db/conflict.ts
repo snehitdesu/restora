@@ -16,6 +16,26 @@ export function isSerializationConflict(error: unknown): boolean {
 }
 
 /**
+ * A unique violation on the stock ledger's posting key (InventoryLedger.sourceRef).
+ * Every stock movement has a deterministic key (`wastage:<doc>:<material>`,
+ * `grn:<grn>:<line>`, `production:<batch>:out`, `issue:…`), and documents are
+ * posted by "read it as a draft, write the ledger rows, mark it posted". Two
+ * posts of one document at the same moment on PostgreSQL therefore both read the
+ * draft; the second ledger insert waits for the first and then fails with
+ * 23505 (P2002), not 40001, although it is the same serialization anomaly. The
+ * unique key already kept stock from moving twice; re-running the transaction
+ * sees the committed post and gives the normal answer (already posted / a no-op)
+ * instead of a 500. Measured 2026-10-08 (tests/db/production-concurrency.test.ts).
+ */
+export function isLedgerKeyRace(error: unknown): boolean {
+  const e = error as { code?: unknown; meta?: { target?: unknown } } | null;
+  if (!e || e.code !== "P2002") return false;
+  const target = e.meta?.target;
+  const fields = Array.isArray(target) ? target.map(String) : [String(target ?? "")];
+  return fields.some((f) => f === "sourceRef" || f === "InventoryLedger_sourceRef_key");
+}
+
+/**
  * Is the database unreachable or restarting (a transient outage, not a bug)?
  * Measured during a PostgreSQL restart under load (Phase 12): Prisma reported
  * P1001 "Can't reach database server", and unknown-request errors carrying

@@ -54,3 +54,9 @@ npm-debug.log*
 *.dump
 *.dump.enc
 *.dump.partial
+
+# Local agent tooling and generated promo renders (not application source)
+/.agents/
+/.claude/
+/brag-output/
+/skills-lock.json

@@ -22,6 +22,7 @@ const HELP: Record<string, string> = {
   restora_payment_failures_total: "Payment operations that failed (gateway rejection, failed capture webhook, verification error)",
   restora_integration_failures_total: "Outbound integration attempts that failed, by kind",
   restora_job_failures_total: "Background job failures, by job type",
+  restora_job_runs_total: "Scheduled job runs (once a day per scope), by job and outcome",
   restora_db_errors_total: "Database errors reported by the client",
   restora_keyed_lock_waits_total: "Transactions that queued in-process behind another one on the same key (e.g. settlements at one outlet) instead of colliding in the database",
   restora_db_serialization_conflicts_total: "Serialization conflicts (P2034) — retried by runInTx; sustained growth = write contention",

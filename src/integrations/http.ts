@@ -107,3 +107,37 @@ export function nextAttemptAt(attempts: number, now = new Date()): Date {
   const minutes = [1, 5, 30, 120][Math.min(attempts - 1, 3)] ?? 120;
   return new Date(now.getTime() + minutes * 60000);
 }
+
+/** Unauthorized at the provider: wrong / revoked credentials. Never retried until the credentials change. */
+export class UnauthorizedIntegrationError extends IntegrationError {
+  constructor(message: string, httpStatus?: number) {
+    super("REJECTED", message, false, httpStatus);
+    this.name = "UnauthorizedIntegrationError";
+  }
+}
+
+/**
+ * One request with a deadline; returns status and body text without judging
+ * the status (callers classify it). Network failure / timeout are retryable
+ * IntegrationErrors that carry nothing from the request.
+ */
+export async function sendRequest(fetchImpl: FetchLike, url: string, init: RequestInit, timeoutMs: number): Promise<{ status: number; text: string }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(url, { ...init, signal: ctrl.signal });
+    return { status: res.status, text: await res.text() };
+  } catch (e) {
+    if ((e as { name?: string })?.name === "AbortError") throw new IntegrationError("TIMEOUT", "Provider did not answer in time", true);
+    throw new IntegrationError("UNAVAILABLE", "Provider unreachable", true);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Turn an error status into the right IntegrationError: 401 / 403 unauthorized, 429 / 5xx retryable, other 4xx rejected. */
+export function classifyStatus(status: number, what: string, detail = ""): never {
+  if (status === 401 || status === 403) throw new UnauthorizedIntegrationError(`${what} refused the credentials (${status})`, status);
+  if (status === 429 || status >= 500) throw new IntegrationError("UNAVAILABLE", `${what} returned ${status}`, true, status);
+  throw new IntegrationError("REJECTED", safeMessage(`${what} refused the request (${status})${detail ? `: ${detail}` : ""}`), false, status);
+}

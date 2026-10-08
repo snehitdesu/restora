@@ -36,6 +36,13 @@ type VendorDetailRow = VendorRow & { materials: Array<VendorLink & { material: {
 export type Conversion = { id: string; fromUnitId: string; toUnitId: string; from: string; to: string; factor: number; materialId: string | null; material: string | null };
 
 const ACTIVE_FILTER = [{ value: "true", label: "Active" }, { value: "false", label: "Inactive" }];
+const VENDOR_STATUS_FILTER = [{ value: "ACTIVE", label: "Active" }, { value: "PENDING", label: "Awaiting approval" }, { value: "INACTIVE", label: "Inactive" }, { value: "BLACKLISTED", label: "Blacklisted" }];
+const VENDOR_TONE: Record<string, "ok" | "warn" | "neutral" | "bad"> = { ACTIVE: "ok", PENDING: "warn", INACTIVE: "neutral", BLACKLISTED: "bad" };
+const VENDOR_LABEL: Record<string, string> = { ACTIVE: "Active", PENDING: "Awaiting approval", INACTIVE: "Inactive", BLACKLISTED: "Blacklisted" };
+function VendorStatusBadge({ v }: { v: Pick<VendorRow, "active" | "status"> }) {
+  const s = v.status ?? (v.active ? "ACTIVE" : "INACTIVE");
+  return <Badge tone={VENDOR_TONE[s] ?? "neutral"}>{VENDOR_LABEL[s] ?? s}</Badge>;
+}
 
 function useMasterAuthority() {
   const { can, orgWide } = useShell();
@@ -71,15 +78,16 @@ function MaterialDialog({ material, onClose, onDone }: { material?: MaterialDeta
   const [d, setD] = useState({
     sku: material?.sku ?? "", name: material?.name ?? "", baseUnitId: material?.baseUnitId ?? "", purchaseUnitId: material?.purchaseUnitId ?? "", categoryId: material?.categoryId ?? "",
     taxPct: String(toNumber(material?.taxPct ?? 0)), minStock: String(toNumber(material?.minStock ?? 0)), reorderLevel: String(toNumber(material?.reorderLevel ?? 0)),
+    parLevel: material?.parLevel == null ? "" : String(toNumber(material.parLevel)),
     preferredVendorId: material?.preferredVendorId ?? "", perishable: material?.perishable ?? false, trackBatch: material?.trackBatch ?? false,
   });
   const set = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setD({ ...d, [k]: e.target.value });
   const baseLocked = Boolean(material?.stockMoved);
   const next = {
     sku: d.sku.trim(), name: d.name.trim(), baseUnitId: baseLocked ? undefined : d.baseUnitId, purchaseUnitId: opt(d.purchaseUnitId), categoryId: opt(d.categoryId),
-    taxPct: Number(d.taxPct), minStock: Number(d.minStock), reorderLevel: Number(d.reorderLevel), preferredVendorId: opt(d.preferredVendorId), perishable: d.perishable, trackBatch: d.trackBatch,
+    taxPct: Number(d.taxPct), minStock: Number(d.minStock), reorderLevel: Number(d.reorderLevel), parLevel: d.parLevel.trim() === "" ? (material ? null : undefined) : Number(d.parLevel), preferredVendorId: opt(d.preferredVendorId), perishable: d.perishable, trackBatch: d.trackBatch,
   };
-  const prev = material ? { ...material, taxPct: toNumber(material.taxPct), minStock: toNumber(material.minStock), reorderLevel: toNumber(material.reorderLevel) } : undefined;
+  const prev = material ? { ...material, taxPct: toNumber(material.taxPct), minStock: toNumber(material.minStock), reorderLevel: toNumber(material.reorderLevel), parLevel: material.parLevel == null ? null : toNumber(material.parLevel) } : undefined;
   const unitOptions = (units.data ?? []).filter((u) => u.active || u.id === d.baseUnitId || u.id === d.purchaseUnitId);
   return (
     <FormDialog open onClose={onClose} title={material ? `Edit ${material.name}` : "New material"} size="lg" submitLabel={material ? "Save" : "Create material"}
@@ -111,8 +119,9 @@ function MaterialDialog({ material, onClose, onDone }: { material?: MaterialDeta
           </Field>
         )}
         <Field label="Tax %" name="taxPct"><Input type="number" inputMode="decimal" step="0.01" min="0" max="28" value={d.taxPct} onChange={set("taxPct")} /></Field>
-        <Field label="Reorder level" name="reorderLevel" hint="In the base unit"><Input type="number" inputMode="decimal" step="any" min="0" value={d.reorderLevel} onChange={set("reorderLevel")} /></Field>
-        <Field label="Minimum stock" name="minStock" hint="In the base unit"><Input type="number" inputMode="decimal" step="any" min="0" value={d.minStock} onChange={set("minStock")} /></Field>
+        <Field label="Reorder level" name="reorderLevel" hint="Reorder point, in the base unit"><Input type="number" inputMode="decimal" step="any" min="0" value={d.reorderLevel} onChange={set("reorderLevel")} /></Field>
+        <Field label="Minimum stock" name="minStock" hint="Safety stock, in the base unit"><Input type="number" inputMode="decimal" step="any" min="0" value={d.minStock} onChange={set("minStock")} /></Field>
+        <Field label="Par level (order up to)" name="parLevel" hint="Optional; empty = the reorder level"><Input type="number" inputMode="decimal" step="any" min="0" value={d.parLevel} onChange={set("parLevel")} /></Field>
       </div>
       <div className="flex flex-wrap gap-4">
         <Checkbox label="Perishable" checked={d.perishable} onChange={(v) => setD({ ...d, perishable: v })} name="perishable" />
@@ -281,7 +290,7 @@ export function MaterialDetail({ id }: { id: string }) {
       <Card className="mb-4">
         <Details cols={4} items={[
           ["Base unit", <span key="b">{m.baseUnit?.code}{m.stockMoved && <Badge className="ml-1">Locked</Badge>}</span>], ["Purchase unit", unitCode(m.purchaseUnitId)], ["Category", m.category?.name], ["Tax", formatPct(m.taxPct)],
-          ["Reorder level", formatQty(m.reorderLevel)], ["Minimum stock", formatQty(m.minStock)], ["Perishable", m.perishable ? "Yes" : "No"], ["Batch tracking", m.trackBatch ? "Yes" : "No"],
+          ["Reorder level", formatQty(m.reorderLevel)], ["Minimum stock", formatQty(m.minStock)], ["Par level", m.parLevel == null ? "—" : formatQty(m.parLevel)], ["Perishable", m.perishable ? "Yes" : "No"], ["Batch tracking", m.trackBatch ? "Yes" : "No"],
           ["Preferred vendor", can("vendor.view") ? vendorLabel(vendors.byId, m.preferredVendorId) : m.preferredVendorId ? "Set" : "—"],
         ]} />
       </Card>
@@ -320,17 +329,17 @@ export function MaterialDetail({ id }: { id: string }) {
 function VendorDialog({ vendor, onClose, onDone }: { vendor?: VendorRow; onClose: () => void; onDone: (v: VendorRow) => void }) {
   const [d, setD] = useState({
     name: vendor?.name ?? "", companyName: vendor?.companyName ?? "", phone: vendor?.phone ?? "", email: vendor?.email ?? "", address: vendor?.address ?? "", gstin: vendor?.gstin ?? "",
-    bankAccount: vendor?.bankAccount ?? "", bankIfsc: vendor?.bankIfsc ?? "", paymentTerms: vendor?.paymentTerms ?? "", creditLimit: String(toNumber(vendor?.creditLimit ?? 0)), notes: vendor?.notes ?? "",
+    bankAccount: vendor?.bankAccount ?? "", bankIfsc: vendor?.bankIfsc ?? "", upiId: vendor?.upiId ?? "", paymentTerms: vendor?.paymentTerms ?? "", creditLimit: String(toNumber(vendor?.creditLimit ?? 0)), notes: vendor?.notes ?? "",
   });
   const set = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setD({ ...d, [k]: e.target.value });
   const next = {
     name: d.name.trim(), companyName: opt(d.companyName), phone: opt(d.phone), email: opt(d.email), address: opt(d.address), gstin: opt(d.gstin),
-    bankAccount: opt(d.bankAccount), bankIfsc: opt(d.bankIfsc), paymentTerms: opt(d.paymentTerms), creditLimit: Number(d.creditLimit || 0), notes: opt(d.notes),
+    bankAccount: opt(d.bankAccount), bankIfsc: opt(d.bankIfsc), upiId: opt(d.upiId), paymentTerms: opt(d.paymentTerms), creditLimit: Number(d.creditLimit || 0), notes: opt(d.notes),
   };
   const prev = vendor ? { ...vendor, creditLimit: toNumber(vendor.creditLimit) } : undefined;
   return (
     <FormDialog open onClose={onClose} title={vendor ? `Edit ${vendor.name}` : "New vendor"} size="lg" submitLabel={vendor ? "Save" : "Create vendor"}
-      description={vendor ? "Optional fields can be changed but not cleared. Bank changes are audited." : undefined}
+      description={vendor ? "Optional fields can be changed but not cleared. Bank and UPI changes are audited." : "New vendors start awaiting approval: nobody can raise a purchase order, receive goods or book a bill from them until an approver activates them."}
       onSubmit={() => (vendor ? api<VendorRow>(`/api/master/vendors/${vendor.id}`, { method: "PATCH", body: changed(next, prev) }) : api<VendorRow>("/api/master/vendors", { method: "POST", body: changed(next) }))} onDone={onDone}>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Name" name="name" required><Input value={d.name} onChange={set("name")} required maxLength={120} /></Field>
@@ -345,6 +354,7 @@ function VendorDialog({ vendor, onClose, onDone }: { vendor?: VendorRow; onClose
         <legend className="px-1 text-sm font-medium text-ink-700">Bank details</legend>
         <Field label="Account number" name="bankAccount" hint="6–20 digits"><Input inputMode="numeric" value={d.bankAccount} onChange={set("bankAccount")} maxLength={20} autoComplete="off" /></Field>
         <Field label="IFSC" name="bankIfsc"><Input value={d.bankIfsc} onChange={(e) => setD({ ...d, bankIfsc: e.target.value.toUpperCase() })} maxLength={11} autoComplete="off" /></Field>
+        <Field label="UPI id" name="upiId" hint="e.g. vendor@okaxis"><Input value={d.upiId} onChange={set("upiId")} maxLength={320} autoComplete="off" /></Field>
       </fieldset>
       <Field label="Address" name="address"><Textarea value={d.address} onChange={set("address")} maxLength={500} /></Field>
       <Field label="Notes" name="notes"><Textarea value={d.notes} onChange={set("notes")} maxLength={1000} /></Field>
@@ -356,15 +366,15 @@ export function VendorsScreen() {
   const router = useRouter();
   const { vendor } = useMasterAuthority();
   const [search, setSearch] = useState("");
-  const [active, setActive] = useState("true");
+  const [status, setStatus] = useState("");
   const [creating, setCreating] = useState(false);
-  const list = usePaged<VendorRow>("/api/master/vendors", { search: search || undefined, active: active || undefined });
+  const list = usePaged<VendorRow>("/api/master/vendors", { search: search || undefined, status: status || undefined });
   return (
     <>
       <PageHeader title="Vendors" subtitle="Suppliers, contacts, terms and the materials they supply" actions={vendor && <Button variant="primary" onClick={() => setCreating(true)}><Icon name="plus" /> New vendor</Button>} />
       <FilterBar>
         <SearchInput value={search} onChange={setSearch} placeholder="Search name, phone or GSTIN…" />
-        <SelectFilter label="Status" value={active} onChange={setActive} options={ACTIVE_FILTER} />
+        <SelectFilter label="Status" value={status} onChange={setStatus} options={VENDOR_STATUS_FILTER} />
       </FilterBar>
       <DataTable label="Vendors" rows={list.items} rowKey={(r) => r.id} loading={list.loading} error={list.error} onRetry={list.reload} empty={search ? "No vendors match" : "No vendors yet"}
         onRowClick={(r) => router.push(`/master/vendors/${r.id}`)}
@@ -375,7 +385,7 @@ export function VendorsScreen() {
           { key: "g", header: "GSTIN", cell: (r) => r.gstin ?? "—" },
           { key: "t", header: "Terms", cell: (r) => r.paymentTerms ?? "—" },
           { key: "l", header: "Credit limit", numeric: true, cell: (r) => formatMoney(r.creditLimit) },
-          { key: "s", header: "Status", cell: (r) => <ActiveBadge active={r.active} /> },
+          { key: "s", header: "Status", cell: (r) => <VendorStatusBadge v={r} /> },
         ]} />
       <Pager {...list} />
       {creating && <VendorDialog onClose={() => setCreating(false)} onDone={(v) => router.push(`/master/vendors/${v.id}`)} />}
@@ -386,6 +396,8 @@ export function VendorsScreen() {
 export function VendorDetail({ id }: { id: string }) {
   const { can } = useShell();
   const { vendor: manage } = useMasterAuthority();
+  const { orgWide } = useShell();
+  const approver = can("purchase.approve") && orgWide;
   const q = useQuery<VendorDetailRow>(`/api/master/vendors/${id}`);
   const materials = useMaterials(manage && can("master.view"));
   const [dialog, setDialog] = useState<null | "edit" | "link" | VendorLink>(null);
@@ -393,18 +405,45 @@ export function VendorDetail({ id }: { id: string }) {
   if (q.error) return <><PageHeader title="Vendor" back={{ href: "/master/vendors", label: "Vendors" }} /><ErrorState error={q.error} onRetry={q.reload} /></>;
   if (!q.data) return null;
   const v = q.data;
+  const status = v.status ?? (v.active ? "ACTIVE" : "INACTIVE");
+  const setStatus = (next: string, reason?: string) => api(`/api/master/vendors/${v.id}/status`, { method: "POST", body: { status: next, ...(reason ? { reason } : {}) } });
   return (
     <>
-      <PageHeader title={v.name} subtitle={v.companyName ?? undefined} badge={<ActiveBadge active={v.active} />} back={{ href: "/master/vendors", label: "Vendors" }}
-        actions={manage && (
+      <PageHeader title={v.name} subtitle={v.companyName ?? undefined} badge={<VendorStatusBadge v={v} />} back={{ href: "/master/vendors", label: "Vendors" }}
+        actions={(manage || approver) && (
           <>
-            <Button onClick={() => setDialog("edit")}><Icon name="edit" /> Edit</Button>
-            <ActionButton variant={v.active ? "danger" : "success"} action={() => api(`/api/master/vendors/${v.id}`, { method: "PATCH", body: { active: !v.active } })} success={v.active ? "Vendor deactivated" : "Vendor activated"} onDone={q.reload}
-              confirm={v.active ? { title: `Deactivate ${v.name}?`, message: "New purchase orders and material links to this vendor are refused. Open documents and history are kept.", danger: true, confirmLabel: "Deactivate" } : undefined}>
-              {v.active ? "Deactivate" : "Activate"}
-            </ActionButton>
+            {manage && <Button onClick={() => setDialog("edit")}><Icon name="edit" /> Edit</Button>}
+            {approver && (status === "PENDING" || status === "INACTIVE") && (
+              <ActionButton variant="success" action={() => setStatus("ACTIVE")} success="Vendor approved" onDone={q.reload}
+                confirm={{ title: `Approve ${v.name}?`, message: "Purchase orders, goods receipts and bills from this vendor become possible. Your approval is recorded.", confirmLabel: "Approve" }}>
+                {status === "PENDING" ? "Approve" : "Re-activate"}
+              </ActionButton>
+            )}
+            {manage && status === "ACTIVE" && (
+              <ActionButton variant="danger" action={() => setStatus("INACTIVE")} success="Vendor deactivated" onDone={q.reload}
+                confirm={{ title: `Deactivate ${v.name}?`, message: "New purchase orders, receipts and direct bills from this vendor are refused. Dues can still be paid; history is kept.", danger: true, confirmLabel: "Deactivate" }}>
+                Deactivate
+              </ActionButton>
+            )}
+            {manage && status !== "BLACKLISTED" && (
+              <ActionButton variant="danger" action={(note) => setStatus("BLACKLISTED", note)} success="Vendor blacklisted" onDone={q.reload}
+                confirm={{ title: `Blacklist ${v.name}?`, message: "Buying from this vendor is blocked until it is re-approved. Dues can still be paid.", danger: true, confirmLabel: "Blacklist", requireNote: true, noteLabel: "Reason" }}>
+                Blacklist
+              </ActionButton>
+            )}
+            {manage && status === "BLACKLISTED" && (
+              <ActionButton action={(note) => setStatus("PENDING", note)} success="Vendor sent back for approval" onDone={q.reload}
+                confirm={{ title: `Lift the blacklist on ${v.name}?`, message: "The vendor goes back to awaiting approval; an approver must activate it before anyone can buy.", confirmLabel: "Lift blacklist", requireNote: true, noteLabel: "Reason" }}>
+                Lift blacklist
+              </ActionButton>
+            )}
           </>
         )} />
+      {status !== "ACTIVE" && (
+        <p role="status" className="mb-4 rounded-md border border-warn-100 bg-warn-50 px-3 py-2 text-sm text-warn-700">
+          {status === "PENDING" ? "Awaiting approval: purchase orders, goods receipts and direct bills from this vendor are blocked until an approver activates it." : status === "BLACKLISTED" ? `Blacklisted${v.statusReason ? `: ${v.statusReason}` : ""}. Buying from this vendor is blocked; dues can still be paid.` : "Inactive: buying from this vendor is blocked; dues can still be paid."}
+        </p>
+      )}
       <Card title="Contact and terms" className="mb-4">
         <Details cols={4} items={[
           ["Phone", v.phone], ["Email", v.email], ["GSTIN", v.gstin], ["Payment terms", v.paymentTerms],
@@ -412,10 +451,10 @@ export function VendorDetail({ id }: { id: string }) {
         ]} />
       </Card>
       <Card title="Bank details" className="mb-4">
-        <Details cols={2} items={[["Account", v.bankAccount], ["IFSC", v.bankIfsc]]} />
+        <Details cols={3} items={[["Account", v.bankAccount], ["IFSC", v.bankIfsc], ["UPI", v.upiId ?? null]]} />
         {!can("vendor.manage") && <p className="mt-2 text-xs text-ink-500">Bank details are masked; only vendor managers can see them in full.</p>}
       </Card>
-      <Card title="Supplied materials" actions={manage && v.active && <Button size="sm" onClick={() => setDialog("link")}><Icon name="plus" /> Link material</Button>}>
+      <Card title="Supplied materials" actions={manage && (status === "ACTIVE" || status === "PENDING") && <Button size="sm" onClick={() => setDialog("link")}><Icon name="plus" /> Link material</Button>}>
         <DataTable label="Supplied materials" rows={v.materials} rowKey={(l) => l.id} empty="No materials linked"
           columns={[
             { key: "m", header: "Material", cell: (l) => (can("master.view") ? <Link className="text-brand-600 hover:underline" href={`/master/materials/${l.materialId}`}>{l.material.name}</Link> : l.material.name) },
@@ -423,7 +462,7 @@ export function VendorDetail({ id }: { id: string }) {
             { key: "r", header: "Last rate", numeric: true, cell: (l) => formatMoney(l.lastRate) },
             { key: "t", header: "Lead time", numeric: true, cell: (l) => `${l.leadTimeDays} d` },
             { key: "p", header: "", cell: (l) => (l.preferred ? <Badge tone="ok">Preferred</Badge> : null) },
-            { key: "a", header: "", cell: (l) => (manage && v.active ? <div className="flex justify-end"><Button size="sm" onClick={() => setDialog(l)}>Edit</Button></div> : null) },
+            { key: "a", header: "", cell: (l) => (manage && (status === "ACTIVE" || status === "PENDING") ? <div className="flex justify-end"><Button size="sm" onClick={() => setDialog(l)}>Edit</Button></div> : null) },
           ]} />
       </Card>
       {dialog === "edit" && <VendorDialog vendor={v} onClose={() => setDialog(null)} onDone={() => q.reload()} />}

@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { Prisma } from "@prisma/client";
-import { isSerializationConflict } from "@/server/db/conflict";
+import { isLedgerKeyRace, isSerializationConflict } from "@/server/db/conflict";
 import { runInTx } from "@/server/services/_workflow";
 import { fail } from "@/server/api/respond";
 
@@ -32,6 +32,33 @@ describe("serialization conflict classification", () => {
     const res = fail(raw40001());
     expect(res.status).toBe(503);
     expect(res.headers.get("retry-after")).toBe("1");
+  });
+});
+
+describe("concurrent post of one stock movement (ledger posting key)", () => {
+  const unique = (target: unknown) => new Prisma.PrismaClientKnownRequestError("Unique constraint failed on the fields: (`sourceRef`)", { code: "P2002", clientVersion: Prisma.prismaVersion.client, meta: { modelName: "InventoryLedger", target } });
+  it("a unique violation on InventoryLedger.sourceRef is a race; other unique violations are not", () => {
+    expect(isLedgerKeyRace(unique(["sourceRef"]))).toBe(true);
+    expect(isLedgerKeyRace(unique("InventoryLedger_sourceRef_key"))).toBe(true);
+    expect(isLedgerKeyRace(unique(["organizationId", "idempotencyKey"]))).toBe(false);
+    expect(isLedgerKeyRace(known("P2034", "write conflict"))).toBe(false);
+    expect(isLedgerKeyRace(null)).toBe(false);
+  });
+  it("runInTx re-runs it only on PostgreSQL (SQLite has one writer, so a repeat there is deterministic)", async () => {
+    const prev = process.env.DATABASE_URL;
+    const attempt = async (url: string) => {
+      process.env.DATABASE_URL = url;
+      let calls = 0;
+      const fakeDb = { $transaction: async (fn: (tx: unknown) => Promise<unknown>) => { calls++; if (calls < 2) throw unique(["sourceRef"]); return fn({}); } };
+      const out = await runInTx(fakeDb as never, async () => "posted").catch((e: { code?: string }) => e.code);
+      return { out, calls };
+    };
+    try {
+      expect(await attempt("postgresql://u@localhost:5432/x")).toEqual({ out: "posted", calls: 2 });
+      expect(await attempt("file:./x.db")).toEqual({ out: "P2002", calls: 1 });
+    } finally {
+      process.env.DATABASE_URL = prev;
+    }
   });
 });
 

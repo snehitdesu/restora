@@ -202,6 +202,10 @@ export async function createIssue(ctx: AccessContext, input: z.input<typeof issu
         if (!dept || dept.outletId !== data.outletId) throw new ValidationError("Department not in this outlet");
       }
       await validateLines(tx, ctx, data.lines);
+      // An issue MOVES stock between departments of one outlet (proposal module
+      // 03: it nets to zero), so it needs somewhere to go.
+      if (!data.toDepartmentId) throw new ValidationError("Choose the department receiving the stock");
+      if (data.toDepartmentId === data.fromDepartmentId) throw new ValidationError("The receiving department must differ from the issuing one");
       const number = data.number ?? (await nextNumber(tx, tx.inventoryIssue, { outletId: data.outletId }, "ISS"));
       const issue = await tx.inventoryIssue.create({
         data: {
@@ -215,7 +219,13 @@ export async function createIssue(ctx: AccessContext, input: z.input<typeof issu
   });
 }
 
-/** DRAFT -> ISSUED: one ISSUE row per line in base units; refused (no effect) if any material is short. */
+/**
+ * DRAFT -> ISSUED: per line, an ISSUE row OUT of the issuing department (or
+ * unassigned stock) and an ISSUE row IN to the receiving department, at the
+ * same average cost: stock and cost move, the outlet total does not change
+ * (sales then deplete the receiving department through the recipe). Refused
+ * (no effect) if any material is short at the outlet.
+ */
 export function postIssue(ctx: AccessContext, issueId: string, db: Client = prisma) {
   return runInTx(db, async (tx) => {
     const issue = await tx.inventoryIssue.findUnique({ where: { id: issueId }, include: { lines: true } });
@@ -231,13 +241,26 @@ export function postIssue(ctx: AccessContext, issueId: string, db: Client = pris
       plan.push({ line, base });
       need.set(line.materialId, (need.get(line.materialId) ?? D(0)).plus(base.qty));
     }
-    await assertAvailable(tx, ctx, issue.outletId, need);
+    if (issue.toDepartmentId) {
+      // A move: the issuing department (or unassigned stock) must hold it.
+      const from = issue.fromDepartmentId ? await tx.department.findUnique({ where: { id: issue.fromDepartmentId }, select: { name: true } }) : null;
+      await assertAvailable(tx, ctx, issue.outletId, need, { id: issue.fromDepartmentId, name: from?.name ?? "unassigned stock" });
+    } else {
+      await assertAvailable(tx, ctx, issue.outletId, need);
+    }
     for (const { line, base } of plan) {
       const rate = await getAvgCost(tx, ctx, issue.outletId, line.materialId);
       await appendLedger(tx, ctx, {
         outletId: issue.outletId, materialId: line.materialId, departmentId: issue.fromDepartmentId ?? undefined, unitId: base.baseUnitId, magnitude: base.qty, rate,
-        txnType: "ISSUE", sourceType: "ISSUE", sourceId: issue.id, sourceRef: `issue:${issue.id}:${line.id}`,
+        txnType: "ISSUE", direction: "OUT", sourceType: "ISSUE", sourceId: issue.id, sourceRef: `issue:${issue.id}:${line.id}`,
       });
+      // Legacy drafts created before issues required a destination keep the old one-row effect.
+      if (issue.toDepartmentId) {
+        await appendLedger(tx, ctx, {
+          outletId: issue.outletId, materialId: line.materialId, departmentId: issue.toDepartmentId, unitId: base.baseUnitId, magnitude: base.qty, rate,
+          txnType: "ISSUE", direction: "IN", revalue: false, sourceType: "ISSUE", sourceId: issue.id, sourceRef: `issue:${issue.id}:${line.id}:in`,
+        });
+      }
     }
     const updated = await tx.inventoryIssue.update({ where: { id: issueId }, data: { status: "ISSUED", issuedAt: new Date() } });
     await writeAudit(tx, ctx, { action: "INVENTORY_MOVEMENT", entityType: "InventoryIssue", entityId: issueId, outletId: issue.outletId, after: { status: "ISSUED" } });
@@ -266,6 +289,10 @@ export function createStockCount(ctx: AccessContext, input: { outletId: string; 
   assertOutletAccess(ctx, input.outletId);
   assertCan(ctx, "inventory.count", input.outletId);
   return runInTx(db, async (tx) => {
+    if (input.departmentId) {
+      const dept = await tx.department.findUnique({ where: { id: input.departmentId }, select: { organizationId: true, outletId: true } });
+      if (!dept || dept.organizationId !== ctx.organizationId || dept.outletId !== input.outletId) throw new ValidationError("Department not in this outlet");
+    }
     const number = input.number ?? (await nextNumber(tx, tx.stockCount, { outletId: input.outletId }, "SC"));
     const count = await tx.stockCount.create({
       data: { organizationId: ctx.organizationId, outletId: input.outletId, departmentId: input.departmentId, number, status: "DRAFT", createdById: actor(ctx) },
@@ -284,10 +311,11 @@ export function startStockCount(ctx: AccessContext, countId: string, opts?: { ma
     assertCan(ctx, "inventory.count", count.outletId);
     assertTransition(STOCK_COUNT_TRANSITIONS, count.status as StockCountStatus, "COUNTING", "stock count");
 
-    // Book quantities = derived balances at freeze time.
+    // Book quantities = derived balances at freeze time: of the counted department (proposal p. 6, "the
+    // system quantity per department"), or of the whole outlet for an outlet-wide count.
     const grouped = await tx.inventoryLedger.groupBy({
       by: ["materialId"],
-      where: { organizationId: ctx.organizationId, outletId: count.outletId, ...(opts?.materialIds ? { materialId: { in: opts.materialIds } } : {}) },
+      where: { organizationId: ctx.organizationId, outletId: count.outletId, ...(count.departmentId ? { departmentId: count.departmentId } : {}), ...(opts?.materialIds ? { materialId: { in: opts.materialIds } } : {}) },
       _sum: { qty: true },
     });
     const rows = opts?.materialIds
@@ -357,7 +385,7 @@ export function approveStockCount(ctx: AccessContext, countId: string, db: Clien
       const variance = D(line.variance);
       if (!variance.isZero()) {
         await recordCountAdjustment(ctx, {
-          outletId: count.outletId, materialId: line.materialId, variance: variance.toString(),
+          outletId: count.outletId, departmentId: count.departmentId, materialId: line.materialId, variance: variance.toString(),
           sourceId: count.id, sourceRef: `count:${count.id}:${line.materialId}`, note: `Stock count ${count.number}`,
         }, tx);
       }

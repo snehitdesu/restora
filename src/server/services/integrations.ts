@@ -27,9 +27,11 @@ import { getPOSProvider } from "@/integrations/pos";
 import { twilioCredentialsSchema, TwilioMessagingProvider, MockMessagingProvider, type MessagingProvider } from "@/integrations/messaging";
 import { safeMessage } from "@/integrations/http";
 import { mockProvidersAllowed } from "@/integrations/policy";
+import { ACCOUNTING_FILE_PROVIDERS, ACCOUNTING_SYNC_PROVIDERS, isSyncProvider, validateSyncConnection } from "@/server/integrations/accountingConfig";
+import { validateSheetsConnection } from "@/server/integrations/sheetsConfig";
 import type { IntegrationMode } from "@/integrations/payment/types";
 
-export const INTEGRATION_KINDS = ["POS", "PAYMENT", "AGGREGATOR", "MESSAGING", "ACCOUNTING"] as const;
+export const INTEGRATION_KINDS = ["POS", "PAYMENT", "AGGREGATOR", "MESSAGING", "ACCOUNTING", "SHEETS"] as const;
 export type IntegrationKind = (typeof INTEGRATION_KINDS)[number];
 /** Kinds whose inbound webhooks are bound through externalRef. */
 const WEBHOOK_KINDS = new Set<IntegrationKind>(["POS", "PAYMENT", "AGGREGATOR"]);
@@ -68,7 +70,7 @@ const view = (c: ConnectionRow) => ({
   id: c.id, kind: c.kind, provider: c.provider, outletId: c.outletId, externalRef: c.externalRef, status: c.status,
   mode: effectiveMode(c),
   declaredMode: c.mode,
-  configured: c.status === "CONNECTED" && (MOCK_PROVIDERS.has(c.provider) || Boolean(c.credentialsEnc) || WEBHOOK_KINDS.has(c.kind as IntegrationKind) || c.kind === "ACCOUNTING"),
+  configured: c.status === "CONNECTED" && (MOCK_PROVIDERS.has(c.provider) || Boolean(c.credentialsEnc) || WEBHOOK_KINDS.has(c.kind as IntegrationKind) || (c.kind === "ACCOUNTING" && c.provider !== "zoho_books")),
   hasWebhookSecret: Boolean(c.webhookSecretEnc),
   hasCredentials: Boolean(c.credentialsEnc),
   config: c.config ? (JSON.parse(c.config) as Record<string, unknown>) : null,
@@ -79,9 +81,14 @@ export type IntegrationView = ReturnType<typeof view>;
 function validateFor(d: z.output<typeof upsertSchema>) {
   if (WEBHOOK_KINDS.has(d.kind) && !d.externalRef) throw new ValidationError("This integration needs the provider's account / store id", { fieldErrors: { externalRef: ["Required"] } });
   if (d.kind !== "PAYMENT" && WEBHOOK_KINDS.has(d.kind) && !d.outletId) throw new ValidationError("POS and aggregator connections must be bound to an outlet", { fieldErrors: { outletId: ["Choose the outlet these orders belong to"] } });
-  if ((d.kind === "MESSAGING" || d.kind === "ACCOUNTING") && d.outletId) throw new ValidationError("Messaging and accounting connections are organization-wide");
+  if ((d.kind === "MESSAGING" || d.kind === "ACCOUNTING" || d.kind === "SHEETS") && d.outletId) throw new ValidationError("Messaging, accounting and spreadsheet connections are organization-wide");
   if (d.kind === "MESSAGING" && !["mock", "twilio"].includes(d.provider)) throw new ValidationError(`Unsupported messaging provider "${d.provider}" (mock, twilio)`);
-  if (d.kind === "ACCOUNTING" && !["generic", "tally"].includes(d.provider)) throw new ValidationError(`Unsupported accounting format "${d.provider}" (generic, tally)`);
+  if (d.kind === "ACCOUNTING" && ![...ACCOUNTING_FILE_PROVIDERS, ...ACCOUNTING_SYNC_PROVIDERS].includes(d.provider as never)) throw new ValidationError(`Unsupported accounting provider "${d.provider}" (${[...ACCOUNTING_FILE_PROVIDERS, ...ACCOUNTING_SYNC_PROVIDERS].join(", ")})`);
+  if (d.kind === "ACCOUNTING" && isSyncProvider(d.provider)) validateSyncConnection(d.provider, d.config, d.credentials);
+  if (d.kind === "SHEETS") {
+    if (!["google_sheets", "mock"].includes(d.provider)) throw new ValidationError(`Unsupported spreadsheet provider "${d.provider}" (google_sheets, mock)`);
+    validateSheetsConnection(d.provider, d.config, d.credentials);
+  }
   if (MOCK_PROVIDERS.has(d.provider) && d.mode === "LIVE") throw new ValidationError("A mock provider cannot be LIVE");
   if (d.credentials && d.kind === "MESSAGING" && d.provider === "twilio") {
     const r = twilioCredentialsSchema.safeParse(d.credentials);
@@ -203,7 +210,15 @@ export async function testConnection(ctx: AccessContext, id: string, db: PrismaC
       const m = await messagingFor(db, ctx.organizationId);
       ok = m ? await m.provider.healthCheck() : false;
       if (!m) error = "Messaging is not connected or has no credentials";
-    } else ok = true; // ACCOUNTING: file export, nothing to reach
+    } else if (c.kind === "ACCOUNTING" && isSyncProvider(c.provider)) {
+      // Sync providers are really reached (Tally gateway / Zoho organisation); file formats have nothing to reach.
+      const { syncClientFor } = await import("@/server/services/accountingSync");
+      const { mappingFor } = await import("@/server/services/accounting");
+      ok = await syncClientFor(c, await mappingFor(db, ctx.organizationId)).healthCheck();
+    } else if (c.kind === "SHEETS") {
+      const { sheetsProviderFor } = await import("@/server/services/sheetsSync");
+      ok = await sheetsProviderFor(c).healthCheck();
+    } else ok = true; // ACCOUNTING file formats: nothing to reach
     if (!ok && !error) error = "Provider did not confirm the connection";
   } catch (e) {
     error = e;
@@ -217,7 +232,7 @@ export async function testConnection(ctx: AccessContext, id: string, db: PrismaC
 export async function integrationAudit(db: PrismaClient, ctx: AccessContext, take = 100) {
   assertCan(ctx, "integration.manage");
   const rows = await db.auditLog.findMany({
-    where: { organizationId: ctx.organizationId, entityType: { in: ["IntegrationConnection", "Printer", "PrintJob", "IntegrationDelivery", "AccountingExport"] } },
+    where: { organizationId: ctx.organizationId, entityType: { in: ["IntegrationConnection", "Printer", "PrintJob", "IntegrationDelivery", "AccountingExport", "AccountingMapping", "SheetsSync", "SheetSyncConflict", "AggregatorStatement", "AggregatorCharge"] } },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: Math.min(take, 200),
     select: { id: true, action: true, entityType: true, entityId: true, actorId: true, outletId: true, createdAt: true, after: true },
   });

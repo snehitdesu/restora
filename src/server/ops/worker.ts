@@ -7,7 +7,7 @@
  * failures and restarts. Every tick (OUTBOX_WORKER_INTERVAL_MS, default 30 s):
  *
  *  1. Due retries — IntegrationDelivery FAILED with nextAttemptAt <= now and
- *     attempts < maxAttempts (MESSAGE, AGGREGATOR_STATUS) are re-sent. The
+ *     attempts < maxAttempts (MESSAGE, AGGREGATOR_STATUS, ACCOUNTING_SYNC) are re-sent. The
  *     services set nextAttemptAt only for retryable failures, on the bounded
  *     exponential schedule 1 min / 5 min / 30 min / 2 h (integrations/http.ts);
  *     after maxAttempts the row stays FAILED (given up) for manual retry, and an
@@ -19,6 +19,8 @@
  *       - PENDING AGGREGATOR_STATUS -> FAILED + due now (a status push is safe to repeat);
  *       - PENDING MESSAGE -> FAILED, NOT auto-retried (it may have reached the
  *         provider: re-sending could text the guest twice) — manual retry;
+ *       - PENDING ACCOUNTING_SYNC -> FAILED; Zoho Books is retried (the journal is looked up
+ *         by reference first), Tally is NOT (no lookup: check the books first);
  *       - QUEUED PrintJob -> FAILED, NOT auto-printed (a late KOT / receipt
  *         would confuse the floor) — reprint from the print queue;
  *       - RUNNING ExportJob older than EXPORT_STALE_MINUTES -> FAILED.
@@ -38,6 +40,7 @@ import { systemContext } from "@/server/auth/context";
 import { purgeExpiredSessions } from "@/server/auth/session";
 import { deliverMessage } from "@/server/services/messaging";
 import { pushAggregatorStatus } from "@/server/services/aggregatorSync";
+import { deliverAccountingSync, recoverInterruptedAccountingSync } from "@/server/services/accountingSync";
 import { failStaleExportJobs } from "@/server/services/exportJobs";
 import { webhookClaimStaleMs } from "@/server/services/pos";
 import { nextAttemptAt, safeMessage } from "@/integrations/http";
@@ -45,6 +48,7 @@ import { log } from "@/server/observability/log";
 import { inc } from "@/server/observability/metrics";
 import { raiseAlert } from "@/server/observability/alerts";
 import { onShutdown } from "@/server/ops/lifecycle";
+import { runScheduledJobs } from "@/server/ops/scheduled";
 
 const envInt = (name: string, d: number, min = 1) => {
   const n = Number(process.env[name]);
@@ -63,7 +67,7 @@ export type TickResult = { retried: number; sent: number; givenUp: number; stuck
 /** 1. Re-send due deliveries. */
 export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Date()) {
   const due = await db.integrationDelivery.findMany({
-    where: { status: "FAILED", kind: { in: ["MESSAGE", "AGGREGATOR_STATUS"] }, nextAttemptAt: { lte: now } },
+    where: { status: "FAILED", kind: { in: ["MESSAGE", "AGGREGATOR_STATUS", "ACCOUNTING_SYNC"] }, nextAttemptAt: { lte: now } },
     orderBy: { nextAttemptAt: "asc" },
     take: BATCH,
   });
@@ -81,6 +85,7 @@ export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Da
     try {
       let after: { status: string; attempts: number; maxAttempts: number; nextAttemptAt: Date | null } | null = null;
       if (d.kind === "MESSAGE") after = await deliverMessage(ctx, d.id, db);
+      else if (d.kind === "ACCOUNTING_SYNC") after = await deliverAccountingSync(d.id, db);
       else if (d.sourceId) after = await pushAggregatorStatus(ctx, d.sourceId, (JSON.parse(d.payload) as { status: "READY" }).status, db);
       if (after && (after.status === "SENT" || after.status === "DELIVERED")) sent++;
       else if (after && after.status === "FAILED" && !after.nextAttemptAt) {
@@ -113,10 +118,12 @@ export async function recoverStuckWork(db: PrismaClient = prisma, now = new Date
     where: { status: "PENDING", kind: "MESSAGE", updatedAt: { lt: cutoff } },
     data: { status: "FAILED", lastError: INTERRUPTED_MESSAGE, nextAttemptAt: null },
   });
+  // Accounting sync: Zoho is safe to retry (the reference is looked up first); Tally waits for a person.
+  const accounting = await recoverInterruptedAccountingSync(db, cutoff, now);
   const prints = await db.printJob.updateMany({ where: { status: "QUEUED", createdAt: { lt: cutoff } }, data: { status: "FAILED", lastError: INTERRUPTED_PRINT } });
   const staleExports = await failStaleExportJobs(db, now);
   const stuckWebhooks = await db.webhookEvent.count({ where: { status: "RECEIVED", receivedAt: { lt: new Date(now.getTime() - webhookClaimStaleMs()) } } });
-  const stuckDeliveries = aggregator.count + messages.count;
+  const stuckDeliveries = aggregator.count + messages.count + accounting;
   if (stuckDeliveries || prints.count || staleExports) {
     inc("restora_job_failures_total", { type: "interrupted" }, stuckDeliveries + prints.count + staleExports);
     log.warn("recovered interrupted background work", { event: "stuck_recovered", deliveries: stuckDeliveries, prints: prints.count, exports: staleExports });
@@ -168,6 +175,8 @@ export async function runWorkerTick(db: PrismaClient = prisma, now = new Date(),
   const r = await retryDueDeliveries(db, now);
   const s = await recoverStuckWork(db, now);
   const result: TickResult = { ...r, ...s };
+  // Once-a-day jobs (nightly POS re-pull, ...) claim their own JobRun; a failing job never stops the tick.
+  try { await runScheduledJobs(db, now); } catch (e) { inc("restora_job_failures_total", { type: "scheduled" }); log.error("scheduled jobs failed", { event: "scheduled_failed", error: e }); }
   const doHk = opts.housekeeping ?? now.getTime() - lastHousekeeping >= HOUSEKEEPING_MS;
   if (doHk) {
     lastHousekeeping = now.getTime();

@@ -16,7 +16,7 @@
  * success, an EXPORT audit entry. The CSV is returned to the caller; nothing is
  * written to disk (ExportJob.filePath stays null).
  */
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { InventoryTransactionType, OrderChannel, OrderStatus, PaymentMethod, PaymentStatus } from "@/constants/enums";
 import { prisma } from "@/server/db/client";
@@ -32,6 +32,13 @@ import { resolveDateFilters } from "@/server/services/businessDay";
 import { D, money, num } from "@/domain/money";
 import { taxSummary } from "@/server/services/invoicing";
 import { vendorAging } from "@/server/services/vendorFinance";
+import { menuEngineering, RECOST_ADVICE } from "@/server/services/menuEngineering";
+import { consumptionVariance } from "@/server/services/variance";
+import { departmentPnl, dailyCosting, stockMatrix } from "@/server/services/departmentCosting";
+import { supplierPriceComparison } from "@/server/services/supplierPrices";
+import { countVarianceTrend, vendorNames } from "@/server/services/inventoryInsights";
+import { outletTimeZone } from "@/server/services/businessDay";
+import { businessDayRange } from "@/domain/time";
 
 // ---------------- filters ----------------
 
@@ -699,6 +706,144 @@ export const REPORTS: Record<string, AnyReport> = {
       return windowed(rows, w);
     },
   })([{ key: "metric", header: "Metric", value: (r) => r.metric }, { key: "value", header: "Value", value: (r) => r.value }]),
+
+  // Proposal p. 10: "the live screen ranks your entire menu this way for any date range".
+  MENU_ENGINEERING: define({
+    id: "MENU_ENGINEERING", title: "Menu engineering", permission: "reports.view", maxRows: 1000, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet") }).refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed((await menuEngineering(db, ctx, { outletId: f.outletId, from: f.from, to: f.to })).rows, w),
+  })([
+      { key: "dish", header: "Dish", value: (r) => r.name }, { key: "category", header: "Category", value: (r) => r.category ?? "" },
+      { key: "price", header: "Price", value: (r) => r.price }, { key: "plateCost", header: "Plate cost", value: (r) => r.plateCost },
+      { key: "margin", header: "Margin", value: (r) => r.margin }, { key: "marginPct", header: "Margin %", value: (r) => r.marginPct },
+      { key: "foodCostPct", header: "Food cost %", value: (r) => r.foodCostPct }, { key: "sold", header: "Sold", value: (r) => r.sold },
+      { key: "verdict", header: "Verdict", value: (r) => r.label ?? "Not classified" },
+      { key: "todo", header: "What to do", value: (r) => [r.action, r.highCost && r.action !== RECOST_ADVICE ? RECOST_ADVICE : null].filter(Boolean).join(" ") },
+      { key: "historicalPlateCost", header: "Historical plate cost", value: (r) => r.historicalPlateCost ?? "" }, { key: "costChange", header: "Cost change", value: (r) => r.costChange ?? "" },
+      { key: "historicalPrice", header: "Historical price", value: (r) => r.historicalPrice ?? "" }, { key: "priceChange", header: "Price change", value: (r) => r.priceChange ?? "" },
+      { key: "costCoverage", header: "Cost coverage %", value: (r) => r.costCoverage ?? "" },
+    ]),
+
+  CONSUMPTION_VARIANCE: define({
+    id: "CONSUMPTION_VARIANCE", title: "Consumption variance (expected vs actual)", permission: "reports.view", maxRows: 5000, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet") }).refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed((await consumptionVariance(db, ctx, { outletId: f.outletId, from: f.from, to: f.to })).rows, w),
+  })([
+      { key: "material", header: "Material", value: (r) => r.name }, { key: "sku", header: "SKU", value: (r) => r.sku }, { key: "unit", header: "Unit", value: (r) => r.unit ?? "" },
+      { key: "expectedQty", header: "Expected qty", value: (r) => r.expectedQty }, { key: "wastageQty", header: "Wasted qty", value: (r) => r.wastageQty },
+      { key: "countLossQty", header: "Count loss qty", value: (r) => r.countLossQty }, { key: "actualQty", header: "Actual qty", value: (r) => r.actualQty },
+      { key: "varianceQty", header: "Variance qty", value: (r) => r.varianceQty }, { key: "expectedCost", header: "Expected cost", value: (r) => r.expectedCost },
+      { key: "actualCost", header: "Actual cost", value: (r) => r.actualCost }, { key: "varianceCost", header: "Variance cost", value: (r) => r.varianceCost },
+      { key: "variancePct", header: "Variance % of expected", value: (r) => r.variancePct ?? "" },
+    ]),
+
+  // Proposal p. 8: department P&L for any date range.
+  DEPARTMENT_PNL: define({
+    id: "DEPARTMENT_PNL", title: "Department P&L", permission: "reports.view", maxRows: 200, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet"), from: z.coerce.date(), to: z.coerce.date() }).refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed((await departmentPnl(db, ctx, { outletId: f.outletId, from: f.from, to: f.to })).rows, w),
+  })([
+      { key: "department", header: "Department", value: (r) => r.department }, { key: "kind", header: "Kind", value: (r) => r.kind },
+      { key: "sales", header: "Sales value", value: (r) => r.sales }, { key: "costIssuedIn", header: "Cost issued in", value: (r) => r.costIssuedIn },
+      { key: "wastage", header: "Item wastage", value: (r) => r.wastage }, { key: "grossMargin", header: "Gross margin", value: (r) => r.grossMargin },
+      { key: "marginPct", header: "Margin %", value: (r) => r.marginPct }, { key: "recipeCostOfSales", header: "Recipe cost of sales", value: (r) => r.recipeCostOfSales },
+    ]),
+
+  // Proposal p. 8: "one row per day, with opening stock, receipts, issues, consumption and closing stock per department".
+  DAILY_COSTING: define({
+    id: "DAILY_COSTING", title: "Daily costing by department", permission: "reports.view", maxRows: 5000, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet"), from: z.coerce.date(), to: z.coerce.date() }).refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => {
+      const tz = await outletTimeZone(db, ctx, f.outletId);
+      const day = (d: Date) => businessDayRange(d, tz).date;
+      return windowed((await dailyCosting(db, ctx, { outletId: f.outletId, from: day(f.from), to: day(f.to) })).rows, w);
+    },
+  })([
+      { key: "date", header: "Business date", value: (r) => r.date }, { key: "department", header: "Department", value: (r) => r.department },
+      { key: "opening", header: "Opening", value: (r) => r.opening }, { key: "receipts", header: "Receipts", value: (r) => r.receipts },
+      { key: "issuesOut", header: "Issues out", value: (r) => r.issuesOut }, { key: "consumption", header: "Consumption", value: (r) => r.consumption },
+      { key: "wastage", header: "Wastage", value: (r) => r.wastage }, { key: "adjustments", header: "Adjustments", value: (r) => r.adjustments },
+      { key: "closing", header: "Closing", value: (r) => r.closing },
+    ]),
+
+  // Proposal p. 6: the live stock matrix, one row per material and department, valued at weighted average cost.
+  STOCK_BY_DEPARTMENT: define({
+    id: "STOCK_BY_DEPARTMENT", title: "Stock by department (valued)", permission: "reports.view", maxRows: 20000, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet") }),
+    run: async ({ db, ctx, f, ...w }) => {
+      const m = await stockMatrix(db, ctx, { outletId: f.outletId });
+      const rows = m.rows.flatMap((r) => m.columns.filter((c) => r.quantities[c.id] !== 0).map((c) => ({
+        material: r.name, sku: r.sku, unit: r.unit, category: r.category, department: c.name, qty: r.quantities[c.id],
+        avgCost: r.avgCost ?? null, value: r.avgCost === undefined ? null : num(money(D(r.quantities[c.id]).times(D(r.avgCost)))),
+      })));
+      return windowed(rows, w);
+    },
+  })([
+      { key: "material", header: "Material", value: (r) => r.material }, { key: "sku", header: "SKU", value: (r) => r.sku }, { key: "unit", header: "Unit", value: (r) => r.unit },
+      { key: "category", header: "Category", value: (r) => r.category ?? "" }, { key: "department", header: "Department", value: (r) => r.department },
+      { key: "qty", header: "Quantity", value: (r) => r.qty }, { key: "avgCost", header: "Average cost", value: (r) => r.avgCost ?? "" }, { key: "value", header: "Value", value: (r) => r.value ?? "" },
+    ]),
+
+  // Proposal p. 17: supplier price-comparison board, one row per material and vendor, per base unit.
+  SUPPLIER_PRICES: define({
+    id: "SUPPLIER_PRICES", title: "Supplier price comparison", permission: "purchase.view", maxRows: 20000, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet") }),
+    run: async ({ db, ctx, f, ...w }) => {
+      const b = await supplierPriceComparison(db, ctx, { outletId: f.outletId });
+      return windowed(b.rows.flatMap((m) => m.quotes.map((x) => ({ m, x }))), w);
+    },
+  })([
+      { key: "material", header: "Material", value: (r) => r.m.name }, { key: "sku", header: "SKU", value: (r) => r.m.sku }, { key: "baseUnit", header: "Base unit", value: (r) => r.m.baseUnit },
+      { key: "vendor", header: "Vendor", value: (r) => r.x.vendor }, { key: "status", header: "Vendor status", value: (r) => r.x.status }, { key: "preferred", header: "Preferred", value: (r) => r.x.preferred },
+      { key: "rate", header: "Rate per base unit", value: (r) => r.x.ratePerBase ?? "" }, { key: "purchaseUnit", header: "Purchase unit", value: (r) => r.m.purchaseUnit ?? "" },
+      { key: "packFactor", header: "Base units per purchase unit", value: (r) => r.m.packFactor ?? "" }, { key: "ratePerPurchaseUnit", header: "Rate per purchase unit", value: (r) => r.x.ratePerPurchaseUnit ?? "" },
+      { key: "leadTime", header: "Lead time (days)", value: (r) => r.x.leadTimeDays }, { key: "lastReceived", header: "Last received rate per base unit", value: (r) => r.x.lastReceived?.ratePerBase ?? "" },
+      { key: "lastReceivedAt", header: "Last received at", value: (r) => r.x.lastReceived?.receivedAt ?? "" }, { key: "cheapest", header: "Cheapest buyable", value: (r) => r.x.cheapest },
+      { key: "aboveCheapestPct", header: "% above cheapest", value: (r) => r.x.aboveCheapestPct ?? "" },
+    ]),
+
+  // Proposal p. 4 / p. 11: every purchase receipt's rate per base unit, with the change from the material's previous receipt.
+  PURCHASE_PRICE_HISTORY: define({
+    id: "PURCHASE_PRICE_HISTORY", title: "Purchase price history", permission: "purchase.view", maxRows: 20000, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet") }).refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => {
+      const createdAt = f.from || f.to ? { ...(f.from ? { gte: f.from } : {}), ...(f.to ? { lte: f.to } : {}) } : undefined;
+      const rows = await db.inventoryLedger.findMany({
+        where: { organizationId: ctx.organizationId, outletId: f.outletId, txnType: "PURCHASE_RECEIPT", ...(createdAt ? { createdAt } : {}) },
+        select: { materialId: true, qty: true, rate: true, createdAt: true, sourceType: true, sourceId: true, material: { select: { sku: true, name: true, baseUnit: { select: { code: true } } } } },
+        orderBy: [{ materialId: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+        take: 20000,
+      });
+      const grnIds = [...new Set(rows.filter((r) => r.sourceType === "GRN" && r.sourceId).map((r) => r.sourceId!))];
+      const receipts = grnIds.length ? await db.goodsReceipt.findMany({ where: { organizationId: ctx.organizationId, id: { in: grnIds } }, select: { id: true, number: true, vendorId: true } }) : [];
+      const vendors = await vendorNames(db, ctx, receipts.map((g) => g.vendorId));
+      const grns = new Map(receipts.map((g) => [g.id, { number: g.number, vendor: { name: vendors.get(g.vendorId) ?? "Vendor" } }]));
+      let prev: { materialId: string; rate: Prisma.Decimal } | null = null;
+      const out = rows.map((r) => {
+        const rate = D(r.rate);
+        const change = prev && prev.materialId === r.materialId && prev.rate.gt(0) ? num(money(rate.minus(prev.rate).div(prev.rate).times(100))) : null;
+        prev = { materialId: r.materialId, rate };
+        const g = r.sourceId ? grns.get(r.sourceId) : undefined;
+        return { material: r.material.name, sku: r.material.sku, unit: r.material.baseUnit.code, receivedAt: r.createdAt, vendor: g?.vendor.name ?? null, document: g?.number ?? null, qty: num(D(r.qty)), rate: num(rate.toDecimalPlaces(6)), change };
+      });
+      return windowed(out, w);
+    },
+  })([
+      { key: "material", header: "Material", value: (r) => r.material }, { key: "sku", header: "SKU", value: (r) => r.sku }, { key: "unit", header: "Base unit", value: (r) => r.unit },
+      { key: "receivedAt", header: "Received at", value: (r) => r.receivedAt }, { key: "vendor", header: "Vendor", value: (r) => r.vendor ?? "" }, { key: "document", header: "Document", value: (r) => r.document ?? "" },
+      { key: "qty", header: "Quantity", value: (r) => r.qty }, { key: "rate", header: "Rate per base unit", value: (r) => r.rate }, { key: "change", header: "Change from previous receipt %", value: (r) => r.change ?? "" },
+    ]),
+
+  // Proposal p. 6: "variance trends over time tell you whether the leak is closing".
+  COUNT_VARIANCE_TREND: define({
+    id: "COUNT_VARIANCE_TREND", title: "Stock count variance trend", permission: "reports.view", maxRows: 1000, aggregate: true,
+    schema: baseFilter.extend({ outletId: z.string().min(1, "Choose an outlet") }).refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed((await countVarianceTrend(db, ctx, { outletId: f.outletId, from: f.from, to: f.to })).rows, w),
+  })([
+      { key: "number", header: "Count", value: (r) => r.number }, { key: "approvedAt", header: "Approved at", value: (r) => r.approvedAt }, { key: "department", header: "Department", value: (r) => r.department },
+      { key: "itemsCounted", header: "Items counted", value: (r) => r.itemsCounted }, { key: "itemsAdjusted", header: "Items adjusted", value: (r) => r.itemsAdjusted },
+      { key: "loss", header: "Loss", value: (r) => r.loss }, { key: "surplus", header: "Surplus", value: (r) => r.surplus }, { key: "net", header: "Net", value: (r) => r.net },
+    ]),
 };
 
 export const REPORT_IDS = Object.keys(REPORTS);

@@ -5,7 +5,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import { canTransition } from "@/constants/enums";
 import { ValidationError } from "@/server/db/scope";
 import { withKeyedLock } from "@/server/services/keyedLock";
-import { isSerializationConflict } from "@/server/db/conflict";
+import { isLedgerKeyRace, isSerializationConflict } from "@/server/db/conflict";
 
 export type Tx = Prisma.TransactionClient;
 export type Client = PrismaClient | Tx;
@@ -73,7 +73,8 @@ export async function runInTx<T>(db: Client, fn: (tx: Tx) => Promise<T>, opts: T
       try {
         return await (db as PrismaClient).$transaction(fn, { isolationLevel, maxWait: 10_000, timeout: 20_000 });
       } catch (e) {
-        if (isSerializationConflict(e) && attempt < MAX_TX_ATTEMPTS) {
+        // A concurrent post of the same stock movement (PostgreSQL only; SQLite has one writer) is retried too.
+        if ((isSerializationConflict(e) || (pg && isLedgerKeyRace(e))) && attempt < MAX_TX_ATTEMPTS) {
           await retryDelay(attempt);
           continue;
         }

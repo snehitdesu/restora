@@ -159,7 +159,9 @@ describe("guest storefront — cart", () => {
     expect(screen.getByText("Biryani is sold out at this outlet")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove unavailable items to continue" })).toBeDisabled();
     expect(screen.queryByRole("link", { name: /Proceed to checkout/ })).toBeNull();
-    expect(loadCart(TOKEN).lines[0].unitPrice).toBe(130); // the cart now carries the server's price
+    // The cart now carries the server's price. It is saved to sessionStorage by an effect that runs after the
+    // render showing the notice, so wait for it (reading it in the same tick raced on a loaded machine).
+    await waitFor(() => expect(loadCart(TOKEN).lines[0].unitPrice).toBe(130));
     const quote = calls.find((c) => c.url.endsWith("/quote"))!;
     expect(quote.url).toBe(`/api/qr/t/${TOKEN}/quote`);
     expect(JSON.stringify(quote.body)).not.toMatch(/price|total|tax/i);

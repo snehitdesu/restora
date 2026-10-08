@@ -251,6 +251,9 @@ model Material {
   taxPct            Decimal           @default(0)
   minStock          Decimal           @default(0)
   reorderLevel      Decimal           @default(0)
+  // Order-up-to level for the reorder engine (base unit). Empty: the reorder
+  // level is the par (svc/reorder.ts).
+  parLevel          Decimal?
   preferredVendorId String?
   perishable        Boolean           @default(false)
   trackBatch        Boolean           @default(false)
@@ -303,7 +306,16 @@ model Vendor {
   bankIfsc       String?
   paymentTerms   String? // "NET15", "COD"
   creditLimit    Decimal  @default(0)
+  // UPI id for vendor payments (shown masked like bank details).
+  upiId          String?
+  // Mirrors status == ACTIVE (kept for existing filters); status is authoritative.
   active         Boolean  @default(true)
+  // PENDING | ACTIVE | INACTIVE | BLACKLISTED (VENDOR_STATUS_TRANSITIONS). New
+  // vendors start PENDING; buying (PO / GRN / bill) needs ACTIVE.
+  status         String   @default("ACTIVE")
+  statusReason   String?
+  approvedById   String?
+  approvedAt     DateTime?
   notes          String?
   createdById    String?
   createdAt      DateTime @default(now())
@@ -313,6 +325,7 @@ model Vendor {
 
   @@unique([organizationId, name])
   @@index([organizationId, active])
+  @@index([organizationId, status])
 }
 
 model VendorMaterial {
@@ -470,6 +483,11 @@ model Recipe {
   menuItemId       String?   @unique
   menuItem         MenuItem? @relation("MenuItemRecipe", fields: [menuItemId], references: [id], onDelete: Cascade)
   outputMaterialId String? // for SUB_RECIPE: the produced (semi-finished) material
+  // SUB_RECIPE made in batches and held as prepared stock (group 3): dishes
+  // draw on the output material instead of re-consuming the raw materials,
+  // and only stocked recipes can be produced. Not stocked = made to order:
+  // dishes explode through it to the raw materials.
+  stocked          Boolean   @default(false)
   name             String
   active           Boolean   @default(true)
   createdById      String?
@@ -495,6 +513,9 @@ model RecipeVersion {
   yieldQty       Decimal   @default(1)
   yieldUnitId    String?
   servingSize    Decimal   @default(1)
+  // Overhead added on top of ingredient cost (proposal p. 4): plate cost =
+  // ingredients x (1 + overheadPct / 100). Food cost % stays ingredients only.
+  overheadPct    Decimal   @default(0)
   notes          String?
   approvedById   String?
   approvedAt     DateTime?
@@ -781,6 +802,17 @@ model OrderItem {
   discount       Decimal   @default(0)
   taxPct         Decimal   @default(0)
   lineTotal      Decimal   @default(0)
+  // Plate cost of ONE standard portion when the sale consumed stock: the dish's
+  // recipe at the average costs used for the ledger rows, without add-ons and
+  // with a variant's consumption factor divided out, times (1 + the recipe's
+  // overhead % at that moment); null = no recipe, e.g. unmapped. Frozen: the
+  // historical plate cost behind menu engineering, comparable with today's
+  // plate cost of the same dish; neither ingredient prices nor a later overhead
+  // edit change it.
+  unitCost       Decimal?
+  // Everything the line consumed (recipe x qty x variant factor + stock-consuming
+  // add-ons) at those costs: the line's real cost of goods (null = no recipe).
+  lineCost       Decimal?
   // HSN / SAC snapshot at order time.
   hsnSac         String?
   station        String    @default("KITCHEN")
@@ -905,6 +937,12 @@ model Kot {
   number         Int
   status         String          @default("NEW") // NEW | ACCEPTED | PREPARING | READY | SERVED | CANCELLED
   printedAt      DateTime?
+  // Lifecycle stamps (set once, by the transition that reaches the state): prep
+  // time = readyAt - createdAt, measured, not estimated.
+  acceptedAt     DateTime?
+  startedAt      DateTime?
+  readyAt        DateTime?
+  servedAt       DateTime?
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
@@ -943,6 +981,12 @@ model PurchaseIndent {
   departmentId   String?
   status         String   @default("DRAFT") // DRAFT | SUBMITTED | APPROVED | CLOSED | CANCELLED
   notes          String?
+  // "REORDER" when raised from the reorder screen; null = made by hand.
+  source         String?
+  // Client Idempotency-Key for creation (reorder raise): a retry with the same
+  // key + request returns the original indent; reuse for a different request is refused.
+  idempotencyKey String?
+  requestHash    String?
   createdById    String?
   approvedById   String?
   createdAt      DateTime @default(now())
@@ -950,6 +994,7 @@ model PurchaseIndent {
 
   lines PurchaseIndentLine[]
 
+  @@unique([organizationId, idempotencyKey])
   @@unique([outletId, number])
   @@index([organizationId, outletId, status])
 }
@@ -984,6 +1029,8 @@ model PurchaseOrder {
   requestHash    String?
   // The approved indent this PO was raised from (raising the PO closes it).
   indentId       String?
+  // "REORDER" when raised from the reorder screen; null = made by hand.
+  source         String?
   createdById    String?
   approvedById   String?
   approvedAt     DateTime?
@@ -1273,6 +1320,13 @@ model Wastage {
   number         String
   reason         String   @default("SPOILAGE") // SPOILAGE | SPILLAGE | PREP_LOSS | EXPIRED | DAMAGED | STAFF_MEAL | OVERPRODUCTION | OTHER
   status         String   @default("POSTED") // DRAFT | POSTED | CANCELLED (posting writes the ledger)
+  // Dish-level wastage ("3 pizzas"): the lines are the dish's recipe exploded
+  // to raw materials; these record what was wasted as the guest would name it.
+  menuItemId     String?
+  dishQty        Decimal?
+  // When the loss happened, if earlier than the entry (worksheet for an
+  // earlier business day); posting dates the ledger rows to it.
+  occurredAt     DateTime?
   notes          String?
   // Client Idempotency-Key for creation: a retry with the same key + request
   // returns the original document; reuse for a different request is refused.
@@ -1338,10 +1392,41 @@ model StockCountLine {
   @@index([materialId])
 }
 
+/// Dish production worksheet (proposal module 05): one row per dish per outlet
+/// business day. The chef enters prepared portions; sold comes from settled
+/// orders; wasted = posted dish-wastage documents of that day (the wastage
+/// register is the only path that moves stock); variance = prepared - sold -
+/// wasted is the unexplained gap. `wastedQty` and `revision` are unused since
+/// group 3 (kept: the column shipped in migration 20261012100000_core_gaps).
+model DishProduction {
+  id             String   @id @default(cuid())
+  organizationId String
+  outletId       String
+  departmentId   String?
+  /// Outlet business day ("YYYY-MM-DD").
+  businessDate   String
+  menuItemId     String
+  preparedQty    Decimal  @default(0)
+  wastedQty      Decimal  @default(0)
+  /// Bumped on every save that changes wastedQty (ledger sourceRef revision).
+  revision       Int      @default(0)
+  notes          String?
+  createdById    String?
+  updatedById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([outletId, businessDate, menuItemId])
+  @@index([organizationId, outletId, businessDate])
+}
+
 model ProductionBatch {
   id               String    @id @default(cuid())
   organizationId   String
   outletId         String
+  // Kitchen department making the batch: inputs leave it, output enters it
+  // (null = the outlet's unassigned stock, as before group 3).
+  departmentId     String?
   number           String
   recipeVersionId  String?
   outputMaterialId String
@@ -1353,9 +1438,13 @@ model ProductionBatch {
   createdById      String?
   completedAt      DateTime?
   createdAt        DateTime  @default(now())
+  // Client Idempotency-Key: a double-submitted plan returns the first batch.
+  idempotencyKey   String?
+  requestHash      String?
 
   lines ProductionLine[]
 
+  @@unique([organizationId, idempotencyKey])
   @@unique([outletId, number])
   @@index([organizationId, outletId, status])
 }
@@ -1451,7 +1540,8 @@ model Reconciliation {
   businessDate   DateTime
   // PAYMENTS (counted collections per method) | POS (provider orders vs local)
   // | GATEWAY (payment provider vs local payments) | AGGREGATOR (settlements vs
-  // expected payouts) | VENDOR (bills vs vendor payments)
+  // expected payouts) | VENDOR (bills vs vendor payments) | SALES (revenue
+  // billed per channel vs declared by the manager at day close)
   kind           String   @default("PAYMENTS")
   status         String   @default("DRAFT") // DRAFT | COMPLETED (completed = locked)
   notes          String?
@@ -1479,6 +1569,58 @@ model ReconciliationLine {
   note             String?
 
   @@index([reconciliationId])
+}
+
+/// Money that reached the bank for a sales day (proposal module 06, "actually
+/// deposited"): a cash deposit slip, or the UPI / card settlement credited for
+/// that day. Never edited or deleted: a wrong entry is voided with a reason
+/// and a new one recorded.
+model BankDeposit {
+  id             String    @id @default(cuid())
+  organizationId String
+  outletId       String
+  /// Sales day the money came from (UTC midnight of the outlet-local date, like Reconciliation).
+  businessDate   DateTime
+  method         String    @default("CASH") // CASH | UPI | CARD
+  depositedAt    DateTime
+  amount         Decimal
+  reference      String
+  bankAccount    String?
+  notes          String?
+  status         String    @default("RECORDED") // RECORDED | VOIDED
+  voidReason     String?
+  voidedById     String?
+  voidedAt       DateTime?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  idempotencyKey String?
+  requestHash    String?
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, outletId, businessDate])
+}
+
+/// Daily close (proposal module 06): one row per close of an outlet business
+/// day. `snapshot` freezes the day's figures (JSON). While the latest revision
+/// is CLOSED the day refuses changes; reopening (with a reason) marks it
+/// REOPENED and keeps it, and the next close is a new revision.
+model DayClose {
+  id             String    @id @default(cuid())
+  organizationId String
+  outletId       String
+  businessDate   DateTime
+  revision       Int       @default(1)
+  status         String    @default("CLOSED") // CLOSED | REOPENED
+  snapshot       String
+  notes          String?
+  closedById     String?
+  closedAt       DateTime  @default(now())
+  reopenedById   String?
+  reopenedAt     DateTime?
+  reopenReason   String?
+
+  @@unique([outletId, businessDate, revision])
+  @@index([organizationId, outletId, businessDate])
 }
 
 // ============================================================
@@ -1998,4 +2140,119 @@ model IntegrationDelivery {
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, kind, status])
   @@index([provider, providerRef])
+}
+
+// ============================================================
+// GROUP 5: ACCOUNTING MAPPING, SHEETS SYNC, AGGREGATOR CONTROL ROOM, SCHEDULED JOBS
+// ============================================================
+
+/// Ledger and party names as the organization's books call them. Applied to
+/// every accounting file and sync, so RESTORA's "Sales" can land in the
+/// accountant's "Sales - Dine In" (proposal p. 12: "CSV exports for Tally,
+/// Zoho Books, or your CA's own format").
+model AccountingMapping {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  /// JSON { "<RESTORA ledger>": "<books ledger / account name or id>" }
+  ledgers        String   @default("{}")
+  /// JSON { "<party as RESTORA names it>": "<books party / contact>" }
+  parties        String   @default("{}")
+  updatedById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+/// Google Sheets two-way sync (proposal p. 12): the state of one row of one
+/// dataset as RESTORA last wrote it to / read it from the sheet. A row changed
+/// on BOTH sides since then is a conflict, never silently overwritten.
+model SheetSyncRow {
+  id             String   @id @default(cuid())
+  organizationId String
+  dataset        String
+  rowKey         String
+  syncedHash     String
+  syncedAt       DateTime
+  @@unique([organizationId, dataset, rowKey])
+}
+
+model SheetSyncConflict {
+  id             String    @id @default(cuid())
+  organizationId String
+  dataset        String
+  rowKey         String
+  /// JSON of the row in RESTORA and in the sheet when the conflict was found.
+  restoraValue   String
+  sheetValue     String
+  /// OPEN | KEPT_RESTORA | TOOK_SHEET
+  status         String    @default("OPEN")
+  detectedAt     DateTime  @default(now())
+  resolvedById   String?
+  resolvedAt     DateTime?
+  @@index([organizationId, status])
+}
+
+/// One line of an aggregator payout statement, imported from the platform's
+/// partner dashboard export (no partner API): what the platform says it paid
+/// for one order, and what it deducted (proposal p. 17 aggregator control room).
+model AggregatorStatementLine {
+  id              String   @id @default(cuid())
+  organizationId  String
+  outletId        String
+  aggregatorId    String
+  /// The statement / payout reference the line came from.
+  statementRef    String
+  externalId      String
+  settledAt       DateTime
+  grossAmount     Decimal  @default(0)
+  commission      Decimal  @default(0)
+  penalty         Decimal  @default(0)
+  adSpend         Decimal  @default(0)
+  otherDeductions Decimal  @default(0)
+  netPayout       Decimal  @default(0)
+  importedById    String?
+  importedAt      DateTime @default(now())
+  @@unique([aggregatorId, statementRef, externalId])
+  @@index([organizationId, outletId, settledAt])
+}
+
+/// A cost charged by an aggregator outside any one order: an ad campaign, a
+/// monthly fee, a penalty (proposal p. 17: "commission, penalty and ad-spend
+/// tracked as real costs"). Voided, never deleted.
+model AggregatorCharge {
+  id             String    @id @default(cuid())
+  organizationId String
+  outletId       String
+  aggregatorId   String
+  /// PENALTY | AD_SPEND | FEE | OTHER
+  kind           String
+  amount         Decimal
+  chargedOn      DateTime
+  reference      String?
+  notes          String?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  voidedAt       DateTime?
+  voidedById     String?
+  voidReason     String?
+  idempotencyKey String?
+  requestHash    String?
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, outletId, chargedOn])
+}
+
+/// One run of a scheduled job per scope per day (e.g. the nightly POS re-pull
+/// per outlet, proposal p. 7). The unique key makes "once a day" hold across
+/// several app instances.
+model JobRun {
+  id         String    @id @default(cuid())
+  name       String
+  scopeKey   String
+  runDate    String
+  /// RUNNING | SUCCESS | FAILED
+  status     String    @default("RUNNING")
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  /// Secret-free JSON summary or error.
+  detail     String?
+  @@unique([name, scopeKey, runDate])
 }

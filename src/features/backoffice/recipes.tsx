@@ -28,7 +28,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/ui/States";
 import { FilterBar, SearchInput, SelectFilter } from "@/components/ui/Filters";
 import { ActionButton } from "@/components/ui/Confirm";
 import { TransitionBar } from "@/features/backoffice/documents";
-import { MaterialSelect, useMaterials, useUnits, type UnitRow } from "@/features/backoffice/lookups";
+import { MaterialSelect, useMaterials, useUnits, type UnitRow, useCanSeeCost } from "@/features/backoffice/lookups";
 
 type Num = string | number;
 export type RecipeListRow = {
@@ -37,11 +37,11 @@ export type RecipeListRow = {
 };
 export type RecipeLine = { id: string; componentType: string; materialId: string | null; subRecipeId: string | null; qty: Num; unitId: string | null; wastagePct: Num; sortOrder: number; name: string | null; sku: string | null; unit: string | null };
 export type RecipeVersion = {
-  id: string; version: number; status: string; effectiveFrom: string; yieldQty: Num; yieldUnitId: string | null; yieldUnit: string | null; servingSize: Num;
+  id: string; version: number; status: string; effectiveFrom: string; yieldQty: Num; yieldUnitId: string | null; yieldUnit: string | null; servingSize: Num; overheadPct?: Num;
   notes: string | null; approvedAt: string | null; createdAt: string; lines: RecipeLine[];
 };
 export type Recipe = {
-  id: string; name: string; outputType: string; active: boolean; menuItemId: string | null; outputMaterialId: string | null; createdAt: string;
+  id: string; name: string; outputType: string; active: boolean; menuItemId: string | null; outputMaterialId: string | null; stocked?: boolean; createdAt: string;
   menuItem: { id: string; name: string; price: Num } | null; outputMaterial: { id: string; name: string; sku: string; unit: string | null } | null;
   versions: RecipeVersion[];
 };
@@ -62,7 +62,7 @@ const approvedCount = (r: { versions: Array<{ status: string }> }) => r.versions
 
 function CreateRecipeDialog({ onClose, onDone }: { onClose: () => void; onDone: (id: string) => void }) {
   const { outletId, can } = useShell();
-  const [d, setD] = useState({ name: "", outputType: "MENU_ITEM", menuItemId: "", outputMaterialId: "", yieldQty: "1", yieldUnitId: "", servingSize: "1", notes: "" });
+  const [d, setD] = useState({ name: "", outputType: "MENU_ITEM", menuItemId: "", outputMaterialId: "", yieldQty: "1", yieldUnitId: "", servingSize: "1", overheadPct: "0", notes: "" });
   const menu = useQuery<MenuPick[]>(can("menu.view") && outletId ? "/api/menu" : null, { outletId: outletId ?? undefined });
   const materials = useMaterials(can("master.view"));
   const units = useUnits(can("master.view"));
@@ -75,7 +75,7 @@ function CreateRecipeDialog({ onClose, onDone }: { onClose: () => void; onDone: 
         method: "POST",
         body: {
           name: d.name.trim(), outputType: d.outputType, ...(menuItem ? { menuItemId: d.menuItemId } : { outputMaterialId: d.outputMaterialId }),
-          yieldQty: Number(d.yieldQty), yieldUnitId: opt(d.yieldUnitId), servingSize: Number(d.servingSize), notes: opt(d.notes),
+          yieldQty: Number(d.yieldQty), yieldUnitId: opt(d.yieldUnitId), servingSize: Number(d.servingSize), overheadPct: Number(d.overheadPct || 0), notes: opt(d.notes),
         },
       })} onDone={(r) => onDone(r.recipe.id)}>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -101,6 +101,7 @@ function CreateRecipeDialog({ onClose, onDone }: { onClose: () => void; onDone: 
         <Field label="Yield unit" name="yieldUnitId"><UnitSelect units={units.data} value={d.yieldUnitId} onChange={(v) => setD({ ...d, yieldUnitId: v })} empty="—" /></Field>
         <Field label="Serving size" name="servingSize" required><Input type="number" inputMode="decimal" step="any" min="0" required value={d.servingSize} onChange={set("servingSize")} /></Field>
       </div>
+      <Field label="Overhead %" name="overheadPct" hint="Added to the ingredient cost for the plate cost. Food cost % stays ingredients only."><Input type="number" inputMode="decimal" step="0.01" min="0" max="500" value={d.overheadPct} onChange={set("overheadPct")} className="max-w-32" /></Field>
       <Field label="Notes" name="notes"><Textarea value={d.notes} onChange={set("notes")} maxLength={2000} /></Field>
     </FormDialog>
   );
@@ -157,19 +158,22 @@ function toLocalInput(iso: string): string {
 }
 
 function EditVersionDialog({ version, units, onClose, onDone }: { version: RecipeVersion; units: UnitRow[] | undefined; onClose: () => void; onDone: () => void }) {
-  const [d, setD] = useState({ yieldQty: String(toNumber(version.yieldQty)), yieldUnitId: version.yieldUnitId ?? "", servingSize: String(toNumber(version.servingSize)), effectiveFrom: toLocalInput(version.effectiveFrom), notes: version.notes ?? "" });
+  const [d, setD] = useState({ yieldQty: String(toNumber(version.yieldQty)), yieldUnitId: version.yieldUnitId ?? "", servingSize: String(toNumber(version.servingSize)), overheadPct: String(toNumber(version.overheadPct ?? 0)), effectiveFrom: toLocalInput(version.effectiveFrom), notes: version.notes ?? "" });
   const set = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setD({ ...d, [k]: e.target.value });
   return (
     <FormDialog open onClose={onClose} title={`Edit draft v${version.version}`} submitLabel="Save draft"
       onSubmit={() => api(`/api/recipes/versions/${version.id}`, {
         method: "PATCH",
-        body: { yieldQty: Number(d.yieldQty), yieldUnitId: opt(d.yieldUnitId), servingSize: Number(d.servingSize), effectiveFrom: d.effectiveFrom ? new Date(d.effectiveFrom).toISOString() : undefined, notes: opt(d.notes) },
+        body: { yieldQty: Number(d.yieldQty), yieldUnitId: opt(d.yieldUnitId), servingSize: Number(d.servingSize), overheadPct: Number(d.overheadPct || 0), effectiveFrom: d.effectiveFrom ? new Date(d.effectiveFrom).toISOString() : undefined, notes: opt(d.notes) },
       })} onDone={onDone}>
       <div className="grid gap-3 sm:grid-cols-3">
         <Field label="Yield qty" name="yieldQty" required><Input type="number" inputMode="decimal" step="any" min="0" required value={d.yieldQty} onChange={set("yieldQty")} /></Field>
         <Field label="Yield unit" name="yieldUnitId"><UnitSelect units={units} value={d.yieldUnitId} onChange={(v) => setD({ ...d, yieldUnitId: v })} empty={version.yieldUnit ?? "—"} /></Field>
         <Field label="Serving size" name="servingSize" required><Input type="number" inputMode="decimal" step="any" min="0" required value={d.servingSize} onChange={set("servingSize")} /></Field>
       </div>
+      <Field label="Overhead %" name="overheadPct" hint="Added to the ingredient cost for the plate cost (gas, packaging, labour). Food cost % stays ingredients only.">
+        <Input type="number" inputMode="decimal" step="0.01" min="0" max="500" value={d.overheadPct} onChange={set("overheadPct")} className="max-w-32" />
+      </Field>
       <Field label="Effective from" name="effectiveFrom" hint="Once approved, this version is used from this moment (the latest approved version in effect wins)."><Input type="datetime-local" value={d.effectiveFrom} onChange={set("effectiveFrom")} /></Field>
       <Field label="Notes" name="notes"><Textarea value={d.notes} onChange={set("notes")} maxLength={2000} /></Field>
     </FormDialog>
@@ -274,6 +278,7 @@ function CostCard({ version, outletId, outletName }: { version: RecipeVersion; o
 export function RecipeDetail({ id }: { id: string }) {
   const { outletId, outlet, can } = useShell();
   const { manage, approve } = useRecipeAuthority();
+  const canSeeCost = useCanSeeCost();
   const q = useQuery<Recipe>(`/api/recipes/${id}`);
   const units = useUnits(manage && can("master.view"));
   const [selected, setSelected] = useState<string | null>(null);
@@ -291,6 +296,23 @@ export function RecipeDetail({ id }: { id: string }) {
       <PageHeader title={r.name} badge={<><Badge>{r.outputType === "MENU_ITEM" ? "Menu item" : "Sub-recipe"}</Badge><ActiveBadge active={r.active} /></>} back={{ href: "/recipes", label: "Recipes" }}
         subtitle={r.menuItem ? <>For <Link className="text-brand-600 hover:underline" href={`/menu/items/${r.menuItem.id}`}>{r.menuItem.name}</Link> ({formatMoney(r.menuItem.price)})</> : r.outputMaterial ? `Produces ${r.outputMaterial.name} (${r.outputMaterial.sku})${r.outputMaterial.unit ? ` in ${r.outputMaterial.unit}` : ""}` : undefined}
         actions={manage && !hasDraft && <Button onClick={() => setDialog("new")}><Icon name="plus" /> New version</Button>} />
+      {r.outputType === "SUB_RECIPE" && (
+        <Card className="mb-4" title="How the kitchen makes it">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="max-w-2xl text-sm text-ink-700">
+              {r.stocked
+                ? "Made in batches and held as prepared stock. Production batches use up the ingredients; dishes then draw on the prepared stock."
+                : "Made to order. Dishes use its ingredients directly; it cannot be produced as a batch (that would use the ingredients twice)."}
+            </p>
+            {manage && (
+              <ActionButton size="sm" action={() => api(`/api/recipes/${r.id}/stocked`, { method: "POST", body: { stocked: !r.stocked } })} onDone={q.reload} success="Saved"
+                confirm={{ title: r.stocked ? "Make it to order?" : "Make it in batches?", message: r.stocked ? "From now on dishes use its ingredients directly instead of prepared stock. Prepared stock already on hand stays in the books until counted or used." : "From now on dishes draw on its prepared stock, which only production batches add to. Stock already moved is not rewritten." }}>
+                {r.stocked ? "Make to order" : "Make in batches"}
+              </ActionButton>
+            )}
+          </div>
+        </Card>
+      )}
 
       <Card title="Version history" className="mb-4">
         <DataTable label="Versions" rows={r.versions} rowKey={(x) => x.id} onRowClick={(x) => setSelected(x.id)} empty="No versions"
@@ -319,7 +341,7 @@ export function RecipeDetail({ id }: { id: string }) {
                 extra={manage && draft && <Button onClick={() => setDialog("edit")}><Icon name="edit" /> Edit draft</Button>} />
             }>
             <Details cols={4} items={[
-              ["Yield", `${formatPrecise(v.yieldQty)} ${v.yieldUnit ?? ""}`], ["Serving size", formatQty(v.servingSize)], ["Effective from", formatDateTime(v.effectiveFrom, tz)],
+              ["Yield", `${formatPrecise(v.yieldQty)} ${v.yieldUnit ?? ""}`], ["Serving size", formatQty(v.servingSize)], ["Overhead", `${formatQty(v.overheadPct ?? 0)}%`], ["Effective from", formatDateTime(v.effectiveFrom, tz)],
               ["Approved", v.approvedAt ? formatDateTime(v.approvedAt, tz) : "—"], ["Notes", v.notes],
             ]} />
             {!draft && <p className="mt-2 text-xs text-ink-500">{humanize(v.status)} versions are immutable history. Start a new version to change the recipe.</p>}
@@ -347,7 +369,7 @@ export function RecipeDetail({ id }: { id: string }) {
               ]} />
           </Card>
 
-          {outletId && v.lines.length > 0 && <CostCard version={v} outletId={outletId} outletName={outlet?.name ?? "this outlet"} />}
+          {outletId && v.lines.length > 0 && canSeeCost && <CostCard version={v} outletId={outletId} outletName={outlet?.name ?? "this outlet"} />}
         </>
       )}
       {!v && <EmptyState title="This recipe has no versions" />}

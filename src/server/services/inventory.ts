@@ -59,6 +59,14 @@ export type LedgerEntryInput = {
   expiryDate?: Date;
   note?: string;
   correctionOfId?: string;
+  /** Back-dating for manual sales logged after the day (default: now). */
+  createdAt?: Date;
+  /**
+   * false for moves inside one outlet (department issues, dish-wastage
+   * reversals): the stock was already valued at this outlet, so the inflow
+   * must not re-average the cost or overwrite the last purchase price.
+   */
+  revalue?: boolean;
 };
 
 function signedQty(txnType: TxnType, magnitude: Prisma.Decimal, direction?: "IN" | "OUT"): Prisma.Decimal {
@@ -100,11 +108,12 @@ export async function appendLedger(tx: Tx, ctx: AccessContext, input: LedgerEntr
       note: input.note ?? null,
       correctionOfId: input.correctionOfId ?? null,
       actorId: ctx.userId === "system" ? null : ctx.userId,
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     },
   });
 
   // Maintain weighted-average cost for inflows that provide a rate.
-  if (signed.gt(0) && rate.gt(0)) {
+  if (signed.gt(0) && rate.gt(0) && input.revalue !== false) {
     await updateWeightedAverageCost(tx, ctx, input.outletId, input.materialId, signed, rate);
   }
 
@@ -188,12 +197,16 @@ export async function toBaseUnits(db: Client, ctx: AccessContext, materialId: st
  * two concurrent outflows cannot both pass on the same stock. Sales are the
  * exception: a sale is never blocked by book stock (negativeStock() surfaces it).
  */
-export async function assertAvailable(tx: Tx, ctx: AccessContext, outletId: string, required: Map<string, Prisma.Decimal>) {
+/**
+ * Refuse when the outlet (or, with `department`, one department of it; null =
+ * stock not assigned to any department) holds less than required.
+ */
+export async function assertAvailable(tx: Tx, ctx: AccessContext, outletId: string, required: Map<string, Prisma.Decimal>, department?: { id: string | null; name: string }) {
   for (const [materialId, need] of required) {
-    const onHand = await currentQuantity(tx, ctx, outletId, materialId);
+    const onHand = department ? await departmentQuantity(tx, ctx, outletId, department.id, materialId) : await currentQuantity(tx, ctx, outletId, materialId);
     if (onHand.lt(need)) {
       const m = await tx.material.findUnique({ where: { id: materialId }, select: { name: true } });
-      throw new ValidationError(`Insufficient stock of ${m?.name ?? materialId}: ${roundQty(need).toString()} needed, ${roundQty(onHand).toString()} on hand`);
+      throw new ValidationError(`Insufficient stock of ${m?.name ?? materialId}${department ? ` in ${department.name}` : ""}: ${roundQty(need).toString()} needed, ${roundQty(onHand).toString()} on hand`);
     }
   }
 }
@@ -285,30 +298,24 @@ export type IssueInput = {
   materialId: string;
   quantity: number | string;
   fromDepartmentId?: string;
+  /** The department receiving the stock: an issue moves stock, it is not consumption. */
+  toDepartmentId: string;
   unitId?: string;
   sourceId?: string;
   sourceRef?: string;
   note?: string;
 };
 
+/** One-line department move (OUT of the source, IN to the destination, same cost). */
 export function recordIssue(ctx: AccessContext, input: IssueInput, db: Client = prisma) {
   requirePermission(ctx, "inventory.issue", input.outletId);
   positiveQty.parse(input.quantity);
+  if (!input.toDepartmentId || input.toDepartmentId === input.fromDepartmentId) throw new ValidationError("Choose a different department receiving the stock");
   return runInTx(db, async (tx) => {
     const rate = await getAvgCost(tx, ctx, input.outletId, input.materialId);
-    const row = await appendLedger(tx, ctx, {
-      outletId: input.outletId,
-      materialId: input.materialId,
-      departmentId: input.fromDepartmentId,
-      unitId: input.unitId,
-      magnitude: input.quantity,
-      rate,
-      txnType: "ISSUE",
-      sourceType: "ISSUE",
-      sourceId: input.sourceId,
-      sourceRef: input.sourceRef,
-      note: input.note,
-    });
+    const common = { outletId: input.outletId, materialId: input.materialId, unitId: input.unitId, magnitude: input.quantity, rate, txnType: "ISSUE" as const, sourceType: "ISSUE" as const, sourceId: input.sourceId, note: input.note };
+    const row = await appendLedger(tx, ctx, { ...common, departmentId: input.fromDepartmentId, direction: "OUT", sourceRef: input.sourceRef });
+    await appendLedger(tx, ctx, { ...common, departmentId: input.toDepartmentId, direction: "IN", revalue: false, sourceRef: input.sourceRef ? `${input.sourceRef}:in` : undefined });
     await writeAudit(tx, ctx, { action: "INVENTORY_MOVEMENT", entityType: "InventoryLedger", entityId: row.id, outletId: input.outletId, after: { txnType: "ISSUE" } });
     return row;
   });
@@ -434,6 +441,8 @@ export function recordProductionConsumption(ctx: AccessContext, input: Productio
 
 export type CountAdjustmentInput = {
   outletId: string;
+  /** Department that was counted (its stock is corrected); none = the outlet's unassigned stock. */
+  departmentId?: string | null;
   materialId: string;
   /** signed difference physical-book: positive => stock up, negative => down */
   variance: number | string;
@@ -451,6 +460,7 @@ export function recordCountAdjustment(ctx: AccessContext, input: CountAdjustment
     const rate = await getAvgCost(tx, ctx, input.outletId, input.materialId);
     const row = await appendLedger(tx, ctx, {
       outletId: input.outletId,
+      departmentId: input.departmentId ?? null,
       materialId: input.materialId,
       unitId: input.unitId,
       magnitude: v.abs(),
@@ -658,6 +668,12 @@ export async function currentQuantity(db: Client, ctx: AccessContext, outletId: 
     where: { organizationId: ctx.organizationId, outletId, materialId },
     _sum: { qty: true },
   });
+  return D(agg._sum.qty ?? 0);
+}
+
+/** Quantity held by one department of an outlet (null = stock not assigned to any department). */
+export async function departmentQuantity(db: Client, ctx: AccessContext, outletId: string, departmentId: string | null, materialId: string): Promise<Prisma.Decimal> {
+  const agg = await db.inventoryLedger.aggregate({ where: { organizationId: ctx.organizationId, outletId, materialId, departmentId }, _sum: { qty: true } });
   return D(agg._sum.qty ?? 0);
 }
 

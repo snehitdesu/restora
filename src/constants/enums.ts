@@ -170,6 +170,10 @@ export const AdjustmentReason = makeEnum([
 export type AdjustmentReason = (typeof AdjustmentReason.values)[number];
 
 // --- Procurement ---
+/** Vendor approval lifecycle: nobody can buy from a vendor that is not ACTIVE. */
+export const VendorStatus = makeEnum(["PENDING", "ACTIVE", "INACTIVE", "BLACKLISTED"] as const);
+export type VendorStatus = (typeof VendorStatus.values)[number];
+
 export const PurchaseOrderStatus = makeEnum([
   "DRAFT",
   "SUBMITTED",
@@ -329,6 +333,17 @@ export const EXPORT_TRANSITIONS: Record<ExportStatus, ExportStatus[]> = {
   SUCCESS: ["EXPIRED"],
   FAILED: [],
   EXPIRED: [],
+};
+
+/**
+ * PENDING -> ACTIVE is the approval gate (purchase.approve). Lifting a blacklist
+ * never re-activates directly: the vendor goes back to PENDING for re-approval.
+ */
+export const VENDOR_STATUS_TRANSITIONS: Record<VendorStatus, VendorStatus[]> = {
+  PENDING: ["ACTIVE", "INACTIVE", "BLACKLISTED"],
+  ACTIVE: ["INACTIVE", "BLACKLISTED"],
+  INACTIVE: ["ACTIVE", "BLACKLISTED"],
+  BLACKLISTED: ["PENDING"],
 };
 
 export const PURCHASE_ORDER_TRANSITIONS: Record<PurchaseOrderStatus, PurchaseOrderStatus[]> = {

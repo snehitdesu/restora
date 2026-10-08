@@ -17,6 +17,11 @@
  *    converted to the base unit) per unit ordered — independent of the variant
  *    and of whether the item itself has a recipe.
  * The variant/option is looked up when the order settles (current menu values).
+ *
+ * Departments (proposal modules 03/04: "deducts them from the right
+ * department's stock"): each line depletes the outlet department whose kind
+ * matches the line's station (KITCHEN / BAR / BAKERY); with no such department
+ * the stock comes off the outlet's unassigned stock, as before.
  */
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/client";
@@ -31,13 +36,13 @@ type Tx = Prisma.TransactionClient;
 export type ConsumptionSummary = {
   consumed: boolean;
   alreadyConsumed: boolean;
-  materials: Array<{ materialId: string; qty: string; cost: string }>;
+  materials: Array<{ materialId: string; departmentId: string | null; qty: string; cost: string }>;
   unmapped: Array<{ code: string; qty: number }>;
   totalCost: string;
 };
 
 /** Consume inventory for a settled/paid order. Safe to call more than once. */
-export async function consumeInventoryForOrder(tx: Tx, ctx: AccessContext, orderId: string): Promise<ConsumptionSummary> {
+export async function consumeInventoryForOrder(tx: Tx, ctx: AccessContext, orderId: string, opts: { at?: Date } = {}): Promise<ConsumptionSummary> {
   const order = await tx.order.findUnique({ where: { id: orderId }, include: { items: { include: { modifiers: true } } } });
   if (!order || order.organizationId !== ctx.organizationId) throw new Error("Order not found");
 
@@ -45,13 +50,38 @@ export async function consumeInventoryForOrder(tx: Tx, ctx: AccessContext, order
     return { consumed: false, alreadyConsumed: true, materials: [], unmapped: [], totalCost: "0" };
   }
 
+  // key "<departmentId>|<materialId>" ("" = unassigned stock)
   const required = new Map<string, Prisma.Decimal>();
   const unmapped: Array<{ code: string; qty: number }> = [];
+  const departments = await tx.department.findMany({
+    where: { organizationId: ctx.organizationId, outletId: order.outletId, active: true, kind: { in: ["KITCHEN", "BAR", "BAKERY"] } },
+    select: { id: true, kind: true },
+    orderBy: [{ name: "asc" }, { id: "asc" }],
+  });
+  const departmentFor = (station: string) => departments.find((d) => d.kind === station)?.id ?? "";
 
-  const add = (materialId: string, q: Prisma.Decimal) => required.set(materialId, (required.get(materialId) ?? D(0)).plus(q));
+  let dept = "";
+  // What each order line used, to freeze its costs: `all` = everything the line consumed (its real
+  // cost of goods), `recipe` = the dish's own recipe only, and `portions` = standard portions of that
+  // recipe (qty x variant factor), so recipe cost / portions x (1 + the recipe's overhead %) = the plate
+  // cost of one standard portion, comparable with today's plate cost of the same dish (menu engineering,
+  // proposal p. 10). The overhead % is frozen with the cost: editing it later never rewrites history.
+  type Use = { all: Map<string, Prisma.Decimal>; recipe: Map<string, Prisma.Decimal>; portions: Prisma.Decimal; overheadPct: Prisma.Decimal };
+  const perItem = new Map<string, Use>();
+  let itemUse: Use = { all: new Map(), recipe: new Map(), portions: D(0), overheadPct: D(0) };
+  const bump = (m: Map<string, Prisma.Decimal>, materialId: string, q: Prisma.Decimal) => m.set(materialId, (m.get(materialId) ?? D(0)).plus(q));
+  const add = (materialId: string, q: Prisma.Decimal, fromRecipe = false) => {
+    const k = `${dept}|${materialId}`;
+    required.set(k, (required.get(k) ?? D(0)).plus(q));
+    bump(itemUse.all, materialId, q);
+    if (fromRecipe) bump(itemUse.recipe, materialId, q);
+  };
 
   for (const item of order.items) {
     const itemQty = D(item.qty);
+    dept = departmentFor(item.station);
+    itemUse = { all: new Map(), recipe: new Map(), portions: D(0), overheadPct: D(0) };
+    perItem.set(item.id, itemUse);
 
     // Stock-consuming add-ons first: they apply whether or not the item has a recipe.
     const optionIds = item.modifiers.map((m) => m.optionId).filter((x): x is string => Boolean(x));
@@ -71,6 +101,7 @@ export async function consumeInventoryForOrder(tx: Tx, ctx: AccessContext, order
       const code = item.posItemCode ?? item.menuItemId ?? item.name;
       await recordUnmapped(tx, ctx, order.outletId, code, item.name, Number(item.qty), order.source);
       unmapped.push({ code, qty: Number(item.qty) });
+      perItem.delete(item.id); // its plate cost is unknown (only add-ons were consumed)
       continue;
     }
     let factor = D(1);
@@ -78,29 +109,55 @@ export async function consumeInventoryForOrder(tx: Tx, ctx: AccessContext, order
       const variant = await tx.menuItemVariant.findUnique({ where: { id: item.variantId }, select: { organizationId: true, consumptionFactor: true } });
       if (variant && variant.organizationId === ctx.organizationId) factor = D(variant.consumptionFactor);
     }
-    const exploded = await explodeRecipe(tx, ctx, version.id, itemQty.times(factor));
-    for (const [materialId, q] of exploded) add(materialId, q);
+    itemUse.portions = itemQty.times(factor);
+    itemUse.overheadPct = D(version.overheadPct);
+    const exploded = await explodeRecipe(tx, ctx, version.id, itemUse.portions, { stock: true });
+    for (const [materialId, q] of exploded) add(materialId, q, true);
   }
 
   const materials: ConsumptionSummary["materials"] = [];
   let totalCost = D(0);
-  for (const [materialId, q] of required) {
-    const rate = await getAvgCost(tx, ctx, order.outletId, materialId);
-    const row = await appendLedger(tx, ctx, {
+  // Outflows never re-average, so one rate per material serves every row and every line.
+  const rates = new Map<string, Prisma.Decimal>();
+  const rateOf = async (materialId: string) => rates.get(materialId) ?? rates.set(materialId, await getAvgCost(tx, ctx, order.outletId, materialId)).get(materialId)!;
+  for (const [k, q] of required) {
+    const [departmentId, materialId] = k.split("|");
+    const rate = await rateOf(materialId);
+    await appendLedger(tx, ctx, {
       outletId: order.outletId,
+      departmentId: departmentId || null,
       materialId,
       magnitude: q,
       rate,
       txnType: "SALE_CONSUMPTION",
       sourceType: "ORDER",
       sourceId: orderId,
-      sourceRef: `order:${orderId}:mat:${materialId}`,
+      // Unassigned keeps the original key format; a department makes the row distinct per department.
+      sourceRef: departmentId ? `order:${orderId}:mat:${materialId}:dept:${departmentId}` : `order:${orderId}:mat:${materialId}`,
       note: `Consumption for order ${orderId}`,
+      createdAt: opts.at,
     });
     const cost = money(dMul(q, rate)).abs();
     totalCost = totalCost.plus(cost);
-    materials.push({ materialId, qty: q.toString(), cost: cost.toString() });
-    void row;
+    materials.push({ materialId, departmentId: departmentId || null, qty: q.toString(), cost: cost.toString() });
+  }
+
+  const costOf = async (use: Map<string, Prisma.Decimal>) => {
+    let c = D(0);
+    for (const [materialId, q] of use) c = c.plus(dMul(q, await rateOf(materialId)));
+    return c;
+  };
+  for (const item of order.items) {
+    const use = perItem.get(item.id);
+    if (!use || use.portions.lte(0)) continue;
+    const recipeCost = await costOf(use.recipe);
+    // unitCost = plate cost of one standard portion (ingredients + overhead); lineCost = the real
+    // cost of goods of the whole line (variant scaling + add-ons, no overhead: that is what left stock).
+    const plateCost = recipeCost.div(use.portions).times(D(1).plus(use.overheadPct.div(100)));
+    await tx.orderItem.update({
+      where: { id: item.id },
+      data: { unitCost: plateCost.toDecimalPlaces(6), lineCost: money(await costOf(use.all)) },
+    });
   }
 
   await tx.order.update({ where: { id: orderId }, data: { stockConsumed: true } });

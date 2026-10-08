@@ -27,7 +27,7 @@ import { ActiveBadge, Card, Details, PageHeader, Stat } from "@/components/ui/Pa
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/States";
 import { FilterBar, SearchInput, SelectFilter } from "@/components/ui/Filters";
 import { ActionButton } from "@/components/ui/Confirm";
-import { MaterialSelect, useMaterials, useUnits } from "@/features/backoffice/lookups";
+import { MaterialSelect, useCanSeeCost, useMaterials, useUnits } from "@/features/backoffice/lookups";
 
 type Num = string | number;
 export type MenuCategory = { id: string; name: string; sortOrder: number; active: boolean };
@@ -41,7 +41,7 @@ export type MenuItem = {
   outletOverrides?: Array<{ price: Num | null; active: boolean; soldOut: boolean }>;
   effectivePrice?: number; offered?: boolean; effectiveSoldOut?: boolean;
 };
-type Margin = { price: number; cost: number; margin: number; foodCostPct: number; versionId: string };
+type Margin = { price: number; cost: number; overheadPct?: number; overhead?: number; plateCost?: number; margin: number; foodCostPct: number; versionId: string };
 
 /** "Required · choose 1", "Optional · up to 3"… from a group's min/max. */
 export function ruleText(min: number, max: number): string {
@@ -253,7 +253,8 @@ function MarginCard({ item, outletId }: { item: MenuItem; outletId: string }) {
       ) : q.error ? <ErrorState error={q.error} onRetry={q.reload} compact /> : q.data ? (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Stat label="Menu price" value={formatMoney(q.data.price)} />
-          <Stat label="Recipe cost" value={formatMoney(q.data.cost)} hint="Weighted average cost at this outlet" />
+          <Stat label="Plate cost" value={formatMoney(q.data.plateCost ?? q.data.cost)}
+            hint={q.data.overhead ? `Ingredients ${formatMoney(q.data.cost)} + ${q.data.overheadPct}% overhead` : "Ingredients at weighted average cost at this outlet"} />
           <Stat label="Margin" value={formatMoney(q.data.margin)} tone={q.data.margin < 0 ? "bad" : undefined} />
           <Stat label="Food cost" value={formatPct(q.data.foodCostPct)} />
         </div>
@@ -264,6 +265,7 @@ function MarginCard({ item, outletId }: { item: MenuItem; outletId: string }) {
 
 export function MenuItemDetail({ id }: { id: string }) {
   const { outletId, outlet, can } = useShell();
+  const canSeeCost = useCanSeeCost();
   const { orgManage, outletManage } = useMenuAuthority();
   const menu = useMenu(outletId);
   const cats = useCategories();
@@ -320,7 +322,7 @@ export function MenuItemDetail({ id }: { id: string }) {
         {!item.active && <p className="mt-2 text-xs text-ink-500">This item is off the menu for every outlet; outlet overrides apply once it is back on the menu.</p>}
       </Card>
 
-      {can("recipe.view") && outletId && <MarginCard item={item} outletId={outletId} />}
+      {can("recipe.view") && canSeeCost && outletId && <MarginCard item={item} outletId={outletId} />}
 
       <Card title="Variants" className="mb-4" actions={orgManage && <Button size="sm" onClick={() => setDialog("variant")}><Icon name="plus" /> Add variant</Button>}>
         {item.variants.length === 0 ? <p className="text-sm text-ink-500">No variants — the item is sold at one price.</p> : (

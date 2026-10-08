@@ -1,10 +1,17 @@
 import { z } from "zod";
 import { prisma } from "@/server/db/client";
 import { createRouter } from "@/server/api/router";
-import { assertOutletAccess } from "@/server/db/scope";
+import { assertOutletAccess, ForbiddenError } from "@/server/db/scope";
+import { canSeeStockValue } from "@/server/services/costVisibility";
+import type { AccessContext } from "@/server/db/scope";
+
+/** Plate costs are costs: a kitchen login reads recipes, not what they cost (proposal pp. 8, 12). */
+function assertMaySeeCost(ctx: AccessContext, outletId: string) {
+  if (!canSeeStockValue(ctx, outletId)) throw new ForbiddenError("Your role does not include cost figures");
+}
 import {
   listRecipes, getRecipe, createRecipe, createRecipeVersion, updateRecipeVersion, addRecipeLine, removeRecipeLine,
-  approveRecipeVersion, archiveRecipeVersion, calculateRecipeCost, menuItemCostAndMargin, describeCostLines,
+  approveRecipeVersion, archiveRecipeVersion, calculateRecipeCost, menuItemCostAndMargin, describeCostLines, setRecipeStocked,
 } from "@/server/services/recipe";
 import { num } from "@/domain/money";
 
@@ -17,6 +24,7 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
   { method: "GET", path: "", handler: ({ ctx, query }) => listRecipes(prisma, ctx, listQuery.parse(query)) },
   { method: "POST", path: "", handler: ({ ctx, body }) => createRecipe(ctx, body as never) },
   { method: "GET", path: ":id", handler: ({ ctx, params }) => getRecipe(prisma, ctx, params.id) },
+  { method: "POST", path: ":id/stocked", handler: ({ ctx, params, body }) => setRecipeStocked(ctx, params.id, z.object({ stocked: z.boolean() }).parse(body).stocked) },
   { method: "POST", path: ":id/versions", handler: ({ ctx, params, body }) => createRecipeVersion(ctx, params.id, body as never) },
   { method: "PATCH", path: "versions/:id", handler: ({ ctx, params, body }) => updateRecipeVersion(ctx, params.id, body as never) },
   { method: "POST", path: "versions/:id/lines", handler: ({ ctx, params, body }) => addRecipeLine(ctx, params.id, body as never) },
@@ -28,6 +36,7 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
     handler: async ({ ctx, params, query }) => {
       const q = costQuery.parse(query);
       assertOutletAccess(ctx, q.outletId);
+      assertMaySeeCost(ctx, q.outletId);
       const c = await calculateRecipeCost(prisma, ctx, params.id, q);
       return { total: num(c.total), quantity: num(c.quantity), lines: await describeCostLines(prisma, ctx, c.lines) };
     },
@@ -35,7 +44,10 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
   {
     method: "GET", path: "menu-items/:id/margin",
     handler: async ({ ctx, params, query }) => {
-      const m = await menuItemCostAndMargin(prisma, ctx, params.id, costQuery.parse(query).outletId);
+      const outletId = costQuery.parse(query).outletId;
+      assertOutletAccess(ctx, outletId);
+      assertMaySeeCost(ctx, outletId);
+      const m = await menuItemCostAndMargin(prisma, ctx, params.id, outletId);
       return { ...m, lines: await describeCostLines(prisma, ctx, m.lines) };
     },
   },

@@ -23,6 +23,9 @@ export const PERMISSIONS = [
   "vendor.manage",
   "purchase.view",
   "purchase.create",
+  // Raise (and submit / cancel) an internal indent: the kitchen asking the store
+  // for stock (proposal pp. 5, 8). Indents carry no prices.
+  "indent.create",
   "purchase.approve",
   "grn.create",
   "bill.manage",
@@ -95,6 +98,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "vendor.manage",
     "purchase.view",
     "purchase.create",
+    "indent.create",
     "purchase.approve",
     "grn.create",
     "bill.manage",
@@ -142,6 +146,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "vendor.view",
     "purchase.view",
     "purchase.create",
+    "indent.create",
     "grn.create",
     "inventory.view",
     "inventory.issue",
@@ -153,7 +158,10 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "recipe.view",
     "task.view",
   ],
-  KITCHEN: ["recipe.view", "menu.view", "kot.view", "kot.update", "order.view", "inventory.view", "task.view"],
+  // Production floor (proposal pp. 8, 12): kitchen stock, indents, wastage,
+  // production and dish sales. No costs, no dues (cost fields are hidden by
+  // the services for logins without reports/purchase/finance access).
+  KITCHEN: ["recipe.view", "menu.view", "kot.view", "kot.update", "order.view", "inventory.view", "inventory.wastage", "inventory.produce", "indent.create", "task.view"],
   CAPTAIN: ["menu.view", "order.view", "order.create", "order.modify", "kot.view", "kot.serve", "customer.view", "reservation.manage"],
   CASHIER: [
     "menu.view",
