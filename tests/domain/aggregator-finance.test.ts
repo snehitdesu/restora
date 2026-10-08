@@ -22,12 +22,13 @@ import {
 } from "@/server/services/aggregatorFinance";
 
 const RUN = Date.now().toString(36);
+const FROZEN = Date.now();
 let orgId: string, A: string, B: string, C: string;
 let owner: AccessContext, manager: AccessContext, managerB: AccessContext, kitchen: AccessContext, foreign: AccessContext;
 let zomato: string, swiggy: string;
 let n = 0;
 const member = (id: string, role: string, outletId: string): AccessContext => ({ userId: id, organizationId: orgId, outletIds: [outletId], roles: [role], outletRoles: { [outletId]: [role] }, orgRoles: [], isOrgWide: false, isSuperAdmin: false });
-const day = (offset = 0) => new Date(Date.now() + offset * 86400000);
+const day = (offset = 0) => new Date(FROZEN + offset * 86400000);
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
 type Item = { name: string; qty: number; price: number; cost?: number | null };

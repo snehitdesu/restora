@@ -77,10 +77,10 @@ async function finishJobRun(db: PrismaClient, name: string, scopeKey: string, ru
 
 export type RepullResult = { outlets: number; started: number; succeeded: number; failed: number; skipped: number; imported: number };
 
-/** Nightly re-pull for every outlet whose clock has passed 01:30. `providerFor` lets tests supply the POS adapter. */
-export async function runNightlyPosRepull(db: PrismaClient = prisma, now = new Date(), providerFor: (provider: string) => POSProvider = getPOSProvider): Promise<RepullResult> {
+/** Nightly re-pull for every outlet whose clock has passed 01:30. `providerFor` lets tests supply the POS adapter. `onlyOutletId` limits one tick to a single outlet (tests); omitted means every connected outlet. */
+export async function runNightlyPosRepull(db: PrismaClient = prisma, now = new Date(), providerFor: (provider: string) => POSProvider = getPOSProvider, onlyOutletId?: string): Promise<RepullResult> {
   const result: RepullResult = { outlets: 0, started: 0, succeeded: 0, failed: 0, skipped: 0, imported: 0 };
-  const conns = await db.integrationConnection.findMany({ where: { kind: "POS", status: "CONNECTED", outletId: { not: null } }, select: { organizationId: true, outletId: true, provider: true }, orderBy: [{ outletId: "asc" }, { provider: "asc" }] });
+  const conns = await db.integrationConnection.findMany({ where: { kind: "POS", status: "CONNECTED", outletId: onlyOutletId ?? { not: null } }, select: { organizationId: true, outletId: true, provider: true }, orderBy: [{ outletId: "asc" }, { provider: "asc" }] });
   const outlets = await db.outlet.findMany({ where: { id: { in: conns.map((c) => c.outletId!) } }, select: { id: true, organizationId: true, timezone: true } });
   const byId = new Map(outlets.map((o) => [o.id, o]));
   const seen = new Set<string>();
@@ -98,14 +98,14 @@ export async function runNightlyPosRepull(db: PrismaClient = prisma, now = new D
     try {
       const ctx = systemContext(outlet.organizationId, [outlet.id]);
       const report = await reconcilePOSOrders(ctx, { outletId: outlet.id, from: yesterday.start, to: new Date(yesterday.end.getTime() - 1), autoImport: true }, { provider: providerFor(c.provider), db });
-      await finishJobRun(db, POS_REPULL, outlet.id, yesterday.date, "SUCCESS", { providerCount: report.providerCount, localCount: report.localCount, missing: report.missing.length, imported: report.imported.length, provider: report.provider });
+      await finishJobRun(db, POS_REPULL, outlet.id, yesterday.date, "SUCCESS", { providerCount: report.providerCount, localCount: report.localCount, missing: report.missing.length, imported: report.imported.length, provider: report.provider }, now);
       result.succeeded++;
       result.imported += report.imported.length;
       inc("restora_job_runs_total", { job: POS_REPULL, status: "success" });
       if (report.imported.length) log.info("nightly POS re-pull filled gaps", { event: "pos_repull_imported", outletId: outlet.id, date: yesterday.date, imported: report.imported.length });
     } catch (e) {
       const why = safeMessage(e);
-      await finishJobRun(db, POS_REPULL, outlet.id, yesterday.date, "FAILED", { error: why });
+      await finishJobRun(db, POS_REPULL, outlet.id, yesterday.date, "FAILED", { error: why }, now);
       result.failed++;
       inc("restora_job_runs_total", { job: POS_REPULL, status: "failed" });
       inc("restora_job_failures_total", { type: "pos_repull" });

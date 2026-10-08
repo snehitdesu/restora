@@ -101,9 +101,14 @@ export async function saveAggregator(ctx: AccessContext, input: z.input<typeof a
 // ---------------------------------------------------------------- statements
 
 const money8 = z.number().finite().min(-1e8).max(1e8);
+/** JSON sends an ISO string; services may pass a Date. Both become a Date before storage. */
+const instant = z.preprocess((value) => {
+  if (value instanceof Date || typeof value === "string" || typeof value === "number") return new Date(value);
+  return value;
+}, z.date());
 const lineSchema = z.object({
   externalId: z.string().trim().min(1).max(100),
-  settledAt: z.coerce.date(),
+  settledAt: instant,
   grossAmount: money8.min(0),
   commission: money8.min(0).default(0),
   penalty: money8.min(0).default(0),

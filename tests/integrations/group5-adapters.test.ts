@@ -21,6 +21,20 @@ import { parseStatementCsv } from "@/lib/statementCsv";
 import type { Voucher } from "@/integrations/accounting";
 
 const GATEWAY = "http://tally.test:9000";
+
+/** The rejection itself, so a resolved success value is not part of the type. */
+async function rejected(call: Promise<unknown>): Promise<unknown> {
+  try {
+    await call;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the provider call to fail");
+}
+function integrationError(error: unknown): IntegrationError {
+  if (error instanceof IntegrationError) return error;
+  throw error;
+}
 const voucher: Voucher = { sourceKey: "inv:abc123", date: "2026-10-07", type: "SALES", number: "INV-0001", party: "Walk-in & <Co>", narration: "Sale \"A\"", lines: [{ ledger: "Cash", debit: 105, credit: 0 }, { ledger: "Sales", debit: 0, credit: 100 }, { ledger: "Output GST", debit: 0, credit: 5 }] };
 const res = (body: unknown, status = 200) => new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
 const ok = (xml = "<RESPONSE><CREATED>1</CREATED><ERRORS>0</ERRORS></RESPONSE>") => new Response(xml, { status: 200 });
@@ -53,8 +67,7 @@ describe("T. Tally gateway", () => {
 
   it("T3 Tally's own refusal is final (REJECTED, not retryable) and its message is kept short and safe", async () => {
     const c = new TallyGatewayClient({ url: GATEWAY, company: "X", fetchImpl: async () => ok("<RESPONSE><CREATED>0</CREATED><ERRORS>1</ERRORS><LINEERROR>Ledger 'Cash' does not exist</LINEERROR></RESPONSE>") });
-    const e = await c.post(voucher).catch((x) => x as IntegrationError);
-    expect(e).toBeInstanceOf(IntegrationError);
+    const e = integrationError(await rejected(c.post(voucher)));
     expect(e).toMatchObject({ code: "REJECTED", retryable: false });
     expect(e.message).toMatch(/Ledger 'Cash' does not exist/);
     await expect(new TallyGatewayClient({ url: GATEWAY, company: "X", fetchImpl: async () => ok("<RESPONSE><CREATED>0</CREATED><ERRORS>0</ERRORS></RESPONSE>") }).post(voucher)).rejects.toMatchObject({ code: "REJECTED" });
@@ -146,8 +159,7 @@ describe("Z. Zoho Books", () => {
   });
 
   it("Z5 sign-in failures are unauthorized and never leak the credentials", async () => {
-    const e = await client(zoho({ tokenStatus: 400 })).createJournal(voucher, accountOf).catch((x) => x as Error);
-    expect(e).toBeInstanceOf(IntegrationError);
+    const e = integrationError(await rejected(client(zoho({ tokenStatus: 400 })).createJournal(voucher, accountOf)));
     expect(e.message).not.toMatch(/client-secret-value|1000\.refresh|1000\.CLIENTID/);
     const noToken = await new ZohoBooksClient({ dataCenter: "in", organizationId: "60012345", credentials: creds, fetchImpl: async () => res({ error: "invalid_code" }) }).createJournal(voucher, accountOf).catch((x) => x as Error);
     expect(noToken).toBeInstanceOf(UnauthorizedIntegrationError);

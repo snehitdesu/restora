@@ -19,8 +19,8 @@ test.describe("costing and inventory (group 4) — manager", () => {
   test("G4-ME-001 menu engineering: verdicts or the reason there are none, and a CSV", async ({ page }) => {
     await page.goto("/analytics/menu-engineering");
     await expect(page.getByRole("heading", { name: "Menu engineering" })).toBeVisible();
-    const table = page.getByRole("table", { name: "Menu engineering by dish" });
-    await expect(table.or(page.getByText("Not enough data to classify the menu"))).toBeVisible();
+    // A thin period shows the reason and still lists dishes (no verdict). A scored period shows the table without that banner.
+    await expect(page.getByRole("table", { name: "Menu engineering by dish" })).toBeVisible();
     const download = page.waitForEvent("download");
     const exported = page.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/exports");
     await page.getByRole("button", { name: /Download CSV/ }).click();

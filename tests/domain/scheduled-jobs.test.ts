@@ -34,6 +34,8 @@ const runs = () => prisma.jobRun.findMany({ where: { name: POS_REPULL, scopeKey:
 const detail = (r: { detail: string | null }) => JSON.parse(r.detail ?? "{}") as Record<string, unknown>;
 const ordersAt = () => prisma.order.count({ where: { organizationId: orgId, outletId: A, externalRef: { endsWith: `-${RUN}` } } });
 const provider = (orders: NormalizedOrder[]): POSProvider => new MockPOSProvider(orders);
+/** This file shares the suite database, so a tick must not pull every other tenant's POS connection. */
+const runForOutlet = (now: Date, providerFor: (provider: string) => POSProvider) => runNightlyPosRepull(prisma, now, providerFor, A);
 
 beforeAll(async () => {
   orgId = (await prisma.organization.create({ data: { name: `Sched Org ${RUN}`, timezone: "Asia/Kolkata" } })).id;
@@ -83,12 +85,12 @@ describe("J1. the claim", () => {
 
 describe("J2. the nightly re-pull", () => {
   it("J2 before 01:30 nothing runs; after it yesterday's missing orders are imported once; the same day again does nothing; the next day is a new run", async () => {
-    const early = await runNightlyPosRepull(prisma, BEFORE_0130, () => provider([posOrder("N1")]));
+    const early = await runForOutlet(BEFORE_0130, () => provider([posOrder("N1")]));
     expect(early).toMatchObject({ outlets: 1, started: 0, skipped: 1 });
     expect(await runs()).toHaveLength(0);
 
     const store = [posOrder("N1"), posOrder("N2", 210)];
-    const first = await runNightlyPosRepull(prisma, AFTER_0130, () => provider(store));
+    const first = await runForOutlet(AFTER_0130, () => provider(store));
     expect(first).toMatchObject({ outlets: 1, started: 1, succeeded: 1, failed: 0, imported: 2 });
     expect(await ordersAt()).toBe(2);
     const [run] = await runs();
@@ -96,12 +98,12 @@ describe("J2. the nightly re-pull", () => {
     expect(detail(run)).toMatchObject({ attempts: 1, providerCount: 2, missing: 2, imported: 2 });
     expect(run.finishedAt).not.toBeNull();
 
-    const again = await runNightlyPosRepull(prisma, new Date(AFTER_0130.getTime() + 2 * HOUR), () => provider(store));
+    const again = await runForOutlet(new Date(AFTER_0130.getTime() + 2 * HOUR), () => provider(store));
     expect(again).toMatchObject({ started: 0, skipped: 1, imported: 0 });
     expect(await ordersAt()).toBe(2);
     expect(await runs()).toHaveLength(1);
 
-    const nextDay = await runNightlyPosRepull(prisma, new Date(AFTER_0130.getTime() + 24 * HOUR), () => provider([]));
+    const nextDay = await runForOutlet(new Date(AFTER_0130.getTime() + 24 * HOUR), () => provider([]));
     expect(nextDay).toMatchObject({ started: 1, succeeded: 1, imported: 0 });
     expect((await runs()).map((r) => r.runDate)).toEqual([YESTERDAY, "2026-10-09"]);
   });
@@ -113,14 +115,14 @@ describe("J2. the nightly re-pull", () => {
     await processPOSOrder(ctx, have);
     const before = await ordersAt();
     const consumedBefore = await prisma.order.count({ where: { organizationId: orgId, outletId: A, stockConsumed: true } });
-    const r = await runNightlyPosRepull(prisma, AFTER_0130, () => provider([have, posOrder("W2", 52.5)]));
+    const r = await runForOutlet(AFTER_0130, () => provider([have, posOrder("W2", 52.5)]));
     expect(r).toMatchObject({ succeeded: 1, imported: 1 });
     expect(await ordersAt()).toBe(before + 1);
     const [run] = await runs();
     expect(detail(run)).toMatchObject({ providerCount: 2, missing: 1, imported: 1 });
     // repeating the same pull (a different instance, a retry) cannot create anything
     await prisma.jobRun.deleteMany({ where: { name: POS_REPULL, scopeKey: A } });
-    const repeat = await runNightlyPosRepull(prisma, AFTER_0130, () => provider([have, posOrder("W2", 52.5)]));
+    const repeat = await runForOutlet(AFTER_0130, () => provider([have, posOrder("W2", 52.5)]));
     expect(repeat).toMatchObject({ succeeded: 1 });
     expect(await ordersAt()).toBe(before + 1);
     expect(await prisma.order.count({ where: { organizationId: orgId, outletId: A, stockConsumed: true } })).toBeGreaterThanOrEqual(consumedBefore);
@@ -139,7 +141,7 @@ describe("J4. provider failure", () => {
     const mk = (orders: NormalizedOrder[], okAfter: number) => () => flaky(okAfter, orders);
 
     const t = (mins: number) => new Date(AFTER_0130.getTime() + mins * 60_000);
-    const one = await runNightlyPosRepull(prisma, t(0), mk([posOrder("F1")], 2));
+    const one = await runForOutlet(t(0), mk([posOrder("F1")], 2));
     expect(one).toMatchObject({ started: 1, failed: 1, succeeded: 0 });
     let [run] = await runs();
     expect(run).toMatchObject({ status: "FAILED" });
@@ -147,9 +149,9 @@ describe("J4. provider failure", () => {
     expect(String(detail(run).error)).not.toContain("abc123secret"); // credentials never reach the record
     expect(await ordersAt()).toBe(0 + (await ordersAt()));
 
-    expect(await runNightlyPosRepull(prisma, t(30), mk([posOrder("F1")], 2))).toMatchObject({ started: 0, skipped: 1 }); // too soon
-    expect(await runNightlyPosRepull(prisma, t(61), mk([posOrder("F1")], 2))).toMatchObject({ started: 1, failed: 1 }); // attempt 2 fails again
-    const third = await runNightlyPosRepull(prisma, t(130), mk([posOrder("F1")], 2)); // attempt 3: the provider answers
+    expect(await runForOutlet(t(30), mk([posOrder("F1")], 2))).toMatchObject({ started: 0, skipped: 1 }); // too soon
+    expect(await runForOutlet(t(61), mk([posOrder("F1")], 2))).toMatchObject({ started: 1, failed: 1 }); // attempt 2 fails again
+    const third = await runForOutlet(t(130), mk([posOrder("F1")], 2)); // attempt 3: the provider answers
     expect(third).toMatchObject({ started: 1, succeeded: 1, imported: 1 });
     [run] = await runs();
     expect(run).toMatchObject({ status: "SUCCESS" });
@@ -159,10 +161,10 @@ describe("J4. provider failure", () => {
     await prisma.jobRun.deleteMany({ where: { name: POS_REPULL, scopeKey: A } });
     calls = 0;
     const dead = () => flaky(99, []);
-    await runNightlyPosRepull(prisma, t(0), dead);
-    await runNightlyPosRepull(prisma, t(70), dead);
-    await runNightlyPosRepull(prisma, t(140), dead);
-    expect(await runNightlyPosRepull(prisma, t(300), dead)).toMatchObject({ started: 0, skipped: 1 });
+    await runForOutlet(t(0), dead);
+    await runForOutlet(t(70), dead);
+    await runForOutlet(t(140), dead);
+    expect(await runForOutlet(t(300), dead)).toMatchObject({ started: 0, skipped: 1 });
     [run] = await runs();
     expect(run).toMatchObject({ status: "FAILED" });
     expect(detail(run).attempts).toBe(3);
