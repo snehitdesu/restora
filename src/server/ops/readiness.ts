@@ -23,7 +23,7 @@ import { isDraining } from "@/server/ops/lifecycle";
  * BOTH prisma/migrations (SQLite) and prisma/postgres/migrations —
  * tests/ops/infrastructure.test.ts fails the build otherwise.
  */
-export const EXPECTED_MIGRATION = "20261016100000_integrations_control_room";
+export const EXPECTED_MIGRATION = "20261017100000_growth_crm";
 
 export type CheckState = "up" | "down";
 export type MigrationState = "ok" | "pending" | "failed" | "unknown";

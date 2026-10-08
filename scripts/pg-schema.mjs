@@ -80,6 +80,10 @@ export const DECIMAL_FIELDS = {
   AggregatorStatementLine: { grossAmount: "MONEY", commission: "MONEY", penalty: "MONEY", adSpend: "MONEY", otherDeductions: "MONEY", netPayout: "MONEY" },
   AggregatorCharge: { amount: "MONEY" },
   UnmappedSale: { qty: "QTY" },
+  GrowthSettings: { referralMinOrderValue: "MONEY" },
+  LoyaltyTier: { minSpend: "MONEY", earnMultiplierPct: "PCT" },
+  Coupon: { value: "MONEY", maxDiscount: "MONEY", minOrderValue: "MONEY" },
+  CouponRedemption: { amount: "MONEY" },
 };
 
 /** SQLite schema source → PostgreSQL schema source. Throws on any unclassified Decimal. */
