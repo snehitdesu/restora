@@ -173,7 +173,7 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 | CP-04 | M08 p11 | Anomaly: vendor price spike | IMPLEMENTED + VERIFIED | PRICE_SPIKE | none | P1 | | anomaly tests |
 | CP-05 | M08 p11 | Anomaly: unmapped POS item | IMPLEMENTED + VERIFIED | UNMAPPED_ITEM | none | P1 | | |
 | CP-06 | M08 p11 | Anomaly: heavy item wastage | IMPLEMENTED + VERIFIED | HEAVY_WASTAGE | none | P1 | | anomaly tests |
-| CP-07 | M08 p11 / S05 p16-17 | Morning digest on WhatsApp / email / notification (9 AM summary) | NOT BUILT | | in-app digest; WhatsApp needs a live provider | P3 | CM-* | group 6 |
+| CP-07 | M08 p11 / S05 p16-17 | Morning digest on WhatsApp / email / notification (9 AM summary) | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `buildDigest` (previous business day: orders, revenue net of refunds, average order, unhappy feedback, items to reorder, open anomalies) shown as a notification and a Growth settings preview; sent to the owner's number when set | a real provider for the message (the in-app summary needs none) | P3 | CM-* | `growth-lifecycle` (L5), `tests/ui/growth-screens.test.tsx` |
 | CP-08 | M08 p11 | Financial overview KPIs, revenue trend, vendor cash-flow, variance by category, stock value by category, daily P&L, day-part, preset ranges | IMPLEMENTED + VERIFIED | `/analytics`, `financeOverview`, reports | none | P2 | | analytics tests, `tests/ui/analytics.test.tsx` |
 
 ## Module 09: People, access and growth (p. 12)
@@ -214,7 +214,7 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 | QR-07 | S05 p15 | Order tracking, bill, customer can only see own order | IMPLEMENTED + VERIFIED | `/o/[orderId]` with order key | none | P0 | | guest tests |
 | QR-08 | S05 p15 | Split bill from the phone; re-order in 2 taps | NOT BUILT | | | P3 | | |
 | QR-09 | S05 p15 | Own ordering website: delivery and takeaway, delivery radius, slots, pre-order | NOT BUILT | QR dine-in storefront only | delivery/takeaway channel, address, radius rules | P3 | | |
-| QR-10 | S05 p15 | Coupons, first-order offers, referral links | NOT BUILT | | | P3 | | |
+| QR-10 | S05 p15 | Coupons, first-order offers, referral links | IMPLEMENTED + VERIFIED | coupons (`Coupon`: percent / fixed, cap, minimum order, validity, usage and per-guest limits, first order only, minimum tier, order types, stackable) priced by the server through the order discount; guest cart shows the saving; the POS takes a code; one redemption per order, reversed on cancel or full refund; referral links (CR-06) | none | P3 |  | `tests/domain/growth-coupons.test.ts` (K1-K10), `tests/api/growth-routes.test.ts` (R2b, R3), `tests/ui/growth-guest.test.tsx`, `e2e/growth.spec.ts` (GROWTH-002, -003) |
 | QR-11 | S05 p15 | Brand website: gallery, story, timings, directions, booking, SEO | PARTIAL | Coders' Cafe storefront About / Contact from outlet facts; RESTORA product site | gallery, online table booking, SEO pages per restaurant | P3 | | |
 | QR-12 | S05 p15 | Price / sold-out change is live everywhere instantly | IMPLEMENTED + VERIFIED | one menu, per-outlet overrides | none | P1 | | outlet-menu tests |
 
@@ -240,27 +240,27 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 
 | ID | Proposal Section | Feature | Current Status | Existing Implementation | Missing Work | Priority | Dependencies | Verification |
 |---|---|---|---|---|---|---|---|---|
-| CR-01 | S05 p17 | Points on every bill, redeemable | IMPLEMENTED + VERIFIED | loyalty ledger, earn on PAID only | none | P3 | | crm-loyalty tests |
-| CR-02 | S05 p17 | Tiers (silver, gold) with perks | PARTIAL | `LoyaltyAccount.tier` field | tier rules and perks | P3 | | |
-| CR-03 | S05 p17 | Automatic birthday and anniversary offers | NOT BUILT | birthday stored | anniversary field, scheduled offers | P3 | CM-* | |
-| CR-04 | S05 p17 | "Haven't seen you in 45 days" win-back | PARTIAL | INACTIVE segment | win-back campaign send | P3 | CM-* | |
+| CR-01 | S05 p17 | Points on every bill, redeemable | IMPLEMENTED + VERIFIED | loyalty ledger, earn on PAID only; the tier a guest held before the order sets the earn multiplier (`earnMultiplierPct`) | none | P3 |  | crm-loyalty tests, `growth-loyalty-tiers` (T1-T4) |
+| CR-02 | S05 p17 | Tiers (silver, gold) with perks | IMPLEMENTED + VERIFIED | `LoyaltyTier` (owner-defined code, name, spend threshold, earn multiplier %, perks); tier derived from the last 365 days of net spend, so it can go down; nightly refresh job; tier change audited; Loyalty & referrals screen; tier card on the customer page; coupons can require a tier | none | P3 |  | `tests/domain/growth-loyalty-tiers.test.ts`, `growth-lifecycle` (L4), `tests/ui/growth-screens.test.tsx`, `e2e/growth.spec.ts` (GROWTH-001, -002) |
+| CR-03 | S05 p17 | Automatic birthday and anniversary offers | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `Customer.anniversary`; birthday / anniversary offer jobs (`svc/lifecycle.ts sendDateOffers`): once per guest per year, only guests who agreed to offers, the owner's chosen coupon, quiet hours, 29 February handled; switched on by choosing the coupon in Growth settings | a real WhatsApp / SMS / e-mail provider (every message is verified against the MOCK provider only) | P3 | CM-* | `growth-lifecycle` (L1), `growth-consent-settings` (M1) |
+| CR-04 | S05 p17 | "Haven't seen you in 45 days" win-back | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `sendWinback`: guests whose last paid order is older than N days (default 45), once per cooldown window (default 90 days), consented, quiet hours, the owner's coupon; Growth settings | a real provider (MOCK only) | P3 | CM-* | `growth-lifecycle` (L2) |
 | CR-05 | S05 p17 | Spend, frequency, favourite dish per guest | IMPLEMENTED + VERIFIED | `customerStats`, profile | none | P3 | | crm tests |
-| CR-06 | S05 p17 | Referral codes that track | NOT BUILT | | | P3 | | |
+| CR-06 | S05 p17 | Referral codes that track | IMPLEMENTED + VERIFIED | `ReferralCode` (RF + 6 characters), invite link `/r/<code>` keeps the code on the friend's phone, checkout field (needs a phone number), `Referral`: both guests are rewarded on the friend's first PAID order only, monthly cap per guest, minimum order, points taken back if that order is fully refunded; staff can record a code on a profile | none | P3 |  | `tests/domain/growth-referrals.test.ts`, `tests/api/growth-routes.test.ts` (R3), `e2e/growth.spec.ts` (GROWTH-006) |
 | CM-01 | S05 p17 | WhatsApp Business API (official) with outbox, retries, idempotency, callbacks | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `IntegrationDelivery` outbox, worker retries, messaging adapters, status callbacks | live WhatsApp credentials, approved templates | P3 | credentials | phase7 tests |
 | CM-02 | S05 p17 | Order confirmation / out for delivery / digital bill messages | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `queueOrderMessage` | live provider | P3 | CM-01 | |
-| CM-03 | S05 p17 | Booking confirmation and reminder | NOT BUILT | | | P5 | CM-01 | |
-| CM-04 | S05 p17 | Weekend specials to a segmented list (campaigns) | NOT BUILT | | | P3 | CM-01 | |
-| CM-05 | S05 p17 | Feedback request 2 h after the visit | NOT BUILT | | | P5 | CM-01 | |
-| CM-06 | S05 p17 | Daily business summary pushed at 9 AM | PARTIAL | see CP-07 (in-app) | WhatsApp delivery | P3 | CM-01 | |
+| CM-03 | S05 p17 | Booking confirmation and reminder | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `runBookingMessages`: confirmation when a booking is made and a reminder N hours before (default 2); order-message consent (opt-out) respected; one message per booking per kind; off until switched on | a real provider (MOCK only) | P5 | CM-01 | `growth-lifecycle` (L3) |
+| CM-04 | S05 p17 | Weekend specials to a segmented list (campaigns) | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `Campaign`: audience rules over live consent / spend / visits / last visit / birthday / anniversary month / tier / segment, live audience count, schedule guards, resumable bounded batches, quiet-hours deferral, weekly cap per guest, cancel, per-recipient outcomes, unsubscribe link in every message; Campaigns screens | a real provider (MOCK only) | P3 | CM-01 | `tests/domain/growth-campaigns.test.ts` (K1-K8), `e2e/growth.spec.ts` (GROWTH-004) |
+| CM-05 | S05 p17 | Feedback request 2 h after the visit | IMPLEMENTED + NOT EXTERNALLY VERIFIED | `FeedbackRequest` scheduled when an order is paid; the worker sends the link `/f/<token>` after the owner's delay (default 2 h) on WhatsApp, then SMS, then e-mail; expires after 7 days | a real provider (MOCK only) | P5 | CM-01 | `tests/domain/growth-feedback.test.ts` (F1), `tests/api/growth-routes.test.ts` (R4) |
+| CM-06 | S05 p17 | Daily business summary pushed at 9 AM | IMPLEMENTED + NOT EXTERNALLY VERIFIED | in-app daily summary notification per outlet and `queueDigestMessage` to the owner's number (WhatsApp, then SMS), once per day | a real provider (MOCK only) | P3 | CM-01 | `growth-lifecycle` (L5) |
 | RS-01 | S05 p17 | Reservations, table-map aware, no double booking | IMPLEMENTED + VERIFIED | `ReservationSlot` locks | none | P5 | | reservation-concurrency tests |
 | RS-02 | S05 p17 | Online booking from website / app / Google | NOT BUILT | staff-entered only | public booking page, Reserve with Google | P5 | | |
 | RS-03 | S05 p17 | Digital waitlist with SMS when ready | PARTIAL | waitlist | SMS | P5 | SMS provider | |
 | RS-04 | S05 p17 | No-show tracking | IMPLEMENTED + VERIFIED | NO_SHOW status | none | P5 | | |
 | RS-05 | S05 p17 | Deposits for large groups | NOT BUILT | | | P5 | Razorpay | |
 | RS-06 | S05 p17 | Special-occasion notes that reach the kitchen | PARTIAL | reservation notes | carry to KOT | P5 | | |
-| RV-01 | S05 p17 | Post-meal feedback via QR or WhatsApp | PARTIAL | `Feedback` (staff entered) | guest feedback form on the order page | P5 | | |
-| RV-02 | S05 p17 | Happy guests routed to Google / Zomato; unhappy reach you privately | NOT BUILT | | | P5 | RV-01 | |
-| RV-03 | S05 p17 | Complaint trends by dish, shift, staff | NOT BUILT | | | P5 | RV-01 | |
+| RV-01 | S05 p17 | Post-meal feedback via QR or WhatsApp | IMPLEMENTED + VERIFIED | order-page rating after payment (stars + comment), feedback link `/f/<token>` (token is the credential), one answer per order (the first stands), staff inbox with source and status | none for the QR path; delivery of the link by WhatsApp / SMS / e-mail is CM-05 | P5 |  | `growth-feedback` (F1-F3), `tests/api/growth-routes.test.ts` (R3, R4), `tests/ui/growth-guest.test.tsx`, `e2e/growth.spec.ts` (GROWTH-002) |
+| RV-02 | S05 p17 | Happy guests routed to Google / Zomato; unhappy reach you privately | IMPLEMENTED + VERIFIED | a rating of 4-5 and above the owner's "unhappy" line is offered the owner's public review page (https, allowlisted hosts: Google, Zomato, Swiggy, TripAdvisor, Justdial); lower ratings stay private, raise a LOW_RATING alert and enter the follow-up workflow (new, acknowledged, resolved with a note) | none | P5 | RV-01 | `growth-feedback` (F2, F3), `growth-consent-settings` (S1), `e2e/growth.spec.ts` (GROWTH-002, -006) |
+| RV-03 | S05 p17 | Complaint trends by dish, shift, staff | IMPLEMENTED + VERIFIED | `feedbackTrends`: by dish (ranked only with enough rated orders), time of day, server and day; Trends tab | none | P5 | RV-01 | `growth-feedback` (F4), `tests/ui/growth-screens.test.tsx` |
 | SO-01 | S05 p17 | Attendance check-in / out | IMPLEMENTED + VERIFIED | `Attendance`, manager corrections | none | P5 | | staff tests |
 | SO-02 | S05 p17 | QR punch or selfie check-in with geofence | NOT BUILT | | | P5 | | |
 | SO-03 | S05 p17 | Shift roster | PARTIAL | `Shift` definitions | assignment of people to shifts | P5 | | |
@@ -324,9 +324,9 @@ Counted from the tables above by script (one row = one feature), after the 2026-
 
 | Status | Rows |
 |---|---|
-| IMPLEMENTED + VERIFIED | 101 |
-| IMPLEMENTED + NOT EXTERNALLY VERIFIED | 15 |
-| PARTIAL | 28 |
-| NOT BUILT | 40 |
+| IMPLEMENTED + VERIFIED | 107 |
+| IMPLEMENTED + NOT EXTERNALLY VERIFIED | 22 |
+| PARTIAL | 24 |
+| NOT BUILT | 31 |
 | INTENTIONALLY DEFERRED | 3 |
 | **Total** | **187** |
