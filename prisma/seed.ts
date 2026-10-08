@@ -38,6 +38,8 @@ const DEMO_PASSWORD = "Demo@12345";
 async function deleteAll() {
   // children -> parents (respects Restrict FKs)
   const ops = [
+    prisma.couponRedemption, prisma.coupon, prisma.referral, prisma.referralCode, prisma.feedbackRequest, prisma.campaignRecipient, prisma.campaign,
+    prisma.customerConsent, prisma.loyaltyTier, prisma.growthSettings,
     prisma.refund, prisma.payment,
     prisma.kotItem, prisma.kot,
     prisma.orderItemModifier, prisma.orderItem, prisma.order,
