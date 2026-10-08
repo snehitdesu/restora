@@ -1,10 +1,32 @@
 # RESTORA (working name Aharos) — Project Status
 
-_Last updated: 2026-10-05 — V1 release work (Phases 9–14). The sections from
-"Stack" downward are the historical record up to Phase 5B; current, verified
-status is in the phase reports listed here._
+_Last updated: 2026-10-08 — stabilization pass after Groups 1-5 (commit `d922cda`). The sections from
+"Stack" downward are the historical record up to Phase 5B; current, verified status is in
+`docs/stabilization-report.md` (evidence) and `docs/master-feature-audit.md` (feature by feature)._
 
-## Current status
+## Current status (2026-10-08)
+Groups 1-5 of the master program are implemented. Verified at this commit by this pass:
+typecheck, lint and production build pass; Vitest 1176 passed / 0 failed on SQLite and 1154 passed / 0 failed on
+PostgreSQL 16; migrations deploy cleanly on both with no drift; browser E2E 90/90 on SQLite, investor flow 3/3.
+**CI on `d922cda` itself was red** (one platform-specific desktop test and a missing Chromium install step in the
+desktop jobs): both are fixed in the stabilization commit and unproven until CI runs again.
+
+| Group | Contents | State |
+|---|---|---|
+| 1 Integrity | vendor approval gate, issue-to-department stock moves, idempotency and locking | IMPLEMENTED + VERIFIED |
+| 2 Reorder | reorder engine, POs and indents from it | IMPLEMENTED + VERIFIED (no browser spec) |
+| 3 Kitchen production + money desk | production, wastage, worksheet, manual sales, variance, money desk, day lock | IMPLEMENTED + VERIFIED |
+| 4 Menu engineering + costing | menu engineering, department P&L, daily costing, stock matrix, supplier prices, QR labels, overhead % | IMPLEMENTED + VERIFIED |
+| 5 Integrations | Tally / Zoho sync, Sheets sync, aggregator finance, nightly POS re-pull, control room | IMPLEMENTED + NOT EXTERNALLY VERIFIED (emulators and mocks only) |
+| 6+ Growth, mobile / advanced ops, infrastructure | | not started |
+
+**Open defect:** after a create dialog saves, the navigation to the new document sometimes does not commit (about 1 in 8 runs
+of two browser specs, SQLite and PostgreSQL; no data loss; root cause not found; first logged as `RECIPE-001` in Phase 14).
+**Not verified:** desktop packaging / `desktop:verify` / DMG on real Windows and macOS runners (never ran on this commit), the web
+browser suite is not part of CI, no real provider (Razorpay keys, Petpooja, Zomato / Swiggy, WhatsApp, Tally, Zoho, Google Sheets).
+**Production blockers** are external: hosting, backups / PITR on real infrastructure, provider credentials, code signing.
+
+## Earlier status (Phases 2-14, 2026-10-05) — historical
 | Phase | Report | Status |
 |---|---|---|
 | 2 Transactions · 3 Inventory/procurement · 4 Finance · 5 Analytics · 6 Staff/mobile · 7 Integrations | `docs/phase2…7-*.md` | complete (per reports) |
@@ -15,11 +37,9 @@ status is in the phase reports listed here._
 | 14 Production launch | `docs/phase14-production-launch.md` | PASS WITH DOCUMENTED LIMITATIONS — deployment **pending external infrastructure** |
 | V1 summary | `docs/RESTORA-V1-FINAL-REPORT.md` | **V1 READY WITH DOCUMENTED LIMITATIONS** (release candidate 1.0.0-rc.1) |
 
-Latest full verification (Phase 14, 2026-10-05, 1.0.0-rc.1): Vitest 887 passed on
-SQLite and 865 passed on PostgreSQL 16 (0 failed), browser E2E 77/77 on both
-databases (one intermittent SQLite failure in a first run, see the Phase 14 report),
-desktop E2E 7/7, packaged-desktop security 23/23, no migration drift; DR drill 11/11,
-PITR 7/7, staging deployment rehearsal smoke 18/18.
+Phase 14 verification (2026-10-05, 1.0.0-rc.1, before Groups 1-5): Vitest 887 passed on SQLite and 865 on PostgreSQL 16,
+browser E2E 77/77 on both databases, desktop E2E 7/7, packaged-desktop security 23/23, no migration drift; DR drill 11/11, PITR 7/7,
+staging deployment rehearsal smoke 18/18.
 
 ## 2026-10-06 — production completion pass (real menu, Razorpay, QR)
 Report: `docs/production-completion-report.md`.
@@ -48,7 +68,7 @@ guest-ordering services (no second order / payment / kitchen engine).
 Next.js 15.5.27 (App Router) · React 19.0.8 · TypeScript (strict) · Prisma 6 · SQLite (dev/test) / PostgreSQL 16 (target, **executed**) ·
 Zod · bcryptjs · Vitest.
 
-## Verification gate
+## Verification gate (historical: Phase 5B, 2026-10-02; superseded by the current status above)
 | Gate | Status |
 |------|--------|
 | `prisma format` / `validate` / `generate` | ✅ |

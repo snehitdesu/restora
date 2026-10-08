@@ -38,7 +38,7 @@ webhook, an operator with database access.
 
 ## 5. Integrations and webhooks
 - Webhooks: raw-body HMAC (timing-safe), tenant binding by provider account id → `IntegrationConnection` (never by a body field), per-tenant secrets AES-256-GCM encrypted (`INTEGRATION_SECRETS_KEY`), event-id dedupe, amount re-verification, rate limit. Verified: `tests/domain/webhook-tenant.test.ts`, `INT-002` (forged webhook refused).
-- Mock providers refused in production unless explicitly allowed (warned at every boot); development placeholder secrets refused.
+- Mock providers refused in production unless explicitly allowed (warned at every boot); development placeholder secrets refused. Covers every provider factory: payment, POS, aggregator (closed 2026-10-08), notification, messaging, Google Sheets, and the webhook entry point (`tests/integrations/production-providers.test.ts`).
 - Outbound HTTP: deadlines, bounded retries, secret-free error messages.
 
 ## 6. Data protection

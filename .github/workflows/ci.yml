@@ -166,6 +166,9 @@ jobs:
         run: npm ci
       - name: "Build: desktop payload (next standalone + secret scan)"
         run: npm run desktop:build
+      # starter.spec drives the guest / staff browsers with Playwright's own Chromium (the app itself runs in Electron).
+      - name: "Desktop E2E: install the Playwright browser"
+        run: npx playwright install chromium
       - name: "Desktop E2E: real app on the unpacked build"
         run: npm run desktop:e2e
       - name: "Package: electron-builder (unpacked, fuses flipped, never published)"
@@ -212,6 +215,9 @@ jobs:
         run: test "$(node -p process.arch)" = "${{ matrix.arch }}"
       - name: "Build: desktop payload (next standalone + secret scan)"
         run: npm run desktop:build
+      # starter.spec drives the guest / staff browsers with Playwright's own Chromium (the app itself runs in Electron).
+      - name: "Desktop E2E: install the Playwright browser"
+        run: npx playwright install chromium
       - name: "Desktop E2E: real app on the unpacked build"
         run: npm run desktop:e2e
       - name: "Package: RESTORA.app (fuses flipped, never published)"

@@ -17,6 +17,7 @@ import { randomBytes } from "node:crypto";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
 import { hashPassword } from "@/server/auth/password";
+import { businessDateKey } from "@/domain/time";
 import {
   recordPurchaseReceipt,
   recordWastage,
@@ -537,9 +538,9 @@ async function main() {
     await prisma.pettyCashTxn.create({ data: { organizationId: orgId, outletId: o.id, type: "OPENING", amount: 5000, reason: "Opening float" } });
     await prisma.pettyCashTxn.create({ data: { organizationId: orgId, outletId: o.id, type: "EXPENSE", amount: -1200, category: "REPAIRS", reason: "AC service" } });
 
-    // reconciliation for today from actual successful payments
+    // reconciliation for today (the outlet's business day, not the host's calendar day) from actual successful payments
     const grouped = await prisma.payment.groupBy({ by: ["method"], where: { outletId: o.id, status: "SUCCESS" }, _sum: { amount: true } });
-    const recon = await prisma.reconciliation.create({ data: { organizationId: orgId, outletId: o.id, businessDate: new Date(new Date().toDateString()), status: "COMPLETED" } });
+    const recon = await prisma.reconciliation.create({ data: { organizationId: orgId, outletId: o.id, businessDate: businessDateKey(new Date(), o.timezone), status: "COMPLETED" } });
     for (const g of grouped) {
       const expected = Number(g._sum.amount ?? 0);
       await prisma.reconciliationLine.create({ data: { organizationId: orgId, reconciliationId: recon.id, method: g.method, expected, actual: expected, difference: 0 } });

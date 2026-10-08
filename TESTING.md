@@ -1,17 +1,36 @@
 # RESTORA (Aharos) — Testing
 
-## Current totals (2026-10-05, Phase 9 validation)
+## Current totals (2026-10-08, stabilization pass at `d922cda` + fixes)
 | Suite | Command | Result |
 |---|---|---|
-| Unit + DB integration, SQLite | `npm test` | 884 passed, 6 skipped (PostgreSQL-only) |
-| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 862 passed, 28 skipped (SQLite/desktop-only) |
-| Browser E2E (production build) | `npm run e2e` · PostgreSQL: `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 77/77 on both |
-| Desktop E2E | `npm run desktop:build && npm run desktop:e2e` | 7/7 |
-| Packaged desktop security | `npx electron-builder --dir && npm run desktop:verify` | 23/23 |
-| Runtime (shutdown / crash recovery) | `VERIFY_DATABASE_URL=postgresql://…/<fresh db> node scripts/ops/verify-runtime.mjs` | 18/18 |
-| Contention benchmark | `scripts/ops/contention-bench.mjs` (header) | `docs/production-infrastructure.md` §7 |
-| DR drills | `scripts/ops/backup-drill.mjs`, `scripts/ops/pitr-drill.mjs` | 11/11, 7/7 |
-| Post-deploy smoke | `SMOKE_BASE=… SMOKE_EMAIL=… SMOKE_PASSWORD=… node scripts/ops/smoke-test.mjs [--write]` | 18/18 on a restored copy |
+| Unit + DB integration, SQLite | `npm test` | 110 files, 1176 passed, 7 skipped, 0 failed |
+| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 110 files, 1154 passed, 29 skipped, 0 failed |
+| Browser E2E (production build), SQLite | `npm run e2e` | 90/90 |
+| Browser E2E, PostgreSQL | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 89/90 (the open navigation flake, see `docs/stabilization-report.md` §4) |
+| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3 (SQLite) |
+| Desktop E2E | `npm run desktop:build && npm run desktop:e2e` | Windows / macOS CI on `d922cda`: 8/9 (the 9th needed the Chromium install step, added since); not run locally |
+| Packaged desktop security | `npx electron-builder --dir && npm run desktop:verify` | **not run on this commit** (last: 23/23 on 2026-10-05) |
+| Runtime, contention, DR drills, post-deploy smoke | see Phase 9 / 14 reports | last run 2026-10-05, not repeated |
+
+Group 3-5 test files (all in the totals above): `tests/domain/kitchen-production.test.ts`, `money-desk.test.ts`,
+`reorder.test.ts`, `costing-engineering.test.ts`, `advanced-inventory.test.ts`, `aggregator-finance.test.ts`,
+`accounting-sync.test.ts`, `sheets-sync.test.ts`, `scheduled-jobs.test.ts`, `core-gaps.test.ts`;
+`tests/api/group3-routes.test.ts`, `group4-routes.test.ts`, `reorder-routes.test.ts`, `integrations-routes.test.ts`;
+`tests/db/stock-post-concurrency.test.ts`, `reorder-concurrency.test.ts`, `day-close-concurrency.test.ts`;
+`tests/integrations/group5-adapters.test.ts`, `production-providers.test.ts`; `tests/ui/group3-screens.test.tsx`,
+`costing-screens.test.tsx`, `procurement-reorder.test.tsx`; `e2e/money-desk.spec.ts`, `e2e/costing.spec.ts`.
+Screens with no automated test: Aggregators, Integrations accounting / Sheets / control room (see the audit).
+
+Notes for running locally:
+- The SQLite and PostgreSQL suites share one generated Prisma client: run `npx prisma generate` (SQLite) or
+  `npx prisma generate --schema prisma/postgres/schema.prisma` before switching, and never run both at once.
+- Playwright pins a Chromium build; if the image has another one, point a throwaway config at it with
+  `use.launchOptions.executablePath` instead of changing the repository config.
+- `tests/desktop/shell-policy.test.ts` has a Windows-path test (runs on Windows only) and a POSIX twin: `sqliteUrl`
+  resolves with the host's path rules by design.
+- E2E and the demo seed use the outlet's business day (Asia/Kolkata), not the host's calendar day; the Money Desk spec
+  depends on yesterday being untouched.
+- The web browser suite is a manual release gate (`docs/release-checklist.md`); `.github/workflows/ci.yml` does not run it.
 
 PostgreSQL databases for tests must be **fresh** (create one per run): nothing in
 the test harnesses resets or force-pushes a database. The section below is the

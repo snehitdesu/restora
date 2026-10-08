@@ -7,6 +7,7 @@
  */
 import { createHmac } from "node:crypto";
 import { hmacMatches, stringAt } from "@/integrations/hmac";
+import { assertMockAllowed } from "@/integrations/policy";
 import { z } from "zod";
 import { OrderSource, PaymentMethod } from "@/constants/enums";
 import type { NormalizedOrder } from "@/integrations/pos/types";
@@ -159,7 +160,12 @@ export class MockAggregatorProvider implements AggregatorProvider {
   }
 }
 
-/** Only mock adapters exist today; real Zomato/Swiggy adapters require partner credentials. */
+/**
+ * Only mock adapters exist today; real Zomato/Swiggy adapters require partner credentials.
+ * Like the payment and POS factories, the mock is refused in production (unless ALLOW_MOCK_PROVIDERS=true):
+ * otherwise a status push would be recorded as SENT without any platform being contacted.
+ */
 export function getAggregatorProvider(name = "mock"): AggregatorProvider {
+  assertMockAllowed("aggregator");
   return new MockAggregatorProvider(name.toLowerCase());
 }

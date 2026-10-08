@@ -111,11 +111,20 @@ describe("config.json", () => {
     expect(r.created).toBe(true);
     expect(fs.readdirSync(tmp).some((f) => f.startsWith("corrupt.json.corrupt-"))).toBe(true);
   });
-  it("lays out the data directory and builds SQLite URLs for paths with spaces", () => {
+  // sqliteUrl resolves with the host's path rules, which is right for the desktop app (it only ever sees native paths).
+  // A Windows drive path therefore means something only on Windows; elsewhere the same check uses a native absolute path.
+  it.skipIf(process.platform !== "win32")("lays out the data directory and builds SQLite URLs for Windows paths with spaces", () => {
     const p = dataPaths("C:\\Users\\Asha Rao\\AppData\\Roaming\\Aharos");
     expect(p.dbFile).toMatch(/data[\\/]aharos\.db$/);
     expect(sqliteUrl(p.dbFile)).toBe("file:C:/Users/Asha Rao/AppData/Roaming/Aharos/data/aharos.db");
     expect(() => sqliteUrl("C:\\odd?dir\\a.db")).toThrow();
+  });
+  it.skipIf(process.platform === "win32")("lays out the data directory and builds SQLite URLs for POSIX paths with spaces", () => {
+    const p = dataPaths("/home/Asha Rao/.config/Aharos");
+    expect(p.dbFile).toMatch(/data[\\/]aharos\.db$/);
+    expect(sqliteUrl(p.dbFile)).toBe("file:/home/Asha Rao/.config/Aharos/data/aharos.db");
+    expect(() => sqliteUrl("/odd?dir/a.db")).toThrow();
+    expect(() => sqliteUrl("/odd#dir/a.db")).toThrow();
   });
 });
 

@@ -12,10 +12,16 @@ Windows desktop application (embedded SQLite).
 > They are kept stable on purpose so existing installations upgrade in place.
 
 ## Status
-V1 release work in progress — see `docs/` (phase reports) and
-`PROJECT_STATUS.md`. Multi-outlet / multi-restaurant (organization-wide
-operations across many restaurants) is **deferred** beyond V1; one organization
-may run several outlets.
+V1 release candidate (1.0.0-rc.1) plus the first five groups of the master program (integrity, reorder,
+kitchen production + money desk, menu engineering + costing, integrations). **Groups 1-4 are implemented and
+verified by automated tests on SQLite and PostgreSQL; Group 5 (Tally / Zoho / Google Sheets sync, aggregator
+finance, nightly POS re-pull) is implemented and tested only against emulators and mocks.** No real provider,
+hosting or code-signing certificate has been used yet. Growth / CRM (Group 6), advanced mobile operations and
+infrastructure groups are not started. Multi-outlet / multi-restaurant is **deferred**; one organization may run
+several outlets.
+
+Current evidence and open issues: `docs/stabilization-report.md`; feature-by-feature state:
+`docs/master-feature-audit.md`; history: `PROJECT_STATUS.md` and the phase reports in `docs/`.
 
 ## Quick start (development, SQLite — no external services)
 ```bash
@@ -55,3 +61,4 @@ Details: `TESTING.md`.
 | Compliance readiness (GST etc.) | `docs/compliance-readiness.md` |
 | Release checklist / notes | `docs/release-checklist.md`, `docs/release-notes.md` |
 | Phase reports | `docs/phase*-*.md`, `docs/RESTORA-V1-FINAL-REPORT.md` |
+| Stabilization evidence, feature audit | `docs/stabilization-report.md`, `docs/master-feature-audit.md` |
