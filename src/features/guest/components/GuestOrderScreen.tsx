@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { request, describeError } from "@/lib/api/client";
 import { createPoller, type Poller } from "@/lib/polling";
 import { newIdempotencyKey } from "@/lib/idempotency";
-import { orderKeyFor, rememberedOrders } from "@/features/guest/session";
+import { orderKeyFor, rememberedOrders, takeNotice } from "@/features/guest/session";
 import { BillView } from "@/features/billing/BillView";
 import type { GuestOrderView } from "@/server/services/guestOrdering";
 import { GUEST_TRACKER_STEPS } from "@/domain/orderProgress";
@@ -13,6 +13,7 @@ import { openRazorpayCheckout, type RazorpaySuccess } from "@/features/guest/raz
 import { brandFor } from "@/features/guest/brand";
 import { LogoMark } from "@/features/guest/components/Chrome";
 import { Alert, Spinner } from "@/features/guest/components/Bits";
+import { RateTheMeal } from "@/features/guest/components/GuestOffers";
 import { SfIcon, type SfIconName } from "@/features/guest/components/SfIcon";
 
 type Checkout = { paymentId: string; amount: string; testMode: boolean };
@@ -54,6 +55,7 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
   const [payIntent, setPayIntent] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [menuToken, setMenuToken] = useState<string | undefined>(undefined);
   const attempt = useRef<string | null>(null);
   const poller = useRef<Poller | null>(null);
@@ -62,6 +64,7 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
   useEffect(() => {
     setKey(orderKeyFor(orderId, window.location.hash));
     setMenuToken(rememberedOrders().find((o) => o.orderId === orderId)?.token);
+    setNotice(takeNotice(orderId));
     const flags = hashFlags();
     autoPay.current = flags.pay;
     setPayIntent(flags.pay);
@@ -271,6 +274,8 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
           </section>
         )}
 
+        {notice && <div style={{ marginTop: 12 }}><Alert tone="info" role="status">{notice}</Alert></div>}
+
         <section className="sf-card sf-pay-card" aria-label="Payment">
           <h2 className="sf-card-title">Payment</h2>
           <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
@@ -317,6 +322,8 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
             ) : null}
           </div>
         </section>
+
+        {paid && key && <RateTheMeal orderId={orderId} orderKey={key} />}
 
         <section className="sf-receipt" aria-label={bill.kind === "RECEIPT" ? "Receipt" : "Bill"}>
           <BillView bill={bill} />
