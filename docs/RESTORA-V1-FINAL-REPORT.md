@@ -12,6 +12,13 @@ the detailed evidence is in the per-phase reports linked in each section._
 > POS re-pull is scheduled in the worker, and aggregator statement import / charges / margin are built. The
 > intermittent `RECIPE-001` navigation failure listed here was reproduced and fixed (the route-level `loading.tsx` was removed).
 
+> **Update 2026-10-09.** Groups 6-9 are now implemented (growth / CRM, floor / mobile / kitchen operations, purchasing, expiry and staff
+> operations, hardening). Current evidence, the external-dependency list and what remains are in `docs/stabilization-report.md` §8; the
+> row-by-row state is `docs/master-feature-audit.md`. In the "Deferred" list below, the **shared rate-limit store now exists**
+> (`RATE_LIMIT_STORE=database`); RLS, MFA, a nonce-based CSP, object storage and the customer-erasure workflow are still open. The "append-only audit
+> and ledger" the report calls READY is now also enforced by the database itself (triggers), not only by role grants. The browser suites are
+> CI release gates and the desktop app is built, tested and packaged on macOS as well as Windows in CI.
+
 ## Phase 9 — Production infrastructure
 **Status:** PASS WITH DOCUMENTED LIMITATIONS (`docs/phase9-final-report.md`)
 

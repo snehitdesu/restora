@@ -1,36 +1,41 @@
 # RESTORA (Aharos) — Testing
 
-## Current totals (2026-10-08, stabilization pass at `d922cda` + fixes)
+## Current totals (2026-10-09, end of the master program)
 | Suite | Command | Result |
 |---|---|---|
-| Unit + DB integration, SQLite | `npm test` | 110 files, 1176 passed, 7 skipped, 0 failed |
-| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 110 files, 1154 passed, 29 skipped, 0 failed |
-| Browser E2E (production build), SQLite | `npm run e2e` | 92/92 (incl. `nav-after-save.spec.ts`) |
-| Browser E2E, PostgreSQL | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 89/90 before the navigation fix (`docs/stabilization-report.md` §4); to be re-run |
-| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3 (SQLite) |
-| Desktop E2E | `npm run desktop:build && npm run desktop:e2e` | Windows / macOS CI on `d922cda`: 8/9 (the 9th needed the Chromium install step, added since); not run locally |
-| Packaged desktop security | `npx electron-builder --dir && npm run desktop:verify` | **not run on this commit** (last: 23/23 on 2026-10-05) |
-| Runtime, contention, DR drills, post-deploy smoke | see Phase 9 / 14 reports | last run 2026-10-05, not repeated |
+| Unit + DB integration, SQLite | `npm test` | {{SQLITE}} |
+| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | {{PG}} |
+| Browser E2E (production build), SQLite | `npm run e2e` | {{E2E_SQLITE}} |
+| Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | {{E2E_PG}} |
+| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | {{INVESTOR}} |
+| Desktop E2E + packaged-app verification | `npm run desktop:build && npm run desktop:e2e`; `npx electron-builder --dir && npm run desktop:verify` | Windows, macOS arm64 and macOS x64 in CI: build, E2E, packaging (fuses, asar integrity, upgrade from the previous release, launch attacks), DMG |
+| Backup / restore drill, load test | `node scripts/ops/backup-drill.mjs`, `node scripts/ops/load-test.mjs` | 2026-10-09 on the current schema: drill 10/10; load run 0 correctness violations (`docs/production-infrastructure.md` §7.1, §8.0). PITR drill and post-deploy smoke last run 2026-10-05 |
 
-Group 3-5 test files (all in the totals above): `tests/domain/kitchen-production.test.ts`, `money-desk.test.ts`,
-`reorder.test.ts`, `costing-engineering.test.ts`, `advanced-inventory.test.ts`, `aggregator-finance.test.ts`,
-`accounting-sync.test.ts`, `sheets-sync.test.ts`, `scheduled-jobs.test.ts`, `core-gaps.test.ts`;
-`tests/api/group3-routes.test.ts`, `group4-routes.test.ts`, `reorder-routes.test.ts`, `integrations-routes.test.ts`;
-`tests/db/stock-post-concurrency.test.ts`, `reorder-concurrency.test.ts`, `day-close-concurrency.test.ts`;
-`tests/integrations/group5-adapters.test.ts`, `production-providers.test.ts`; `tests/ui/group3-screens.test.tsx`,
-`costing-screens.test.tsx`, `procurement-reorder.test.tsx`; `e2e/money-desk.spec.ts`, `e2e/costing.spec.ts`.
-Screens with no automated test: Aggregators, Integrations accounting / Sheets / control room (see the audit).
+**All of the above except the drills run in CI on every change** (`.github/workflows/ci.yml`: SQLite, PostgreSQL 16, web E2E on both,
+investor flow, desktop on Windows and both macOS architectures). The 160 Vitest files: `tests/domain` 74, `tests/ui` 32, `tests/api` 22,
+`tests/db` 9, `tests/integrations` 6, `tests/auth` 5, `tests/desktop` 4, `tests/config` 3, and one each in `tests/docs` (audit totals),
+`tests/e2e` (guest journey in the service layer), `tests/ops`, `tests/qa`, `tests/site`. Browser specs: `e2e/*.spec.ts` (33 files) plus
+`e2e/investor/`; desktop: `desktop/e2e/`.
+
+Where to find the tests of a group: `docs/group-delivery-map.md`. Quality gates that are tests, not documents: `e2e/quality-sweep.spec.ts`
+(ten viewports from 320 to 1920 px plus a phone held sideways: no console error, no error status, no sideways scrolling; axe WCAG 2.1 A / AA
+at a phone and a desktop width, serious or critical findings fail), `tests/db/append-only.test.ts` (the database refuses to change history),
+`tests/docs/audit-totals.test.ts` (the audit's totals match its rows).
 
 Notes for running locally:
 - The SQLite and PostgreSQL suites share one generated Prisma client: run `npx prisma generate` (SQLite) or
-  `npx prisma generate --schema prisma/postgres/schema.prisma` before switching, and never run both at once.
+  `npx prisma generate --schema prisma/postgres/schema.prisma` before switching, and never run both at once. `npm run build`
+  regenerates the SQLite client; build with `npx next build` after generating the PostgreSQL client.
 - Playwright pins a Chromium build; if the image has another one, point a throwaway config at it with
   `use.launchOptions.executablePath` instead of changing the repository config.
 - `tests/desktop/shell-policy.test.ts` has a Windows-path test (runs on Windows only) and a POSIX twin: `sqliteUrl`
   resolves with the host's path rules by design.
 - E2E and the demo seed use the outlet's business day (Asia/Kolkata), not the host's calendar day; the Money Desk spec
-  depends on yesterday being untouched.
-- The web browser suite is a manual release gate (`docs/release-checklist.md`); `.github/workflows/ci.yml` does not run it.
+  depends on yesterday being untouched. The demo outlets are open 11:00-23:30; `e2e/prepare-db.ts` (and the load script) open them all day so
+  guest ordering does not depend on the time the suite runs, and the storefront spec sets its own hours to test the closed state.
+- With `RATE_LIMIT_STORE=database` the counters live in `RateLimitWindow` and survive a server restart: clear that table between load runs
+  on a disposable database.
+- Tests that fill a form before the page has hydrated hold back the scripts on purpose (`LOGIN-002b`, `PWD-007`); other specs wait for hydration.
 
 PostgreSQL databases for tests must be **fresh** (create one per run): nothing in
 the test harnesses resets or force-pushes a database. The section below is the

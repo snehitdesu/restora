@@ -1,29 +1,39 @@
 # RESTORA (working name Aharos) — Project Status
 
-_Last updated: 2026-10-08 — stabilization pass after Groups 1-5 (commit `d922cda`). The sections from
-"Stack" downward are the historical record up to Phase 5B; current, verified status is in
-`docs/stabilization-report.md` (evidence) and `docs/master-feature-audit.md` (feature by feature)._
+_Last updated: 2026-10-09 — end of the master program (Groups 1-9). Current, verified status is in
+`docs/stabilization-report.md` §8 (evidence), `docs/master-feature-audit.md` (feature by feature, the source of
+truth) and `docs/group-delivery-map.md` (where each group lives). The sections below "Earlier status" are the
+historical record up to Phase 5B and are kept as written._
 
-## Current status (2026-10-08)
-Groups 1-5 of the master program are implemented. Verified at this commit by this pass:
-typecheck, lint and production build pass; Vitest 1176 passed / 0 failed on SQLite and 1154 passed / 0 failed on
-PostgreSQL 16; migrations deploy cleanly on both with no drift; browser E2E 90/90 on SQLite, investor flow 3/3.
-**CI on `d922cda` itself was red** (one platform-specific desktop test and a missing Chromium install step in the
-desktop jobs): both are fixed in the stabilization commit and unproven until CI runs again.
+## Current status (2026-10-09)
+Groups 1-9 of the master program are implemented on branch `claude/serene-ramanujan-rmvdss` (PR #1 into `main`).
+Of the 187 audited rows: **{{VERIFIED}} IMPLEMENTED + VERIFIED, {{NEV}} IMPLEMENTED + NOT EXTERNALLY VERIFIED (mock / emulator only),
+{{PARTIAL}} PARTIAL, {{NOTBUILT}} NOT BUILT, 3 INTENTIONALLY DEFERRED** (multi-outlet / multi-restaurant). Nothing is claimed live
+that has not run against its provider.
 
 | Group | Contents | State |
 |---|---|---|
 | 1 Integrity | vendor approval gate, issue-to-department stock moves, idempotency and locking | IMPLEMENTED + VERIFIED |
-| 2 Reorder | reorder engine, POs and indents from it | IMPLEMENTED + VERIFIED (no browser spec) |
+| 2 Reorder | reorder engine, POs and indents from it | IMPLEMENTED + VERIFIED |
 | 3 Kitchen production + money desk | production, wastage, worksheet, manual sales, variance, money desk, day lock | IMPLEMENTED + VERIFIED |
-| 4 Menu engineering + costing | menu engineering, department P&L, daily costing, stock matrix, supplier prices, QR labels, overhead % | IMPLEMENTED + VERIFIED |
+| 4 Menu engineering + costing | menu engineering, department P&L, daily costing, stock matrix, supplier prices, labels, overhead % | IMPLEMENTED + VERIFIED |
 | 5 Integrations | Tally / Zoho sync, Sheets sync, aggregator finance, nightly POS re-pull, control room | IMPLEMENTED + NOT EXTERNALLY VERIFIED (emulators and mocks only) |
-| 6+ Growth, mobile / advanced ops, infrastructure | | not started |
+| 6 Growth / CRM | consent-gated messaging, e-mail (Resend), loyalty tiers, coupons, referrals, feedback loop, campaigns, lifecycle automations, 9 AM summary, guest offers | IMPLEMENTED + VERIFIED against the mock provider; real delivery NOT EXTERNALLY VERIFIED |
+| 7 / 8 Floor, mobile, kitchen | held bills, move / merge / split bills, booking notes on tickets, "table ready" message, measured dish prep times, late alerts, upsell, universal search, owner approvals on the phone | IMPLEMENTED + VERIFIED (native apps, offline captain, e-invoice IRN are NOT BUILT) |
+| Purchasing, expiry, master data, staff ops | approval rules, line review, one queue, indent fulfilment, expiry list, CSV import, brand / vendor contacts, aggregator on / off, roster, checklists, hours, invitations | IMPLEMENTED + VERIFIED (aggregator on / off and invitation e-mail: NOT EXTERNALLY VERIFIED) |
+| 9 Hardening | database-enforced append-only history, shared rate limits, observability, load, accessibility, responsive | IMPLEMENTED + VERIFIED; row-level security remains PARTIAL by design |
+| QR-08, notifications | order again / split the bill from the phones; purchase-approval, reservation, low-stock and vendor-dues notifications | IMPLEMENTED + VERIFIED |
 
-**Navigation stall (formerly open):** fixed by removing the `(app)` route-level `loading.tsx` (Next 15.5 router race; guard test and 60-round regression spec added).
-**Not verified:** desktop packaging / `desktop:verify` / DMG on real Windows and macOS runners (never ran on this commit), the web
-browser suite is not part of CI, no real provider (Razorpay keys, Petpooja, Zomato / Swiggy, WhatsApp, Tally, Zoho, Google Sheets).
-**Production blockers** are external: hosting, backups / PITR on real infrastructure, provider credentials, code signing.
+**Verified at the final commit** (details and dates: `docs/stabilization-report.md` §8): typecheck and lint clean on both Prisma clients;
+Vitest {{SQLITE}} on SQLite and {{PG}} on PostgreSQL 16; both migration histories apply to an empty database with no drift; browser E2E
+{{E2E}}; investor flow 3/3; desktop build, E2E, packaging and DMG on Windows and both macOS architectures in CI; backup / restore
+drill 10/10 and an end-to-end load run with zero correctness violations on the current schema; axe (WCAG 2.1 A / AA) and ten-viewport
+sweeps clean. The browser suites are CI release gates.
+
+**Not verified (external):** hosting and HTTPS, scheduled backups / WAL archiving on real infrastructure, a hosted PostgreSQL instance,
+code-signing certificates, and every real provider (Razorpay keys, Petpooja, Zomato / Swiggy, WhatsApp / SMS, Resend mailbox, Tally,
+Zoho Books, Google Sheets, printers). PostgreSQL row-level security is designed but not applied (`docs/postgres-rls.md`).
+Full list with what each needs: `docs/stabilization-report.md` §8.4.
 
 ## Earlier status (Phases 2-14, 2026-10-05) — historical
 | Phase | Report | Status |

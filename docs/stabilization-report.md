@@ -1,4 +1,6 @@
-# RESTORA stabilization / verification report (2026-10-08)
+# RESTORA stabilization / verification report (2026-10-08, completed 2026-10-09)
+
+> Sections 1-7 are the stabilization pass of 2026-10-08 on Groups 1-5, kept as written (including "No Group 6 work"). **Section 8 is the end-of-program record of 2026-10-09:** the verification matrix at the final commit, defects found since, the external dependencies, and what remains.
 
 Scope: Groups 1-5 as they stand at `main` = `d922cda`, plus the fixes made in this pass.
 No Group 6 work. Evidence only: every number below was produced by a command run in
@@ -103,3 +105,66 @@ PG = pass in the full PostgreSQL run; E2E = browser coverage; External = needs s
 3. **Documentation gaps**: closed by this pass (audit, status, README, final report, testing guide); `docs/postgres.md` and the phase reports are historical records and keep their original numbers.
 4. **Genuine missing product features** (not built, per the audit): material brand, generic CSV / Excel import, a variance-trend chart, FSSAI lots and expiry alerts, a combined PO / indent queue, line-level PO approval and thresholds, aggregator item on/off, captain split / merge / transfer, KDS prep-time measurement, universal search, offline captain, plus everything in Groups 6-9.
 5. **External production blockers**: hosting in Mumbai with HTTPS, scheduled backups and point-in-time recovery on real infrastructure; Razorpay test-mode run, then live keys; live Petpooja, Zomato and Swiggy access; WhatsApp credentials and approved templates; a real Tally / Zoho / Google Sheets run; Windows code-signing certificate and a green macOS CI run.
+
+## 8. Program completion (2026-10-09): Groups 6-9 and the final gate
+
+Scope: the work after the stabilization above, on branch `claude/serene-ramanujan-rmvdss` (PR #1): Group 6 (growth / CRM), Groups
+7 / 8 (floor, mobile, kitchen), purchasing, expiry, master data and staff operations, Group 9 (hardening), the guest bill split and
+order-again (QR-08), operational notifications, and the final verification. Every number below was produced by a command run in this
+pass or read from the GitHub Actions run named next to it.
+
+### 8.1 Verification matrix at the final commit
+
+| Check | Result | Evidence |
+|---|---|---|
+| Typecheck, lint | clean on the SQLite client and on the PostgreSQL client | CI jobs "SQLite" and "PostgreSQL 16" |
+| Vitest, SQLite | {{SQLITE}} | local run and CI |
+| Vitest, PostgreSQL 16 (fresh migrated database) | {{PG}} | local run and CI |
+| Migrations | both histories apply to an empty database; `migrate status` up to date; no drift (committed history vs schema, deployed database vs schema) | CI |
+| Browser E2E, SQLite, production build | {{E2E_SQLITE}} | CI run {{RUN}} |
+| Browser E2E, PostgreSQL 16 | {{E2E_PG}} | CI run {{RUN}} |
+| Investor business flow | {{INVESTOR}} | CI run {{RUN}} |
+| Desktop: build with payload secret scan, E2E, packaging, packaged-app verification (fuses, upgrade from the previous release, launch attacks, asar integrity), DMG | Windows, macOS arm64, macOS x64 | CI run {{RUN}} |
+| Backup → destroy → restore drill on the current schema | 10/10 in 38 s, append-only triggers intact after the restore | `docs/production-infrastructure.md` §8.0 |
+| End-to-end HTTP load (PostgreSQL 16, production build, mock providers) | 0 correctness violations, 0 deadlocks, outbox drained; only non-200: documented `503 Busy` on contended goods-receipt posting | §7.1 |
+| Accessibility, responsive | axe WCAG 2.1 A / AA at a phone and a desktop width on every screen, ten viewports 320-1920 px: serious / critical findings fail the suite; the guest split-bill screen is scanned too | `e2e/quality-sweep.spec.ts`, `QR-004` |
+| Secret sweep | no key material, credential, `.env`, database or dump is tracked; the only hits are fake strings in tests and a UI placeholder | `git grep` patterns, this pass |
+| Dead-code sweep | 22 unreferenced exports removed; found one notification path that was never wired (below) | commit "Wire the operational notifications…" |
+
+### 8.2 Defects found and fixed in this phase
+
+| Found by | Defect | Fix |
+|---|---|---|
+| CI (SQLite E2E) | forgot-password button stayed disabled when the address was typed before the page hydrated (a slow phone gets this too) | read the fields on submit like the sign-in form; `PWD-007` |
+| CI (PostgreSQL E2E job) | `npm run build` regenerated the SQLite client under the PostgreSQL build | the job builds with `npx next build` |
+| Desktop tests | the desktop migrator could not run migrations containing triggers | statement splitter understands `CREATE TRIGGER … BEGIN … END` |
+| Test run | the Coders' Cafe reset was refused by the append-only triggers | reset runs inside `withAppendOnlyGuardsOff` (disposable-database wipe only) |
+| Dead-code sweep | `LOW_STOCK`, `PURCHASE_APPROVAL`, `VENDOR_DUE`, `RESERVATION` notifications existed as types and permissions but nothing ever raised them | wired (approver queue, bookings, 08:00 stock and dues check); `VENDOR_DUE` now needs `vendor.pay` instead of `finance.view` (the cashier holds it) |
+| Load run | the load script depended on the time of day (guest ordering is correctly refused outside opening hours) and sent a made-up gateway reference (correctly refused) | script corrected; the server behaviour was right |
+| Review of the new job | the 08:00 check would have attempted a claim insert for every outlet on every worker tick | one lookup of the outlets already done today |
+
+### 8.3 What is verified, and what is not
+
+Verified by running it: everything in 8.1. Verified only against a mock, emulator or in-memory double (never a real counterpart): payments
+through Razorpay, Petpooja orders, Zomato / Swiggy, WhatsApp / SMS / Resend delivery, Tally and Zoho Books sync, Google Sheets sync, printers, the
+aggregator menu on / off contract. Not exercised at all: hosting, HTTPS termination, scheduled backups and WAL archiving on real infrastructure, a hosted PostgreSQL
+instance, code signing, more than one application instance, a network between clients and server.
+
+### 8.4 External dependencies (what each needs, by audit row)
+
+| Needs | Rows |
+|---|---|
+| Razorpay `rzp_test_` keys, then live keys; one phone payment | QR-06 |
+| A WhatsApp / SMS / e-mail provider account and approved templates | CM-01 … CM-06, CR-03, CR-04, CP-07, RS-03, PA-03 (Resend mailbox) |
+| Petpooja credentials and a real payload | PS-02, PS-05 |
+| Zomato / Swiggy partner API access and a real statement | AG-01, AG-02, AG-04 |
+| A real Tally / Zoho Books company, a real spreadsheet | PP-14, AD-03, PA-06 |
+| Printer hardware | MB-09 |
+| Hosting (Mumbai, HTTPS), a hosted PostgreSQL instance, scheduled backups | XC-01, XC-07, SE-16 |
+| Code-signing certificates | SE-14 |
+
+### 8.5 Remaining, by kind
+
+- **Intentionally deferred (product decision):** multi-outlet portfolio roll-up and multi-restaurant tenancy (PA-08), central kitchen (AD-04), franchise reporting (AD-05); PostgreSQL row-level security (PA-02 stays PARTIAL until a second untrusted organization shares a database).
+- **Not built (20 rows, later-phase roadmap, no repository blocker):** guest Android app, shared codebase for iOS and the offline captain (MB-01, MB-13, MB-04), own ordering website with delivery / takeaway (QR-09), online table booking and Reserve with Google (RS-02), guest-menu photos and allergens (QR-03), e-invoice IRN (AD-02), deposits (RS-05), geofenced staff check-in (SO-02), own vocabulary and a second interface language (XC-04, XC-05), and the optional modules catering quotations, private-party booking, gift cards, subscription plans, equipment maintenance, FSSAI temperature / hygiene checklists, Google Business Profile, Instagram feed and counter signage (AD-06, AD-07, AD-08, AD-09, AD-12, AD-13, AD-14, AD-15, AD-16).
+- **Partial (9 rows):** MD-21 (menu / recipe import, `.xlsx`), IN-14 (stock is not held per batch), PA-02 (row-level security, by design), QR-11 (gallery, online booking, per-restaurant SEO), MB-02 (native packaging, course timing, offline), MB-10 (WhatsApp delivery, logo upload), SO-06 (no tip is recorded anywhere), AD-11 (meter readings, trend), XC-06 (by chef: nothing records which cook made a dish).

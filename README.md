@@ -12,16 +12,20 @@ Windows desktop application (embedded SQLite).
 > They are kept stable on purpose so existing installations upgrade in place.
 
 ## Status
-V1 release candidate (1.0.0-rc.1) plus the first five groups of the master program (integrity, reorder,
-kitchen production + money desk, menu engineering + costing, integrations). **Groups 1-4 are implemented and
-verified by automated tests on SQLite and PostgreSQL; Group 5 (Tally / Zoho / Google Sheets sync, aggregator
-finance, nightly POS re-pull) is implemented and tested only against emulators and mocks.** No real provider,
-hosting or code-signing certificate has been used yet. Growth / CRM (Group 6), advanced mobile operations and
-infrastructure groups are not started. Multi-outlet / multi-restaurant is **deferred**; one organization may run
-several outlets.
+V1 release candidate (1.0.0-rc.1) plus the master program, Groups 1-9: integrity, reorder, kitchen production and money desk,
+menu engineering and costing, integrations, growth / CRM, floor / mobile / kitchen operations, purchasing, expiry and
+staff operations, and production hardening (database-enforced append-only history, shared rate limits, accessibility,
+load). **Everything that can be proven without an outside party is covered by automated tests on SQLite and PostgreSQL 16, browser
+E2E on both, and desktop builds on Windows and macOS (all in CI).** Everything that needs an outside party is built against
+mocks or emulators and labelled `NOT EXTERNALLY VERIFIED`: no real payment gateway, POS, aggregator, WhatsApp / SMS / e-mail
+provider, accounting system, spreadsheet, printer, hosting or code-signing certificate has been used. Multi-outlet inside one
+organization works; multi-restaurant tenancy (and PostgreSQL row-level security) is **intentionally deferred**.
 
-Current evidence and open issues: `docs/stabilization-report.md`; feature-by-feature state:
-`docs/master-feature-audit.md`; history: `PROJECT_STATUS.md` and the phase reports in `docs/`.
+Of the 187 rows of the feature audit: {{VERIFIED}} IMPLEMENTED + VERIFIED, {{NEV}} IMPLEMENTED + NOT EXTERNALLY VERIFIED, {{PARTIAL}} PARTIAL,
+{{NOTBUILT}} NOT BUILT (later-phase items: native apps, e-invoice, event / catering modules, own ordering website ...), 3 deferred.
+
+Start here: `PROJECT_STATUS.md` (state), `docs/master-feature-audit.md` (feature by feature, source of truth),
+`docs/stabilization-report.md` (evidence and the external-dependency list), `docs/group-delivery-map.md` (where each group lives).
 
 ## Quick start (development, SQLite — no external services)
 ```bash
@@ -37,7 +41,8 @@ npm run dev                      # http://localhost:3000
 npm run typecheck && npm run lint
 npm test                         # full suite on SQLite
 TEST_DATABASE_URL=postgresql://…/fresh_db npm run test:pg   # same suite on PostgreSQL
-npm run e2e                      # production build + browser E2E (Playwright)
+npm run e2e                      # production build + browser E2E (Playwright), one seeded SQLite database
+E2E_DATABASE_URL=postgresql://…/fresh_empty_db npm run e2e:test   # the same specs on PostgreSQL (build with `npx next build` after generating the PostgreSQL client)
 npm run desktop:build && npm run desktop:e2e                # desktop app
 ```
 Details: `TESTING.md`.
@@ -61,4 +66,6 @@ Details: `TESTING.md`.
 | Compliance readiness (GST etc.) | `docs/compliance-readiness.md` |
 | Release checklist / notes | `docs/release-checklist.md`, `docs/release-notes.md` |
 | Phase reports | `docs/phase*-*.md`, `docs/RESTORA-V1-FINAL-REPORT.md` |
+| Growth / CRM (consent, messaging, campaigns) | `docs/growth.md` |
+| Where each group lives (code, screens, migrations, tests) | `docs/group-delivery-map.md` |
 | Stabilization evidence, feature audit | `docs/stabilization-report.md`, `docs/master-feature-audit.md` |
