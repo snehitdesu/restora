@@ -23,7 +23,7 @@ import { prisma } from "@/server/db/client";
 import { type AccessContext, assertOutletAccess, NotFoundError, ValidationError } from "@/server/db/scope";
 import { assertCan, type Permission } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
-import { authorizedOutletIds, dailySales, itemSales, categorySales, salesTrend, outletComparison, variantSales, modifierSales, materialConsumption, stockAgeing, vendorPurchasing, purchaseTrend, SETTLED_ORDER_STATUSES } from "@/server/services/analytics";
+import { authorizedOutletIds, dailySales, itemSales, categorySales, cuisineSales, salesTrend, outletComparison, variantSales, modifierSales, materialConsumption, stockAgeing, vendorPurchasing, purchaseTrend, SETTLED_ORDER_STATUSES } from "@/server/services/analytics";
 import { vendorDues } from "@/server/services/procurement";
 import { computePnL } from "@/server/services/finance";
 import { segmentFor } from "@/server/services/crm";
@@ -128,6 +128,18 @@ export const REPORTS: Record<string, AnyReport> = {
       { key: "item", header: "Item", value: (r) => r.name }, { key: "menuItemId", header: "Menu item id", value: (r) => r.menuItemId ?? "UNMAPPED" },
       { key: "qty", header: "Qty", value: (r) => r.qty }, { key: "grossRevenue", header: "Gross revenue", value: (r) => r.grossRevenue },
       { key: "discount", header: "Discount", value: (r) => r.discount }, { key: "refundedQty", header: "Refunded qty", value: (r) => r.refundedQty },
+      { key: "refundedRevenue", header: "Refunded revenue", value: (r) => r.refundedRevenue }, { key: "revenue", header: "Net revenue", value: (r) => r.revenue },
+      { key: "contributionPct", header: "Share %", value: (r) => r.contributionPct },
+    ]),
+
+  // Audit XC-06: sales by cuisine / meal-type tag (a dish with several tags counts under each).
+  CUISINE_SALES: define({
+    id: "CUISINE_SALES", title: "Sales by cuisine tag", permission: "reports.view", maxRows: 1000, aggregate: true,
+    schema: baseFilter.refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed(await cuisineSales(db, ctx, f), w),
+  })([
+      { key: "cuisine", header: "Cuisine tag", value: (r) => r.cuisine }, { key: "dishes", header: "Dishes", value: (r) => r.dishes }, { key: "qty", header: "Qty", value: (r) => r.qty },
+      { key: "grossRevenue", header: "Gross revenue", value: (r) => r.grossRevenue }, { key: "discount", header: "Discount", value: (r) => r.discount },
       { key: "refundedRevenue", header: "Refunded revenue", value: (r) => r.refundedRevenue }, { key: "revenue", header: "Net revenue", value: (r) => r.revenue },
       { key: "contributionPct", header: "Share %", value: (r) => r.contributionPct },
     ]),

@@ -439,6 +439,28 @@ export async function categorySales(db: PrismaClient, ctx: AccessContext, filter
     .sort((a, b) => b.netRevenue - a.netRevenue || a.category.localeCompare(b.category));
 }
 
+/**
+ * Sales by cuisine / meal-type tag (`MenuItem.cuisineTags`, audit XC-06). A dish with several tags counts under each of them,
+ * so the rows can add up to more than total sales (Share % is of the rows' own total); a dish with no tag is "(untagged)" and
+ * a line of a dish that is no longer on the menu "(unmapped)".
+ */
+export async function cuisineSales(db: PrismaClient, ctx: AccessContext, filter: AnalyticsFilter = {}) {
+  const lines = await qLineSales(db, ctx, authorizedOutletIds(ctx, filter), filter);
+  const itemIds = [...new Set(lines.map((l) => l.menuItemId).filter((x): x is string => Boolean(x)))];
+  const items = itemIds.length ? await db.menuItem.findMany({ where: { organizationId: ctx.organizationId, id: { in: itemIds } }, select: { id: true, cuisineTags: true } }) : [];
+  const tagsOf = new Map(items.map((m) => [m.id, (m.cuisineTags ?? "").split(",").map((t) => t.trim()).filter(Boolean)]));
+  const expanded = lines.flatMap((l) => {
+    const tags = l.menuItemId ? (tagsOf.get(l.menuItemId)?.length ? tagsOf.get(l.menuItemId)! : ["(untagged)"]) : ["(unmapped)"];
+    return tags.map((tag) => ({ ...l, tag }));
+  });
+  const tagOf = (l: LineAgg) => (l as LineAgg & { tag: string }).tag;
+  const dishesPerTag = new Map<string, Set<string>>();
+  for (const l of expanded) (dishesPerTag.get(l.tag) ?? dishesPerTag.set(l.tag, new Set()).get(l.tag)!).add(`${l.menuItemId}|${l.name}`);
+  return rollupItems(expanded, tagOf)
+    .map(({ first, ...r }) => ({ cuisine: tagOf(first), dishes: dishesPerTag.get(tagOf(first))?.size ?? 0, ...r }))
+    .sort((a, b) => b.netRevenue - a.netRevenue || a.cuisine.localeCompare(b.cuisine));
+}
+
 /** Sales per menu variant (lines that recorded a variant). */
 export async function variantSales(db: PrismaClient, ctx: AccessContext, filter: AnalyticsFilter = {}) {
   const lines = (await qLineSales(db, ctx, authorizedOutletIds(ctx, filter), filter)).filter((l) => l.variantId);

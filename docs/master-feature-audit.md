@@ -198,7 +198,7 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 | XC-03 | S06 p18 | Add a department yourself | IMPLEMENTED + VERIFIED | departments screen | none | P2 | | |
 | XC-04 | S06 p18 | Own vocabulary (rename "indent" etc.) | NOT BUILT | | label dictionary | P7 | | |
 | XC-05 | S06 p18 | Interface in Telugu or Hindi, per user | NOT BUILT | | i18n | P7 | | |
-| XC-06 | S06 p18 | Reports grouped by cuisine, chef, shift | NOT BUILT | | | P7 | MD-19 | |
+| XC-06 | S06 p18 | Reports grouped by cuisine, chef, shift | PARTIAL | by **cuisine**: the `CUISINE_SALES` report (`analytics.cuisineSales`, rows and CSV, same filters and permission as the other sales reports): sales by cuisine / meal-type tag (`MenuItem.cuisineTags`, MD-19); a dish with several tags counts under each so the rows can add up to more than total sales; untagged dishes and lines of dishes no longer on the menu are named rows, not dropped. By **shift**: sales by day-part exist (CP-08) | by **chef**: nothing records which cook made a dish (tickets belong to a station, not a person); a named "shift" is not a concept in sales data, only day-parts | P7 | MD-19 | `tests/domain/reports.test.ts` (XC-06) |
 | XC-07 | S09 p21 | Cloud-hosted in Mumbai, HTTPS | IMPLEMENTED + NOT EXTERNALLY VERIFIED | deployment docs and rehearsal | real hosting | P0 | hosting | `docs/production-infrastructure.md` |
 
 ## Section 05: QR ordering and own website (p. 15)
@@ -326,7 +326,7 @@ Counted from the tables above by script (one row = one feature), after the 2026-
 |---|---|
 | IMPLEMENTED + VERIFIED | 129 |
 | IMPLEMENTED + NOT EXTERNALLY VERIFIED | 26 |
-| PARTIAL | 8 |
-| NOT BUILT | 21 |
+| PARTIAL | 9 |
+| NOT BUILT | 20 |
 | INTENTIONALLY DEFERRED | 3 |
 | **Total** | **187** |

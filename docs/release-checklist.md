@@ -11,6 +11,7 @@ tick it only after running / seeing it. "Evidence" = where the result is recorde
 - [ ] `npm test` — SQLite suite, 0 failed
 - [ ] `TEST_DATABASE_URL=<fresh PG db> npm run test:pg` — 0 failed
 - [ ] `npm run build` — production web build succeeds
+- [ ] The CI run for the release commit is green on every job (`.github/workflows/ci.yml` runs the typecheck, lint, both full suites, both migration histories with drift checks, the browser E2E on SQLite and on PostgreSQL, the investor flow, and the desktop build / E2E / packaging on Windows and both macOS architectures); the items below remain the local reproduction and the operator's own run on the release candidate
 - [ ] `npm run e2e` (SQLite) and `E2E_DATABASE_URL=<fresh, empty PG db> npm run e2e:test` — all passed
 - [ ] `npm run desktop:build` — payload secret scan clean
 - [ ] `npm run desktop:e2e` — all passed

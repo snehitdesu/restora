@@ -12,6 +12,16 @@ Supersedes the per-item status below where they differ:
 - **Observability** ("can be added after"): structured redacting JSON logs with request ids, metrics, alert webhook — done (Phase 9).
 - **M4 (HTTPS), M5 (proxy hops), M6 (one instance), M9 (secrets/providers), M10 (EXPORT_DIR)** remain per-deployment configuration, enforced or warned by startup validation; see `docs/release-checklist.md`.
 
+## Status update — Groups 6-9 (2026-10-09)
+
+Supersedes the per-item status below where they differ:
+- **M6 rate limits across instances:** `RATE_LIMIT_STORE=database` shares the counters between instances (one atomic upsert per limited request; a database error falls back to per-process counting and is logged). Measured: no difference from the in-memory store at the load test's scale (`docs/production-infrastructure.md` §7.1). Exports are still written to local disk (one instance, or an `EXPORT_DIR` on shared storage).
+- **M7 append-only history:** `AuditLog` and `InventoryLedger` are now refused by the database itself (triggers on both engines, TRUNCATE too on PostgreSQL) in addition to the role grants; they survive backup / restore (drill 10/10 on the current schema, §8.0).
+- **Load:** the end-to-end HTTP load test was re-run on the current build against PostgreSQL 16: no correctness violation (no overpaid or doubly paid order, no duplicate order per key, outbox drained), 0 deadlocks; the only non-200 outcome is the documented `503 Busy` on contended goods-receipt posting.
+- **Browser E2E is a CI release gate** on both SQLite and PostgreSQL (it was a manual gate); desktop build, E2E, packaged-app verification and DMG run on Windows and both macOS architectures.
+- **Accessibility / responsive:** every screen is scanned with axe (WCAG 2.1 A and AA) at a phone and a desktop width and opened at ten viewports (320-1920 px, plus a phone held sideways); serious or critical findings fail the suite.
+- Still external, unchanged: hosting and HTTPS, scheduled backups / WAL archiving on real infrastructure, provider credentials and live runs (Razorpay `rzp_test_` / live, Petpooja, WhatsApp / SMS, Resend, Tally, Zoho, Google Sheets, Zomato / Swiggy), code-signing certificates, a hosted PostgreSQL instance, PostgreSQL row-level security before a second untrusted organization shares a database.
+
 ## Verdict
 
 **Ready for a controlled production deployment once the MUST items below are done.**
