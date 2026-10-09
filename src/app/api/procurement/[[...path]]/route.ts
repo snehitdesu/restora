@@ -7,6 +7,7 @@ import {
   createGRN, postGRN, createPurchaseBill, cancelPurchaseBill, payVendor, vendorDues,
 } from "@/server/services/procurement";
 import { computeReorder, raiseReorderPurchaseOrders, raiseReorderIndent } from "@/server/services/reorder";
+import { procurementQueue } from "@/server/services/procurementQueue";
 import { supplierPriceComparison } from "@/server/services/supplierPrices";
 import { materialPriceHistory } from "@/server/services/inventoryInsights";
 import { normalizeDates } from "@/server/services/reports";
@@ -21,6 +22,8 @@ const idemKey = (req: { headers: Headers }) => req.headers.get("idempotency-key"
 
 export const { GET, POST } = createRouter([
   // reads (paginated, outlet-scoped)
+  // One queue for purchase orders and indents together, with the approval tab (audit PP-04).
+  { method: "GET", path: "queue", handler: ({ ctx, query }) => procurementQueue(prisma, ctx, query as never) },
   { method: "GET", path: "indents", handler: ({ ctx, query }) => listIndents(prisma, ctx, query) },
   { method: "GET", path: "indents/:id", handler: ({ ctx, params }) => getIndent(prisma, ctx, params.id) },
   { method: "GET", path: "purchase-orders", handler: ({ ctx, query }) => listPurchaseOrders(prisma, ctx, query) },

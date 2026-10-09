@@ -51,6 +51,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/inventory/labels", label: "Stock labels", icon: "qr", permission: "inventory.view", section: "Inventory", description: "Print QR shelf labels and scan them to see stock" },
 
   { href: "/procurement/reorder", label: "Reorder", icon: "refresh", permission: "purchase.view", section: "Purchasing", description: "What to buy: items below their reorder point" },
+  { href: "/procurement/queue", label: "Procurement queue", icon: "inbox", anyOf: ["purchase.view", "indent.create"], section: "Purchasing", description: "Purchase orders and indents in one list, with what needs approval first" },
   { href: "/procurement/prices", label: "Supplier prices", icon: "tag", permission: "purchase.view", section: "Purchasing", description: "Every vendor's price per base unit, and purchase price history" },
   { href: "/procurement/indents", label: "Indents", icon: "note", anyOf: ["purchase.view", "indent.create"], section: "Purchasing", description: "Purchase requests and kitchen indents" },
   { href: "/procurement/purchase-orders", label: "Purchase orders", icon: "cart", permission: "purchase.view", section: "Purchasing", description: "Orders to vendors" },

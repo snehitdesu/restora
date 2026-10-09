@@ -34,6 +34,7 @@ export function ProcureNav() {
     <SubNav
       label="Procurement"
       items={[
+        { href: "/procurement/queue", label: "Queue", hidden: !can("purchase.view") && !can("indent.create") },
         { href: "/procurement/reorder", label: "Reorder", hidden: !can("purchase.view") },
         { href: "/procurement/indents", label: "Indents", hidden: !can("purchase.view") && !can("indent.create") },
         { href: "/procurement/purchase-orders", label: "Purchase orders", hidden: !can("purchase.view") },
