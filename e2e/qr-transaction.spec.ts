@@ -189,6 +189,62 @@ test.describe("QR guest transaction", () => {
     await guest.context.close();
   });
 
+  test("QR-004 two phones split the bill, each paying their own part online; the table can order the same again", async ({ page, browser }) => {
+    const outlet = await outletByCode(page.request, CENTRAL);
+    const { token, tableId } = await qrToken(outlet.id, "F4");
+    const guestA = await guestPhone(browser);
+    const a = guestA.page;
+    await a.goto(`/t/${token}`);
+    await addDish(a, "Masala Chai");
+    await a.getByRole("button", { name: "Increase Masala Chai" }).click();
+    await checkout(a, { total: money(84) }); // 2 × 40 × 1.05
+    await a.waitForURL(/\/o\/[^/#]+#k=/);
+    const orderId = orderIdFrom(a);
+
+    // ---- Phone A: split two ways; the share is the server's figure, the page sends only the number of people.
+    await a.getByRole("button", { name: "Split the bill" }).click();
+    await expect(a.getByTestId("split-share")).toContainText("Your part: ₹42.00");
+    const start = a.waitForRequest((r) => r.method() === "POST" && r.url().endsWith(`/api/qr/orders/${orderId}/payments`));
+    await a.getByRole("button", { name: /^Pay your part .*42\.00/ }).click();
+    expect((await start).postDataJSON()).toEqual({ parts: 2 });
+    const gw = a.getByRole("region", { name: "Test payment gateway" });
+    await expect(gw).toContainText("Your part of the bill, split 2 ways");
+    await expect(gw).toContainText(money(42));
+    await gw.getByRole("button", { name: "Approve payment" }).click();
+    await expect(a.getByText(/Your part is paid\. ₹42\.00 is still due on this bill\./)).toBeVisible();
+    let o = await order(page.request, orderId);
+    expect(o.status).toBe("OPEN"); // one part is not the whole bill
+    expect(o.payments!.map((x) => [x.method, x.status, Number(x.amount)])).toEqual([["ONLINE", "SUCCESS", 42]]);
+
+    // ---- Phone B opens the same order (the link a friend shares) and pays what is left.
+    const guestB = await guestPhone(browser);
+    const b = guestB.page;
+    await b.goto(a.url());
+    await expect(b.getByTestId("order-stage")).toBeVisible();
+    await b.getByRole("button", { name: "Split the bill" }).click();
+    await expect(b.getByTestId("split-share")).toContainText("You pay everything that is left: ₹42.00.");
+    await expect(b.getByTestId("split-share")).toContainText("One part is already paid.");
+    await b.getByRole("button", { name: /^Pay your part .*42\.00/ }).click();
+    await b.getByRole("region", { name: "Test payment gateway" }).getByRole("button", { name: "Approve payment" }).click();
+    await expect(b.getByText("Payment successful. Thank you!")).toBeVisible();
+    await expect(b.getByTestId("bill-payment-status")).toHaveText("Paid");
+    o = await order(page.request, orderId);
+    expect(o.status).toBe("PAID");
+    expect(o.payments!.map((x) => [x.method, x.status, Number(x.amount)]).sort()).toEqual([["ONLINE", "SUCCESS", 42], ["ONLINE", "SUCCESS", 42]]);
+    await guestB.context.close();
+
+    // ---- Phone A follows along and puts the same dishes back in a cart; nothing is ordered until it checks out.
+    await expect(a.getByTestId("bill-payment-status")).toHaveText("Paid", { timeout: 15_000 });
+    await expect(a.getByRole("button", { name: "Split the bill" })).toHaveCount(0);
+    await a.getByRole("button", { name: "Order the same again" }).click();
+    await a.waitForURL(/\/t\/[^/]+\/cart$/);
+    await expect(a.getByText("Masala Chai").first()).toBeVisible();
+    await expect(a.getByTestId("cart-total")).toHaveText(money(84));
+    const tableOrders = (await apiData<{ items: Array<{ id: string }> }>(page.request, `/api/orders?outletId=${outlet.id}&tableId=${tableId}&take=50`)).items;
+    expect(tableOrders.map((x) => x.id)).toEqual([orderId]);
+    await guestA.context.close();
+  });
+
   test("QR-003 invalid QR, tampering, cross-origin and a lost response during checkout never duplicate or misprice", async ({ page, browser }) => {
     const outlet = await outletByCode(page.request, CENTRAL);
     const { token, tableId } = await qrToken(outlet.id, "G8");

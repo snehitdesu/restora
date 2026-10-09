@@ -274,7 +274,7 @@ describe("guest order page", () => {
   it("authenticates with the key from the URL fragment and pays through the server (decline, then approve)", async () => {
     const user = userEvent.setup();
     window.history.replaceState(null, "", "/o/cmord1#k=key-abc");
-    const view = (over: object = {}) => ({ orderId: "cmord1", ref: "ORD001", status: "SENT", fulfilment: "PREPARING", fulfilmentLabel: "Being prepared", tracker: { step: 2, confirmed: true }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, ...over });
+    const view = (over: object = {}) => ({ orderId: "cmord1", ref: "ORD001", status: "SENT", fulfilment: "PREPARING", fulfilmentLabel: "Being prepared", tracker: { step: 2, confirmed: true }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     let confirms = 0;
     handler = (c) => {
       if (c.url.endsWith("/payments/confirm")) {
@@ -324,7 +324,7 @@ describe("guest order page", () => {
     });
     afterEach(() => { delete window.Razorpay; });
 
-    const rzpView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, ...over });
+    const rzpView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     const started = { paymentId: "payR", amount: "462.00", provider: "razorpay", mode: "SANDBOX", testMode: false, checkout: { provider: "razorpay", mode: "SANDBOX", keyId: "rzp_test_PUBLIC", orderId: "order_R1", amount: 46200, currency: "INR" } };
 
     it("opens Checkout with the server's key, gateway order and amount; the signed response is verified by the server", async () => {
@@ -377,7 +377,7 @@ describe("guest order page", () => {
 
   it("live tracker follows the kitchen; checkout's \"pay online\" opens the payment once and is not replayed by a refresh", async () => {
     window.history.replaceState(null, "", "/o/cmord5#k=key-5&new=1&pay=1");
-    const v = (over: object = {}) => ({ orderId: "cmord5", ref: "ORD005", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, ...over });
+    const v = (over: object = {}) => ({ orderId: "cmord5", ref: "ORD005", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     handler = (c) => (c.url.endsWith("/payments") ? { data: { paymentId: "p5", amount: "630.00", provider: "mock", testMode: true } } : { data: v() });
     const { unmount } = render(<GuestOrderScreen orderId="cmord5" />);
     expect(await screen.findByRole("region", { name: "Test payment gateway" })).toBeInTheDocument(); // opened without a tap
@@ -395,6 +395,123 @@ describe("guest order page", () => {
     expect(steps[1]).toHaveAttribute("aria-current", "step");
     expect(steps[0]).toHaveTextContent("Done.");
     expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(1); // no second auto-start
+  });
+
+  describe("splitting the bill and ordering again", () => {
+    const reorder = [
+      { menuItemId: "i-biryani", name: "Biryani", variantId: "v-large", modifierOptionIds: ["o-hot"], modifierLabels: ["Spice: Hot"], unitPrice: 380, modifiersPerUnit: 0, taxPct: 5, qty: 2, notes: "no onions" },
+      { menuItemId: "i-dosa", name: "Masala Dosa", modifierOptionIds: [], modifierLabels: [], unitPrice: 120, modifiersPerUnit: 0, taxPct: 5, qty: 1 },
+    ];
+    const v = (over: object = {}) => ({ orderId: "cmord7", ref: "ORD007", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill({ total: "630.00", balanceDue: "630.00" }), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder, split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
+
+    it("shows each person's part before they pay, sends only the number of people, and shows the server's amount", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = (c) => (c.url.endsWith("/payments") ? { data: { paymentId: "pS1", amount: "210.00", provider: "mock", testMode: true, share: { parts: 3, remainingParts: 3, last: false } } } : { data: v() });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      expect(screen.getByTestId("split-parts")).toHaveTextContent("2");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹315.00. One more person pays the rest");
+      expect(screen.getByRole("button", { name: "Fewer people" })).toBeDisabled(); // 2 is the least
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      expect(screen.getByTestId("split-parts")).toHaveTextContent("3");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹210.00. 2 more people pay the rest");
+      await user.click(screen.getByRole("button", { name: /Pay your part .*210\.00/ }));
+      const gw = await screen.findByRole("region", { name: "Test payment gateway" });
+      expect(within(gw).getByTestId("share-note")).toHaveTextContent("Your part of the bill, split 3 ways");
+      expect(gw).toHaveTextContent("210.00");
+      const start = calls.find((c) => c.url.endsWith("/payments"))!;
+      expect(start.body).toEqual({ parts: 3 }); // never an amount
+      expect(start.headers["Idempotency-Key"]).toBeTruthy();
+    });
+
+    it("the last person pays what is left; a part that is paid says what is still due", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      const half = (over: object = {}) => v({ bill: bill({ total: "630.00", balanceDue: "315.00", paid: "315.00", paymentStatus: "PARTIALLY_PAID" }), split: { sharesPaid: 1, minParts: 2, maxParts: 12 }, ...over });
+      let state = half();
+      handler = (c) => {
+        if (c.url.endsWith("/payments/confirm")) {
+          state = half({ bill: bill({ total: "630.00", balanceDue: "105.00", paid: "525.00", paymentStatus: "PARTIALLY_PAID" }), split: { sharesPaid: 2, minParts: 2, maxParts: 12 } });
+          return { data: { ...state, paymentStatus: "SUCCESS" } };
+        }
+        if (c.url.endsWith("/payments")) return { data: { paymentId: "pS2", amount: "210.00", provider: "mock", testMode: true, share: { parts: 3, remainingParts: 2, last: false } } };
+        return { data: state };
+      };
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹157.50. One more person pays the rest");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("One part is already paid.");
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await user.click(within(await screen.findByRole("region", { name: "Test payment gateway" })).getByRole("button", { name: "Approve payment" }));
+      expect(await screen.findByText(/Your part is paid\. ₹105\.00 is still due on this bill\./)).toBeInTheDocument();
+    });
+
+    it("a new ask is a new payment: the same ask retried keeps its key, a different number of people does not", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = (c) => {
+        if (c.url.endsWith("/payments")) return { error: { code: "VALIDATION_ERROR", message: "Could not start the payment." } };
+        return { data: v() };
+      };
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await screen.findByRole("alert");
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(2));
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(3));
+      const keys = calls.filter((c) => c.url.endsWith("/payments")).map((c) => c.headers["Idempotency-Key"]);
+      expect(keys[1]).toBe(keys[0]);
+      expect(keys[2]).not.toBe(keys[0]);
+    });
+
+    it("offers no split once nothing is due, or when online payment is off", async () => {
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = () => ({ data: v({ canPay: false }) });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      expect(await screen.findByTestId("pay-at-counter")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Split the bill" })).toBeNull();
+    });
+
+    it("\"Order the same again\" fills the cart with the same dishes and opens it; the cart screen prices them", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      rememberOrder({ orderId: "cmord7", key: "key-7", token: "tok-7", ref: "ORD007", at: "2026-10-04T08:00:00.000Z" });
+      saveCart("tok-7", cartReducer(emptyCart("DINE_IN"), { type: "add", line: { menuItemId: "i-dosa", name: "Masala Dosa", modifierOptionIds: [], modifierLabels: [], unitPrice: 120, modifiersPerUnit: 0, taxPct: 5, qty: 1 } }));
+      handler = () => ({ data: v() });
+      const assign = vi.fn();
+      const original = window.location;
+      Object.defineProperty(window, "location", { configurable: true, value: { ...original, assign, hash: original.hash, pathname: original.pathname, search: original.search } });
+      try {
+        render(<GuestOrderScreen orderId="cmord7" />);
+        await user.click(await screen.findByRole("button", { name: "Order the same again" }));
+        expect(assign).toHaveBeenCalledWith("/t/tok-7/cart");
+      } finally {
+        Object.defineProperty(window, "location", { configurable: true, value: original });
+      }
+      const lines = loadCart("tok-7").lines;
+      expect(lines.map((l) => [l.menuItemId, l.qty])).toEqual([["i-dosa", 2], ["i-biryani", 2]]); // merged with what was already in the cart
+      expect(lines[1]).toMatchObject({ variantId: "v-large", modifierOptionIds: ["o-hot"], notes: "no onions" });
+      expect(calls.some((c) => c.method === "POST")).toBe(false); // nothing is ordered until the guest checks out
+    });
+
+    it("has no \"Order the same again\" without the menu link, or for an order with no dishes", async () => {
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = () => ({ data: v() });
+      const { unmount } = render(<GuestOrderScreen orderId="cmord7" />);
+      await screen.findByTestId("order-stage");
+      expect(screen.queryByRole("button", { name: "Order the same again" })).toBeNull(); // opened from a bookmark: no table menu to go back to
+      unmount();
+      rememberOrder({ orderId: "cmord7", key: "key-7", token: "tok-7", ref: "ORD007", at: "2026-10-04T08:00:00.000Z" });
+      handler = () => ({ data: v({ reorder: [] }) });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await screen.findByTestId("order-stage");
+      expect(screen.queryByRole("button", { name: "Order the same again" })).toBeNull();
+    });
   });
 
   it("without a key it explains instead of calling the API", async () => {

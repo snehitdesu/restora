@@ -45,6 +45,7 @@ import { buildBill, billOrderInclude, loadBillVenue, orderRef, type Bill } from 
 import { getOrderInvoices } from "@/server/services/invoicing";
 import { getPaymentProvider, type IntegrationMode } from "@/integrations/payment";
 import { D, money, num } from "@/domain/money";
+import { MAX_SPLIT_PARTS, MIN_SPLIT_PARTS, splitShare } from "@/domain/billSplit";
 import { FULFILMENT_LABEL } from "@/domain/orderProgress";
 
 // ---------------- access keys ----------------
@@ -435,12 +436,43 @@ export type GuestOrderView = {
   canPay: boolean;
   payment: GuestPaymentOptions;
   pendingPaymentId: string | null;
+  /** The same dishes as a cart, for "order the same again": current price and availability are checked when the cart is priced. */
+  reorder: GuestReorderLine[];
+  /** Splitting the bill from the phones: how many online parts guests have already paid. */
+  split: { sharesPaid: number; minParts: number; maxParts: number };
+};
+
+export type GuestReorderLine = {
+  menuItemId: string;
+  name: string;
+  variantId?: string;
+  modifierOptionIds: string[];
+  modifierLabels: string[];
+  unitPrice: number;
+  modifiersPerUnit: number;
+  taxPct: number;
+  qty: number;
+  notes?: string;
 };
 
 async function viewOf(order: Awaited<ReturnType<typeof loadGuestOrder>>, db: PrismaClient): Promise<GuestOrderView> {
   const bill = buildBill(order, await loadBillVenue(db, order.organizationId, order.outletId), await getOrderInvoices(db, order.id));
   const payment = await guestPaymentOptions();
   const pending = order.payments.filter((p) => p.status === "PENDING" && p.method === "ONLINE" && !p.actorId).at(-1);
+  const reorder: GuestReorderLine[] = order.items
+    .filter((i) => i.menuItemId)
+    .map((i) => ({
+      menuItemId: i.menuItemId!,
+      name: i.name,
+      ...(i.variantId ? { variantId: i.variantId } : {}),
+      modifierOptionIds: i.modifiers.map((m) => m.optionId).filter((x): x is string => Boolean(x)),
+      modifierLabels: i.modifiers.map((m) => m.name),
+      unitPrice: num(i.unitPrice),
+      modifiersPerUnit: num(i.modifiers.reduce((a, m) => a.plus(D(m.priceDelta)), D(0))),
+      taxPct: num(i.taxPct),
+      qty: Math.min(50, Math.max(1, Math.round(num(i.qty)))),
+      ...(i.notes ? { notes: i.notes } : {}),
+    }));
   return {
     orderId: order.id,
     ref: orderRef(order.id),
@@ -452,8 +484,13 @@ async function viewOf(order: Awaited<ReturnType<typeof loadGuestOrder>>, db: Pri
     canPay: payment.online && !["PAID", "CANCELLED", "REFUNDED"].includes(order.status) && D(bill.balanceDue).gt(0),
     payment,
     pendingPaymentId: pending?.id ?? null,
+    reorder,
+    split: { sharesPaid: guestSharesPaid(order.payments), minParts: MIN_SPLIT_PARTS, maxParts: MAX_SPLIT_PARTS },
   };
 }
+
+/** Online payments by guests that went through (staff payments and cash are not "parts" of a phone split). */
+const guestSharesPaid = (payments: Array<{ status: string; method: string; actorId: string | null }>) => payments.filter((p) => (p.status === "SUCCESS" || p.status === "PARTIAL") && p.method === "ONLINE" && !p.actorId).length;
 
 export async function getGuestOrder(orderId: string, key: string | null | undefined, db: PrismaClient = prisma): Promise<GuestOrderView> {
   return viewOf(await loadGuestOrder(orderId, key, db), db);
@@ -467,8 +504,16 @@ export async function getGuestOrder(orderId: string, key: string | null | undefi
  * amount instead of creating another; a new attempt after a decline is a new
  * payment. Retries with the same Idempotency-Key return the same payment.
  */
-export async function startGuestPayment(orderId: string, key: string | null | undefined, idempotencyKey: unknown, db: PrismaClient = prisma) {
+const startPaymentSchema = z.object({ parts: z.number().int().min(MIN_SPLIT_PARTS, `The bill can be split between ${MIN_SPLIT_PARTS} and ${MAX_SPLIT_PARTS} people`).max(MAX_SPLIT_PARTS, `The bill can be split between ${MIN_SPLIT_PARTS} and ${MAX_SPLIT_PARTS} people`).optional() }).strict();
+
+/**
+ * With `parts` the guest pays an equal part of what is still due instead of all of it: the server works out the amount from
+ * the balance and the parts already paid (src/domain/billSplit.ts), the last person pays what is left, and every guest's
+ * payment is their own (never shared with another guest's open payment).
+ */
+export async function startGuestPayment(orderId: string, key: string | null | undefined, idempotencyKey: unknown, input: unknown = {}, db: PrismaClient = prisma) {
   const idem = idemKey.parse(idempotencyKey);
+  const { parts } = startPaymentSchema.parse(input ?? {});
   const order = await loadGuestOrder(orderId, key, db);
   if (["PAID", "CANCELLED", "REFUNDED"].includes(order.status)) throw new ValidationError(`This order is already ${order.status.toLowerCase()}`);
   const options = await guestPaymentOptions({ fresh: true });
@@ -477,10 +522,14 @@ export async function startGuestPayment(orderId: string, key: string | null | un
   const collected = order.payments.filter((p) => p.status === "SUCCESS" || p.status === "PARTIAL").reduce((a, p) => a.plus(D(p.amount)), D(0));
   const outstanding = money(D(order.total).minus(collected));
   if (outstanding.lte(0)) throw new ValidationError("Nothing is due on this order");
+  const share = parts ? splitShare(outstanding, parts, guestSharesPaid(order.payments)) : null;
+  const amount = share ? D(share.amount) : outstanding;
 
   const ctx = systemContext(order.organizationId, [order.outletId]);
-  const resumable = order.payments.find((p) => p.status === "PENDING" && p.method === "ONLINE" && p.provider === gateway.name && !p.actorId && D(p.amount).eq(outstanding));
-  const payment = resumable ?? (await createPayment(ctx, order.id, { method: "ONLINE", amount: num(outstanding), provider: gateway.name, idempotencyKey: `qrpay:${order.id.slice(-12)}:${idem}` }, db));
+  // A refresh resumes the guest's own open payment. Whole-bill payments share one open payment for the same amount; a part
+  // belongs to the phone that asked for it (its Idempotency-Key), so two guests never end up on the same checkout.
+  const resumable = share ? undefined : order.payments.find((p) => p.status === "PENDING" && p.method === "ONLINE" && p.provider === gateway.name && !p.actorId && D(p.amount).eq(outstanding));
+  const payment = resumable ?? (await createPayment(ctx, order.id, { method: "ONLINE", amount: num(amount), provider: gateway.name, idempotencyKey: `qrpay:${order.id.slice(-12)}:${idem}` }, db));
   // Gateway-side checkout for the SERVER's amount (the Payment row), created outside any DB
   // transaction. A failure leaves the payment PENDING without a reference; the next attempt
   // resumes it. A payment that already has its checkout keeps it (no second gateway order).
@@ -497,7 +546,7 @@ export async function startGuestPayment(orderId: string, key: string | null | un
     if (!checkout && providerRef) checkout = gateway.resumeCheckout?.({ providerRef, amount: num(payment.amount), currency: "INR" });
     checkout ??= { provider: gateway.name, mode: gateway.mode, orderId: providerRef ?? "", amount: Math.round(num(payment.amount) * 100), currency: "INR" };
   }
-  return { paymentId: payment.id, amount: money(payment.amount).toFixed(2), provider: gateway.name, mode: gateway.mode, testMode: options.testMode, checkout };
+  return { paymentId: payment.id, amount: money(payment.amount).toFixed(2), provider: gateway.name, mode: gateway.mode, testMode: options.testMode, checkout, ...(share ? { share: { parts, remainingParts: share.remainingParts, last: share.last } } : {}) };
 }
 
 const confirmSchema = z

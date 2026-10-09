@@ -21,7 +21,7 @@ export const { GET, POST } = createGuestRouter([
     handler: ({ params, body, req, ip }) => placeGuestOrder(params.token, body, req.headers.get("idempotency-key"), { ip, userAgent: req.headers.get("user-agent") ?? undefined }),
   },
   { method: "GET", path: "orders/:id", handler: ({ params, req }) => getGuestOrder(params.id, req.headers.get("x-order-key")) },
-  { method: "POST", path: "orders/:id/payments", handler: ({ params, req }) => startGuestPayment(params.id, req.headers.get("x-order-key"), req.headers.get("idempotency-key")) },
+  { method: "POST", path: "orders/:id/payments", handler: ({ params, req, body }) => startGuestPayment(params.id, req.headers.get("x-order-key"), req.headers.get("idempotency-key"), body) },
   { method: "POST", path: "orders/:id/payments/confirm", handler: ({ params, req, body }) => confirmGuestPayment(params.id, req.headers.get("x-order-key"), body) },
   // Group 6. The post-meal rating: from the order page (the order's key) or from the link we sent (its token).
   { method: "POST", path: "orders/:id/feedback", limits: [{ policy: RATE_POLICIES.guestFeedbackPerKey, key: ({ params }) => params.id }], handler: ({ params, req, body }) => submitGuestOrderFeedback(params.id, req.headers.get("x-order-key"), body) },
