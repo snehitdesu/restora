@@ -28,6 +28,7 @@ import { priceMenuSelection } from "@/server/services/menu";
 import { createKOTsForOrder } from "@/server/services/kot";
 import { idempotentCreate, requestHashOf as roundHashOf } from "@/server/services/idempotency";
 import { createNotificationTx } from "@/server/services/notifications";
+import { WALKIN_NOTE_PREFIX } from "@/server/services/reservations";
 
 type Tx = Prisma.TransactionClient;
 type Client = PrismaClient | Tx;
@@ -197,6 +198,9 @@ const createOrderSchema = z.object({
   externalRef: z.string().optional(),
   covers: z.number().int().positive().default(1),
   notes: z.string().optional(),
+  /** Save the bill at the counter without sending it to the kitchen (the POS's hold list); `holdLabel` names it. */
+  hold: z.boolean().optional(),
+  holdLabel: z.string().trim().max(60).optional(),
   /** Idempotency-Key: a retry with the same key + request returns the original order. */
   idempotencyKey: z.string().trim().min(8).max(100).regex(/^[\w.:-]+$/, "Invalid idempotency key").optional(),
 });
@@ -286,6 +290,14 @@ function createOrderTx(ctx: AccessContext, data: z.infer<typeof createOrderSchem
       const customer = await tx.customer.findUnique({ where: { id: data.customerId }, select: { organizationId: true } });
       if (!customer || customer.organizationId !== ctx.organizationId) throw new NotFoundError("Customer not found");
     }
+    // A party seated from a booking: its special-occasion / allergy note travels with the order, so it is printed on the
+    // kitchen ticket ("Order note: ...") and the captain does not have to pass it on by word of mouth.
+    let notes = data.notes;
+    if (data.tableId) {
+      const seated = await tx.reservation.findFirst({ where: { organizationId: ctx.organizationId, outletId: data.outletId, tableId: data.tableId, status: "SEATED", notes: { not: null } }, orderBy: { reservedAt: "desc" }, select: { notes: true } });
+      const note = seated?.notes?.trim();
+      if (note && !note.startsWith(WALKIN_NOTE_PREFIX)) notes = [data.notes, `Booking note: ${note}`].filter(Boolean).join(" · ");
+    }
     const order = await tx.order.create({
       data: {
         organizationId: ctx.organizationId,
@@ -296,7 +308,9 @@ function createOrderTx(ctx: AccessContext, data: z.infer<typeof createOrderSchem
         customerId: data.customerId,
         externalRef: data.externalRef,
         covers: data.covers,
-        notes: data.notes,
+        notes,
+        holdLabel: data.holdLabel || null,
+        heldAt: data.hold || data.holdLabel ? new Date() : null,
         idempotencyKey: data.idempotencyKey,
         requestHash: hash,
         status: "OPEN",
@@ -646,6 +660,8 @@ const listSchema = z.object({
   /** Only orders still running (not PAID / CANCELLED / REFUNDED). */
   active: z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]).optional(),
   tableId: z.string().optional(),
+  /** Only bills held at the counter and not yet sent (the POS's hold list), oldest first. */
+  held: z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
   take: z.coerce.number().int().positive().max(200).default(50),
@@ -662,8 +678,9 @@ export async function listOrders(db: PrismaClient, ctx: AccessContext, input: z.
     where: {
       organizationId: ctx.organizationId, outletId: f.outletId, ...(f.status ? { status: f.status } : {}), ...(f.tableId ? { tableId: f.tableId } : {}), ...(createdAt ? { createdAt } : {}),
       ...(f.active ? { status: { notIn: ["PAID", "CANCELLED", "REFUNDED"] } } : {}),
+      ...(f.held ? { status: "OPEN", heldAt: { not: null } } : {}),
     },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    orderBy: f.held ? [{ heldAt: "asc" }, { id: "asc" }] : [{ createdAt: "desc" }, { id: "desc" }],
     take: f.take + 1,
     include: { customer: customerSelect, table: { select: { code: true } }, items: { select: { id: true, name: true, qty: true, lineTotal: true } }, kots: { select: { status: true } } },
     ...(f.cursor ? { cursor: { id: f.cursor }, skip: 1 } : {}),
@@ -711,6 +728,7 @@ export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db:
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "order.create", data.outletId);
   const { items, submit, ...orderInput } = data;
+  if (submit && (data.hold || data.holdLabel)) throw new ValidationError("A held bill is not sent to the kitchen; resume it first");
   const hash = data.idempotencyKey ? requestHashOf(data as never) : null;
   const replay = async () => {
     const prior = await db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: data.idempotencyKey! } }, include: placedInclude });

@@ -741,6 +741,9 @@ model WaitlistEntry {
   partySize      Int      @default(2)
   status         String   @default("WAITING") // WAITING | ARRIVED | SEATED | LEFT | CANCELLED
   estWaitMins    Int      @default(15)
+  // When the party was last told its table is ready (message accepted by the message gate), and how many times.
+  notifiedAt     DateTime?
+  notifyCount    Int      @default(0)
   createdAt      DateTime @default(now())
 
   @@index([organizationId, outletId, status])
@@ -774,6 +777,10 @@ model Order {
   stockConsumed  Boolean          @default(false)
   covers         Int              @default(1)
   notes          String?
+  // A bill saved at the counter without sending it to the kitchen ("held"): the POS's named hold list is the OPEN orders
+  // that carry heldAt. The label is what the cashier called it ("window table", "Ravi").
+  holdLabel      String?
+  heldAt         DateTime?
   // Client-supplied Idempotency-Key for order creation: a retry returns the
   // original order; reuse with a different request is rejected (requestHash).
   idempotencyKey String?

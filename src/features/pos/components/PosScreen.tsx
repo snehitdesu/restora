@@ -15,7 +15,7 @@ import { CustomerPicker } from "@/features/pos/components/CustomerPicker";
 import { PaymentDialog } from "@/features/pos/components/PaymentDialog";
 import { DiscountDialog } from "@/features/pos/components/DiscountDialog";
 import { UpsellStrip } from "@/features/pos/components/UpsellStrip";
-import { OpenOrdersDialog, isIncomingQr, type OpenOrder } from "@/features/pos/components/OpenOrdersDialog";
+import { OpenOrdersDialog, isIncomingQr, isHeld, type OpenOrder } from "@/features/pos/components/OpenOrdersDialog";
 import { createPoller } from "@/lib/polling";
 import { BACKGROUND_HEADER } from "@/constants/auth";
 import { Button } from "@/components/ui/Button";
@@ -43,13 +43,15 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
   const guard = useRef(createSubmitGuard());
   const searchRef = useRef<HTMLInputElement>(null);
   const [incoming, setIncoming] = useState(0);
+  const [held, setHeld] = useState(0);
+  const [holdName, setHoldName] = useState("");
 
   // Guests' QR orders arrive without anyone at the till: poll for ones awaiting acceptance.
   useEffect(() => {
     const p = createPoller<{ items: OpenOrder[] }>({
       intervalMs: 10_000,
       fetch: (signal) => api<{ items: OpenOrder[] }>("/api/orders", { query: { outletId, active: "true", take: 100 }, signal, headers: { [BACKGROUND_HEADER]: "1" } }),
-      onData: (d) => setIncoming(d.items.filter(isIncomingQr).length),
+      onData: (d) => { setIncoming(d.items.filter(isIncomingQr).length); setHeld(d.items.filter(isHeld).length); },
     });
     p.start();
     return () => p.stop();
@@ -158,7 +160,7 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
       api<OrderDTO>("/api/orders", {
         method: "POST",
         idempotencyKey: key,
-        body: { outletId, channel: cart.orderType, tableId: cart.tableId ?? undefined, customerId: cart.customer?.id, covers: cart.covers, notes: cart.notes || undefined, items: toOrderItems(cart), submit },
+        body: { outletId, channel: cart.orderType, tableId: cart.tableId ?? undefined, customerId: cart.customer?.id, covers: cart.covers, notes: cart.notes || undefined, items: toOrderItems(cart), submit, ...(submit ? {} : { hold: true, holdLabel: holdName.trim() || undefined }) },
       })
     );
     setBusy(null);
@@ -167,7 +169,8 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
     const order = result.value;
     restoreCartContext(order);
     void loadTables();
-    toast.show(submit ? `Order #${order.id.slice(-6).toUpperCase()} sent to kitchen` : `Order #${order.id.slice(-6).toUpperCase()} saved`, "ok");
+    if (!submit) setHoldName("");
+    toast.show(submit ? `Order #${order.id.slice(-6).toUpperCase()} sent to kitchen` : `Order #${order.id.slice(-6).toUpperCase()} saved${holdName.trim() ? ` as “${holdName.trim()}”` : ""}`, "ok");
     if (thenPay) setPayingOrderId(order.id);
     try {
       restoreCartContext(await refreshRunning(order.id));
@@ -239,6 +242,8 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
 
   const tableCode = (id: string | null) => tables.find((t) => t.id === id)?.code ?? null;
   const hasLines = cart.lines.length > 0;
+  const waiting = [incoming ? `${incoming} new QR ${incoming === 1 ? "order" : "orders"}` : "", held ? `${held} held` : ""].filter(Boolean);
+  const openOrdersLabel = waiting.length ? `Open orders, ${waiting.join(", ")}` : "Open orders";
 
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[1fr_22rem] lg:grid-cols-[1fr_26rem]">
@@ -260,10 +265,18 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
           disabled={Boolean(running && ["PAID", "CANCELLED", "REFUNDED"].includes(running.status))}
           onAdd={(h) => { const item = menu.find((m) => m.id === h.menuItemId); if (item) pick(item); }}
         />
+        {!running && hasLines && (
+          <div className="border-t border-ink-200 bg-ink-50 px-2 pt-2">
+            <label htmlFor="hold-name" className="sr-only">Bill name (optional)</label>
+            <input id="hold-name" name="holdName" value={holdName} onChange={(e) => setHoldName(e.target.value)} maxLength={60} autoComplete="off"
+              placeholder="Name this bill if you save it (optional)" className="h-9 w-full rounded-md border border-ink-300 bg-paper px-3 text-sm" />
+          </div>
+        )}
         <div className="grid grid-cols-3 gap-2 border-t border-ink-200 bg-ink-50 p-2" role="toolbar" aria-label="Order actions">
-          <Button size="lg" onClick={() => setDialog("orders")} aria-label={incoming ? `Open orders, ${incoming} new QR ${incoming === 1 ? "order" : "orders"}` : "Open orders"}>
+          <Button size="lg" onClick={() => setDialog("orders")} aria-label={openOrdersLabel}>
             Open orders
             {incoming > 0 && <span aria-hidden className="ml-1.5 rounded-full bg-warn-500 px-2 text-xs font-bold text-white tabular-nums">{incoming}</span>}
+            {held > 0 && <span aria-hidden className="ml-1.5 rounded-full bg-ink-200 px-2 text-xs font-semibold text-ink-700 tabular-nums">{held} held</span>}
           </Button>
           <Button size="lg" onClick={() => (running ? (setRunning(null), dispatch({ type: "clear" })) : dispatch({ type: "clear" }))} disabled={!hasLines && !running}>
             {running ? "Close" : "Clear"}
