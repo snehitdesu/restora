@@ -52,7 +52,7 @@ webhook, an operator with database access.
 - Desktop: DPAPI-protected install secret, loopback-only server, renderer sandbox / context isolation / no Node, navigation locked, Electron fuses (no RunAsNode, no NODE_OPTIONS, no inspector), asar integrity — `desktop:verify` 23/23.
 
 ## 7. Supply chain and secrets
-- `npm ci` from the committed lockfile; `npm audit --omit=dev` reviewed each release (current: two build/deploy-time advisories — PostCSS inside Next's build tooling, `deepmerge-ts` inside the Prisma CLI — not reachable at runtime; fixed by the next Next / Prisma majors).
+- `npm ci` from the committed lockfile; `npm audit --omit=dev` reviewed each release. **2026-10-09: 6 advisories (5 high, 1 moderate), all in build / CLI tooling and none loaded by the running server:** PostCSS (XSS in stringified CSS, `sourceMappingURL` file reads) and its `source-map-js` (event-loop DoS on crafted source maps) inside Next's build pipeline, which only ever processes this repository's own CSS; `deepmerge-ts` (stack exhaustion on recursive objects) inside the Prisma CLI / `@prisma/config`, run by operators on trusted schema files. The fixes are major upgrades (Next, Prisma) or `npm audit fix --force`, which were deliberately not applied at release time; re-check at the next Next / Prisma upgrade. Dev-only advisories (test runner tooling) are not shipped.
 - Secret scan of the tree each release (patterns for cloud keys, private keys, live gateway keys, tokens, passwords in URLs); `.env`, databases and backup dumps are git-ignored; the desktop build scans its payload for secrets.
 - No secrets in the repository; production values only via environment / secrets manager.
 

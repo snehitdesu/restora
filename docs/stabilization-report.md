@@ -129,6 +129,7 @@ pass or read from the GitHub Actions run named next to it.
 | End-to-end HTTP load (PostgreSQL 16, production build, mock providers) | 0 correctness violations, 0 deadlocks, outbox drained; only non-200: documented `503 Busy` on contended goods-receipt posting | §7.1 |
 | Accessibility, responsive | axe WCAG 2.1 A / AA at a phone and a desktop width on every screen, ten viewports 320-1920 px: serious / critical findings fail the suite; the guest split-bill screen is scanned too | `e2e/quality-sweep.spec.ts`, `QR-004` |
 | Secret sweep | no key material, credential, `.env`, database or dump is tracked; the only hits are fake strings in tests and a UI placeholder | `git grep` patterns, this pass |
+| Dependency audit (`npm audit --omit=dev`) | 6 advisories (5 high, 1 moderate), all in build / CLI tooling (PostCSS and `source-map-js` inside Next's build, `deepmerge-ts` inside the Prisma CLI); none loaded by the server; fixes need major upgrades and were not applied | `docs/security.md` §7 |
 | Dead-code sweep | 22 unreferenced exports removed; found one notification path that was never wired (below) | commit "Wire the operational notifications…" |
 
 Run 24 verified the branch through `2e5a1d4`. Four commits came after it and are covered by the final CI run: the 08:00 check's single lookup,
