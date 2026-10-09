@@ -27,12 +27,14 @@ import { ActiveBadge, Card, Details, PageHeader, Tabs } from "@/components/ui/Pa
 import { ErrorState, LoadingState } from "@/components/ui/States";
 import { FilterBar, SearchInput, SelectFilter } from "@/components/ui/Filters";
 import { ActionButton } from "@/components/ui/Confirm";
+import { ImportDialog } from "@/features/backoffice/bulkImport";
 import { MaterialSelect, VendorSelect, useMaterials, useUnits, useVendors, vendorLabel, type MaterialRow, type UnitRow, type VendorRow } from "@/features/backoffice/lookups";
 
 type MaterialCategory = { id: string; name: string; parentId: string | null; active: boolean };
 type VendorLink = { id: string; vendorId: string; materialId: string; lastRate: string | number; leadTimeDays: number; preferred: boolean };
 type MaterialDetailRow = MaterialRow & { baseUnit: UnitRow; category: MaterialCategory | null; vendorLinks: VendorLink[]; stockMoved: boolean };
-type VendorDetailRow = VendorRow & { materials: Array<VendorLink & { material: { sku: string; name: string } }> };
+type VendorContactRow = { id: string; name: string; role: string | null; phone: string | null; email: string | null; isPrimary: boolean };
+type VendorDetailRow = VendorRow & { materials: Array<VendorLink & { material: { sku: string; name: string } }>; contacts?: VendorContactRow[] };
 export type Conversion = { id: string; fromUnitId: string; toUnitId: string; from: string; to: string; factor: number; materialId: string | null; material: string | null };
 
 const ACTIVE_FILTER = [{ value: "true", label: "Active" }, { value: "false", label: "Inactive" }];
@@ -76,7 +78,7 @@ function MaterialDialog({ material, onClose, onDone }: { material?: MaterialDeta
   const cats = useMaterialCategories();
   const vendors = useVendors(can("vendor.view"));
   const [d, setD] = useState({
-    sku: material?.sku ?? "", name: material?.name ?? "", baseUnitId: material?.baseUnitId ?? "", purchaseUnitId: material?.purchaseUnitId ?? "", categoryId: material?.categoryId ?? "",
+    sku: material?.sku ?? "", name: material?.name ?? "", brand: material?.brand ?? "", baseUnitId: material?.baseUnitId ?? "", purchaseUnitId: material?.purchaseUnitId ?? "", categoryId: material?.categoryId ?? "",
     taxPct: String(toNumber(material?.taxPct ?? 0)), minStock: String(toNumber(material?.minStock ?? 0)), reorderLevel: String(toNumber(material?.reorderLevel ?? 0)),
     parLevel: material?.parLevel == null ? "" : String(toNumber(material.parLevel)),
     preferredVendorId: material?.preferredVendorId ?? "", perishable: material?.perishable ?? false, trackBatch: material?.trackBatch ?? false,
@@ -84,7 +86,7 @@ function MaterialDialog({ material, onClose, onDone }: { material?: MaterialDeta
   const set = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setD({ ...d, [k]: e.target.value });
   const baseLocked = Boolean(material?.stockMoved);
   const next = {
-    sku: d.sku.trim(), name: d.name.trim(), baseUnitId: baseLocked ? undefined : d.baseUnitId, purchaseUnitId: opt(d.purchaseUnitId), categoryId: opt(d.categoryId),
+    sku: d.sku.trim(), name: d.name.trim(), brand: d.brand.trim() === "" ? (material?.brand ? null : undefined) : d.brand.trim(), baseUnitId: baseLocked ? undefined : d.baseUnitId, purchaseUnitId: opt(d.purchaseUnitId), categoryId: opt(d.categoryId),
     taxPct: Number(d.taxPct), minStock: Number(d.minStock), reorderLevel: Number(d.reorderLevel), parLevel: d.parLevel.trim() === "" ? (material ? null : undefined) : Number(d.parLevel), preferredVendorId: opt(d.preferredVendorId), perishable: d.perishable, trackBatch: d.trackBatch,
   };
   const prev = material ? { ...material, taxPct: toNumber(material.taxPct), minStock: toNumber(material.minStock), reorderLevel: toNumber(material.reorderLevel), parLevel: material.parLevel == null ? null : toNumber(material.parLevel) } : undefined;
@@ -95,6 +97,7 @@ function MaterialDialog({ material, onClose, onDone }: { material?: MaterialDeta
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="SKU" name="sku" required><Input value={d.sku} onChange={set("sku")} required maxLength={40} /></Field>
         <Field label="Name" name="name" required><Input value={d.name} onChange={set("name")} required maxLength={120} /></Field>
+        <Field label="Brand" name="brand" hint="Optional: what the pack says (Amul, Tata Salt…)"><Input value={d.brand} onChange={set("brand")} maxLength={60} /></Field>
         <Field label="Base unit" name="baseUnitId" required hint={baseLocked ? "Locked: stock has moved, and ledger quantities are in this unit" : "Stock and costs are kept in this unit"}>
           <Select value={d.baseUnitId} onChange={set("baseUnitId")} required disabled={baseLocked}>
             <option value="">Select unit…</option>
@@ -154,7 +157,7 @@ export function MaterialsScreen() {
   const [search, setSearch] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [active, setActive] = useState("true");
-  const [dialog, setDialog] = useState<null | "material" | "category">(null);
+  const [dialog, setDialog] = useState<null | "material" | "category" | "import">(null);
   const cats = useMaterialCategories();
   const list = usePaged<MaterialRow>("/api/master/materials", { search: search || undefined, categoryId: categoryId || undefined, active: active || undefined });
   const catName = (id: string | null) => (id ? cats.data?.find((c) => c.id === id)?.name ?? "—" : "—");
@@ -162,13 +165,13 @@ export function MaterialsScreen() {
     <>
       <PageHeader title="Materials" subtitle="Raw and semi-finished materials used by recipes, purchasing and stock"
         actions={master && (tab === "materials"
-          ? <Button variant="primary" onClick={() => setDialog("material")}><Icon name="plus" /> New material</Button>
+          ? <><Button onClick={() => setDialog("import")}><Icon name="upload" /> Import</Button><Button variant="primary" onClick={() => setDialog("material")}><Icon name="plus" /> New material</Button></>
           : <Button variant="primary" onClick={() => setDialog("category")}><Icon name="plus" /> New category</Button>)} />
       <Tabs label="Materials view" value={tab} onChange={setTab} options={[{ value: "materials", label: "Materials" }, { value: "categories", label: "Categories" }]} />
       {tab === "materials" ? (
         <>
           <FilterBar>
-            <SearchInput value={search} onChange={setSearch} placeholder="Search name or SKU…" />
+            <SearchInput value={search} onChange={setSearch} placeholder="Search name, brand or SKU…" />
             <SelectFilter label="Category" value={categoryId} onChange={setCategoryId} options={(cats.data ?? []).map((c) => ({ value: c.id, label: c.name }))} />
             <SelectFilter label="Status" value={active} onChange={setActive} options={ACTIVE_FILTER} />
           </FilterBar>
@@ -177,6 +180,7 @@ export function MaterialsScreen() {
             columns={[
               { key: "n", header: "Material", cell: (r) => <span className="font-medium text-ink-900">{r.name}</span> },
               { key: "s", header: "SKU", cell: (r) => r.sku },
+              { key: "br", header: "Brand", cell: (r) => r.brand ?? "—" },
               { key: "c", header: "Category", cell: (r) => r.category?.name ?? "—" },
               { key: "u", header: "Base unit", cell: (r) => r.baseUnit?.code ?? "—" },
               { key: "r", header: "Reorder at", numeric: true, cell: (r) => (toNumber(r.reorderLevel) ? formatQty(r.reorderLevel) : "—") },
@@ -195,6 +199,7 @@ export function MaterialsScreen() {
       )}
       {dialog === "material" && <MaterialDialog onClose={() => setDialog(null)} onDone={(m) => router.push(`/master/materials/${m.id}`)} />}
       {dialog === "category" && <CategoryDialog categories={cats.data ?? []} onClose={() => setDialog(null)} onDone={cats.reload} />}
+      {dialog === "import" && <ImportDialog kind="materials" onClose={() => setDialog(null)} onDone={() => { list.reload(); cats.reload(); }} />}
     </>
   );
 }
@@ -289,7 +294,7 @@ export function MaterialDetail({ id }: { id: string }) {
         } />
       <Card className="mb-4">
         <Details cols={4} items={[
-          ["Base unit", <span key="b">{m.baseUnit?.code}{m.stockMoved && <Badge className="ml-1">Locked</Badge>}</span>], ["Purchase unit", unitCode(m.purchaseUnitId)], ["Category", m.category?.name], ["Tax", formatPct(m.taxPct)],
+          ["Base unit", <span key="b">{m.baseUnit?.code}{m.stockMoved && <Badge className="ml-1">Locked</Badge>}</span>], ["Purchase unit", unitCode(m.purchaseUnitId)], ["Category", m.category?.name], ["Brand", m.brand], ["Tax", formatPct(m.taxPct)],
           ["Reorder level", formatQty(m.reorderLevel)], ["Minimum stock", formatQty(m.minStock)], ["Par level", m.parLevel == null ? "—" : formatQty(m.parLevel)], ["Perishable", m.perishable ? "Yes" : "No"], ["Batch tracking", m.trackBatch ? "Yes" : "No"],
           ["Preferred vendor", can("vendor.view") ? vendorLabel(vendors.byId, m.preferredVendorId) : m.preferredVendorId ? "Set" : "—"],
         ]} />
@@ -329,10 +334,11 @@ export function MaterialDetail({ id }: { id: string }) {
 function VendorDialog({ vendor, onClose, onDone }: { vendor?: VendorRow; onClose: () => void; onDone: (v: VendorRow) => void }) {
   const [d, setD] = useState({
     name: vendor?.name ?? "", companyName: vendor?.companyName ?? "", phone: vendor?.phone ?? "", email: vendor?.email ?? "", address: vendor?.address ?? "", gstin: vendor?.gstin ?? "",
-    bankAccount: vendor?.bankAccount ?? "", bankIfsc: vendor?.bankIfsc ?? "", upiId: vendor?.upiId ?? "", paymentTerms: vendor?.paymentTerms ?? "", creditLimit: String(toNumber(vendor?.creditLimit ?? 0)), notes: vendor?.notes ?? "",
+    bankAccount: vendor?.bankAccount ?? "", bankIfsc: vendor?.bankIfsc ?? "", upiId: vendor?.upiId ?? "", paymentTerms: vendor?.paymentTerms ?? "", category: vendor?.category ?? "", natureOfSupply: vendor?.natureOfSupply ?? "", creditLimit: String(toNumber(vendor?.creditLimit ?? 0)), notes: vendor?.notes ?? "",
   });
-  const set = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setD({ ...d, [k]: e.target.value });
+  const set = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => setD({ ...d, [k]: e.target.value });
   const next = {
+    category: opt(d.category), natureOfSupply: opt(d.natureOfSupply),
     name: d.name.trim(), companyName: opt(d.companyName), phone: opt(d.phone), email: opt(d.email), address: opt(d.address), gstin: opt(d.gstin),
     bankAccount: opt(d.bankAccount), bankIfsc: opt(d.bankIfsc), upiId: opt(d.upiId), paymentTerms: opt(d.paymentTerms), creditLimit: Number(d.creditLimit || 0), notes: opt(d.notes),
   };
@@ -348,6 +354,15 @@ function VendorDialog({ vendor, onClose, onDone }: { vendor?: VendorRow; onClose
         <Field label="Email" name="email"><Input type="email" value={d.email} onChange={set("email")} maxLength={200} /></Field>
         <Field label="GSTIN" name="gstin" hint="15 characters"><Input value={d.gstin} onChange={(e) => setD({ ...d, gstin: e.target.value.toUpperCase() })} maxLength={15} /></Field>
         <Field label="Payment terms" name="paymentTerms" hint="e.g. NET15, COD"><Input value={d.paymentTerms} onChange={set("paymentTerms")} maxLength={20} /></Field>
+        <Field label="Category" name="category" hint="Dairy, Produce, Packaging…"><Input value={d.category} onChange={set("category")} maxLength={60} /></Field>
+        <Field label="Nature of supply" name="natureOfSupply" hint="For GST: goods, services or both">
+          <Select value={d.natureOfSupply} onChange={set("natureOfSupply")}>
+            <option value="">{vendor?.natureOfSupply ? "Keep current" : "Not set"}</option>
+            <option value="GOODS">Goods</option>
+            <option value="SERVICES">Services</option>
+            <option value="BOTH">Goods and services</option>
+          </Select>
+        </Field>
         <Field label="Credit limit (₹)" name="creditLimit"><Input type="number" inputMode="decimal" step="0.01" min="0" value={d.creditLimit} onChange={set("creditLimit")} /></Field>
       </div>
       <fieldset className="grid gap-3 rounded-md border border-ink-100 p-3 sm:grid-cols-2">
@@ -368,10 +383,11 @@ export function VendorsScreen() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
   const list = usePaged<VendorRow>("/api/master/vendors", { search: search || undefined, status: status || undefined });
   return (
     <>
-      <PageHeader title="Vendors" subtitle="Suppliers, contacts, terms and the materials they supply" actions={vendor && <Button variant="primary" onClick={() => setCreating(true)}><Icon name="plus" /> New vendor</Button>} />
+      <PageHeader title="Vendors" subtitle="Suppliers, contacts, terms and the materials they supply" actions={vendor && <><Button onClick={() => setImporting(true)}><Icon name="upload" /> Import</Button><Button variant="primary" onClick={() => setCreating(true)}><Icon name="plus" /> New vendor</Button></>} />
       <FilterBar>
         <SearchInput value={search} onChange={setSearch} placeholder="Search name, phone or GSTIN…" />
         <SelectFilter label="Status" value={status} onChange={setStatus} options={VENDOR_STATUS_FILTER} />
@@ -389,6 +405,7 @@ export function VendorsScreen() {
         ]} />
       <Pager {...list} />
       {creating && <VendorDialog onClose={() => setCreating(false)} onDone={(v) => router.push(`/master/vendors/${v.id}`)} />}
+      {importing && <ImportDialog kind="vendors" onClose={() => setImporting(false)} onDone={list.reload} />}
     </>
   );
 }
@@ -446,10 +463,11 @@ export function VendorDetail({ id }: { id: string }) {
       )}
       <Card title="Contact and terms" className="mb-4">
         <Details cols={4} items={[
-          ["Phone", v.phone], ["Email", v.email], ["GSTIN", v.gstin], ["Payment terms", v.paymentTerms],
+          ["Phone", v.phone], ["Email", v.email], ["GSTIN", v.gstin], ["Payment terms", v.paymentTerms], ["Category", v.category], ["Nature of supply", v.natureOfSupply ? ({ GOODS: "Goods", SERVICES: "Services", BOTH: "Goods and services" } as Record<string, string>)[v.natureOfSupply] ?? v.natureOfSupply : null],
           ["Credit limit", formatMoney(v.creditLimit)], ["Address", v.address], ["Notes", v.notes],
         ]} />
       </Card>
+      <VendorContacts vendorId={v.id} contacts={v.contacts ?? []} canManage={manage} onChanged={q.reload} />
       <Card title="Bank details" className="mb-4">
         <Details cols={3} items={[["Account", v.bankAccount], ["IFSC", v.bankIfsc], ["UPI", v.upiId ?? null]]} />
         {!can("vendor.manage") && <p className="mt-2 text-xs text-ink-500">Bank details are masked; only vendor managers can see them in full.</p>}
@@ -469,6 +487,53 @@ export function VendorDetail({ id }: { id: string }) {
       {dialog === "link" && <LinkVendorDialog vendorId={v.id} materials={materials.items} onClose={() => setDialog(null)} onDone={q.reload} />}
       {dialog && typeof dialog === "object" && <LinkVendorDialog link={dialog} onClose={() => setDialog(null)} onDone={q.reload} />}
     </>
+  );
+}
+
+// ============================================================
+// Vendor contacts (several people to call per vendor)
+// ============================================================
+
+function ContactDialog({ vendorId, contact, onClose, onDone }: { vendorId: string; contact?: VendorContactRow; onClose: () => void; onDone: () => void }) {
+  const [d, setD] = useState({ name: contact?.name ?? "", role: contact?.role ?? "", phone: contact?.phone ?? "", email: contact?.email ?? "", isPrimary: contact?.isPrimary ?? false });
+  const set = (k: "name" | "role" | "phone" | "email") => (e: React.ChangeEvent<HTMLInputElement>) => setD({ ...d, [k]: e.target.value });
+  const body = { name: d.name.trim(), role: d.role.trim() || null, phone: d.phone.trim() || null, email: d.email.trim() || null, isPrimary: d.isPrimary };
+  return (
+    <FormDialog open onClose={onClose} title={contact ? `Edit ${contact.name}` : "New contact"} submitLabel={contact ? "Save" : "Add contact"}
+      onSubmit={() => (contact ? api(`/api/master/vendor-contacts/${contact.id}`, { method: "PATCH", body }) : api(`/api/master/vendors/${vendorId}/contacts`, { method: "POST", body }))} onDone={onDone}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Name" name="name" required><Input value={d.name} onChange={set("name")} required maxLength={120} /></Field>
+        <Field label="Role" name="role" hint="Account manager, delivery desk, accounts…"><Input value={d.role} onChange={set("role")} maxLength={60} /></Field>
+        <Field label="Phone" name="phone"><Input type="tel" value={d.phone} onChange={set("phone")} maxLength={20} /></Field>
+        <Field label="Email" name="email"><Input type="email" value={d.email} onChange={set("email")} maxLength={254} /></Field>
+      </div>
+      <Checkbox label="Main contact" checked={d.isPrimary} onChange={(v) => setD({ ...d, isPrimary: v })} name="isPrimary" />
+    </FormDialog>
+  );
+}
+
+function VendorContacts({ vendorId, contacts, canManage, onChanged }: { vendorId: string; contacts: VendorContactRow[]; canManage: boolean; onChanged: () => void }) {
+  const [dialog, setDialog] = useState<null | "new" | VendorContactRow>(null);
+  return (
+    <Card title="Contacts" className="mb-4" actions={canManage && <Button size="sm" onClick={() => setDialog("new")}><Icon name="plus" /> Add contact</Button>}>
+      <DataTable label="Vendor contacts" rows={contacts} rowKey={(c) => c.id} empty="No contacts yet"
+        columns={[
+          { key: "n", header: "Name", cell: (c) => <span className="font-medium text-ink-900">{c.name}{c.isPrimary && <Badge tone="ok" className="ml-2">Main</Badge>}</span> },
+          { key: "r", header: "Role", cell: (c) => c.role ?? "—" },
+          { key: "p", header: "Phone", cell: (c) => c.phone ?? "—" },
+          { key: "e", header: "Email", cell: (c) => c.email ?? "—" },
+          {
+            key: "a", header: "", cell: (c) => canManage && (
+              <div className="flex justify-end gap-1">
+                <Button size="sm" onClick={() => setDialog(c)} aria-label={`Edit ${c.name}`}>Edit</Button>
+                <ActionButton size="sm" variant="danger" action={() => api(`/api/master/vendor-contacts/${c.id}`, { method: "DELETE" })} onDone={onChanged} success="Contact removed"
+                  confirm={{ title: `Remove ${c.name}?`, message: "They are taken off this vendor's contact list.", danger: true, confirmLabel: "Remove" }}>Remove</ActionButton>
+              </div>
+            ),
+          },
+        ]} />
+      {dialog && <ContactDialog vendorId={vendorId} contact={dialog === "new" ? undefined : dialog} onClose={() => setDialog(null)} onDone={onChanged} />}
+    </Card>
   );
 }
 

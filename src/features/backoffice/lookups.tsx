@@ -14,8 +14,8 @@ import { useShell } from "@/lib/shellContext";
 import { Select } from "@/components/ui/Form";
 import { shortRef } from "@/lib/format";
 
-export type MaterialRow = { id: string; sku: string; name: string; active: boolean; baseUnitId: string; baseUnit?: { code: string } | null; category?: { name: string } | null; categoryId: string | null; reorderLevel: string; minStock: string; parLevel?: string | null; taxPct: string; perishable: boolean; trackBatch: boolean; purchaseUnitId: string | null; preferredVendorId: string | null };
-export type VendorRow = { id: string; name: string; companyName: string | null; phone: string | null; email: string | null; gstin: string | null; active: boolean; status?: string; statusReason?: string | null; upiId?: string | null; approvedAt?: string | null; paymentTerms: string | null; creditLimit: string; address: string | null; bankAccount: string | null; bankIfsc: string | null; notes: string | null };
+export type MaterialRow = { id: string; sku: string; name: string; brand?: string | null; active: boolean; baseUnitId: string; baseUnit?: { code: string } | null; category?: { name: string } | null; categoryId: string | null; reorderLevel: string; minStock: string; parLevel?: string | null; taxPct: string; perishable: boolean; trackBatch: boolean; purchaseUnitId: string | null; preferredVendorId: string | null };
+export type VendorRow = { id: string; name: string; companyName: string | null; category?: string | null; natureOfSupply?: string | null; phone: string | null; email: string | null; gstin: string | null; active: boolean; status?: string; statusReason?: string | null; upiId?: string | null; approvedAt?: string | null; paymentTerms: string | null; creditLimit: string; address: string | null; bankAccount: string | null; bankIfsc: string | null; notes: string | null };
 export type UnitRow = { id: string; code: string; name: string; kind: string; active: boolean };
 export type DepartmentRow = { id: string; name: string; kind: string; active: boolean; outletId: string };
 

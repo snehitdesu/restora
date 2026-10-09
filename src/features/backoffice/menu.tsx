@@ -36,7 +36,7 @@ export type ModifierGroup = { id: string; name: string; minSelect: number; maxSe
 export type Variant = { id: string; menuItemId: string; name: string; priceDelta: Num; active: boolean; consumptionFactor?: Num };
 export type MenuItem = {
   id: string; name: string; description: string | null; categoryId: string | null; category: { id: string; name: string } | null;
-  price: Num; taxPct: Num; station: string; posCode: string | null; isVeg: boolean; active: boolean; soldOut: boolean;
+  price: Num; taxPct: Num; station: string; posCode: string | null; cuisineTags?: string | null; isVeg: boolean; active: boolean; soldOut: boolean;
   variants: Variant[]; modifierGroups: Array<{ id: string; groupId: string; group: ModifierGroup }>;
   outletOverrides?: Array<{ price: Num | null; active: boolean; soldOut: boolean }>;
   effectivePrice?: number; offered?: boolean; effectiveSoldOut?: boolean;
@@ -81,10 +81,12 @@ function OutletState({ item }: { item: MenuItem }) {
 function ItemDialog({ item, categories, onClose, onDone }: { item?: MenuItem; categories: MenuCategory[]; onClose: () => void; onDone: (r: MenuItem) => void }) {
   const [d, setD] = useState({
     name: item?.name ?? "", categoryId: item?.categoryId ?? "", price: item ? String(toNumber(item.price)) : "", taxPct: item ? String(toNumber(item.taxPct)) : "5",
-    station: item?.station ?? "KITCHEN", posCode: item?.posCode ?? "", isVeg: item?.isVeg ?? true, description: item?.description ?? "",
+    station: item?.station ?? "KITCHEN", posCode: item?.posCode ?? "", isVeg: item?.isVeg ?? true, description: item?.description ?? "", tags: item?.cuisineTags ?? "",
   });
   const set = (k: keyof typeof d) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setD({ ...d, [k]: e.target.value });
-  const body = { name: d.name.trim(), categoryId: opt(d.categoryId), price: Number(d.price), taxPct: Number(d.taxPct), station: d.station, posCode: opt(d.posCode), isVeg: d.isVeg, description: opt(d.description) };
+  const tags = splitTags(d.tags);
+  // Editing always sends the tags (an empty list clears them); creating sends them only when there are some.
+  const body = { name: d.name.trim(), categoryId: opt(d.categoryId), price: Number(d.price), taxPct: Number(d.taxPct), station: d.station, posCode: opt(d.posCode), isVeg: d.isVeg, description: opt(d.description), ...(item || tags.length ? { cuisineTags: tags } : {}) };
   return (
     <FormDialog open onClose={onClose} title={item ? `Edit ${item.name}` : "New menu item"} size="lg" submitLabel={item ? "Save" : "Create item"}
       description="The menu is shared by every outlet; outlets can override price and availability."
@@ -101,6 +103,7 @@ function ItemDialog({ item, categories, onClose, onDone }: { item?: MenuItem; ca
         <Field label="Tax %" name="taxPct" required><Input type="number" inputMode="decimal" step="0.01" min="0" max="28" required value={d.taxPct} onChange={set("taxPct")} /></Field>
         <Field label="Kitchen station" name="station"><Select value={d.station} onChange={set("station")}>{Station.values.map((s) => <option key={s} value={s}>{humanize(s)}</option>)}</Select></Field>
         <Field label="POS code" name="posCode" hint="External POS item code (unique)"><Input value={d.posCode} onChange={set("posCode")} maxLength={64} /></Field>
+        <Field label="Cuisine tags" name="cuisineTags" hint="Comma separated: south-indian, breakfast. Up to 8."><Input value={d.tags} onChange={set("tags")} maxLength={220} /></Field>
       </div>
       <Field label="Description" name="description"><Textarea value={d.description} onChange={set("description")} maxLength={1000} /></Field>
       <Checkbox label="Vegetarian" checked={d.isVeg} onChange={(v) => setD({ ...d, isVeg: v })} name="isVeg" />
@@ -140,21 +143,28 @@ function StarterMenuOffer({ outletId, onDone }: { outletId: string; onDone: () =
   );
 }
 
+/** "South Indian, breakfast" -> ["south-indian", "breakfast"] (the server validates again). */
+export const splitTags = (text: string): string[] => [...new Set(text.split(",").map((t) => t.trim().toLowerCase().replace(/\s+/g, "-")).filter(Boolean))];
+const tagsOf = (i: { cuisineTags?: string | null }) => (i.cuisineTags ? i.cuisineTags.split(",") : []);
+
 export function MenuItemsScreen() {
   const router = useRouter();
   const { outletId, outlet } = useShell();
   const { orgManage } = useMenuAuthority();
   const [categoryId, setCategoryId] = useState("");
   const [status, setStatus] = useState("");
+  const [tag, setTag] = useState("");
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
   const menu = useMenu(outletId, categoryId);
+  const allTags = useMemo(() => [...new Set((menu.data ?? []).flatMap(tagsOf))].sort(), [menu.data]);
   const cats = useCategories();
   const term = search.toLowerCase();
   const rows = useMemo(
     () =>
       (menu.data ?? [])
-        .filter((i) => !term || `${i.name} ${i.posCode ?? ""}`.toLowerCase().includes(term))
+        .filter((i) => !term || `${i.name} ${i.posCode ?? ""} ${i.cuisineTags ?? ""}`.toLowerCase().includes(term))
+        .filter((i) => !tag || tagsOf(i).includes(tag))
         .filter((i) =>
           status === "available" ? i.active && i.offered !== false && !i.effectiveSoldOut
           : status === "soldout" ? i.active && i.offered !== false && i.effectiveSoldOut
@@ -162,9 +172,9 @@ export function MenuItemsScreen() {
           : status === "inactive" ? !i.active
           : true
         ),
-    [menu.data, term, status]
+    [menu.data, term, status, tag]
   );
-  const pager = useLocalPage(rows, 50, `${term}|${status}|${categoryId}`);
+  const pager = useLocalPage(rows, 50, `${term}|${status}|${categoryId}|${tag}`);
   return (
     <>
       <PageHeader title="Menu items" subtitle={`Organization menu, with price and availability at ${outlet?.name ?? "this outlet"}`}
@@ -173,14 +183,15 @@ export function MenuItemsScreen() {
         <SearchInput value={search} onChange={setSearch} placeholder="Search name or POS code…" />
         <SelectFilter label="Category" value={categoryId} onChange={setCategoryId} options={(cats.data ?? []).map((c) => ({ value: c.id, label: c.name }))} />
         <SelectFilter label="Status" value={status} onChange={setStatus} options={STATUS_FILTERS} />
+        {allTags.length > 0 && <SelectFilter label="Cuisine" value={tag} onChange={setTag} options={allTags.map((t) => ({ value: t, label: t }))} />}
       </FilterBar>
       <DataTable label="Menu items" rows={pager.items} rowKey={(r) => r.id} loading={menu.loading} error={menu.error} onRetry={menu.reload}
-        empty={search || status || categoryId ? "No items match these filters" : "No menu items yet"}
+        empty={search || status || categoryId || tag ? "No items match these filters" : "No menu items yet"}
         emptyHint={!search && !status && !categoryId && orgManage ? "Create categories first, then add items." : undefined}
         onRowClick={(r) => router.push(`/menu/items/${r.id}`)}
         columns={[
           { key: "n", header: "Item", cell: (r) => <span className="font-medium text-ink-900"><VegMark veg={r.isVeg} />{r.name}</span> },
-          { key: "c", header: "Category", cell: (r) => r.category?.name ?? "—" },
+          { key: "c", header: "Category", cell: (r) => <span>{r.category?.name ?? "—"}{tagsOf(r).length > 0 && <span className="mt-0.5 flex flex-wrap gap-1">{tagsOf(r).map((t) => <Badge key={t} tone="neutral">{t}</Badge>)}</span>}</span> },
           { key: "s", header: "Station", cell: (r) => humanize(r.station) },
           { key: "p", header: "Menu price", numeric: true, cell: (r) => formatMoney(r.price) },
           { key: "e", header: "Price here", numeric: true, cell: (r) => <span>{formatMoney(r.effectivePrice ?? r.price)}{r.outletOverrides?.[0]?.price != null && <Badge tone="info" className="ml-1">Override</Badge>}</span> },
@@ -286,7 +297,7 @@ export function MenuItemDetail({ id }: { id: string }) {
           <>
             <Button onClick={() => setDialog("edit")}><Icon name="edit" /> Edit</Button>
             <ActionButton variant={item.soldOut ? "success" : "secondary"} action={() => setOrg({ soldOut: !item.soldOut })} success={item.soldOut ? "Back in stock everywhere" : "Marked sold out everywhere"} onDone={menu.reload}
-              confirm={item.soldOut ? undefined : { title: `Mark ${item.name} sold out everywhere?`, message: "Every outlet stops selling it until it is marked back in stock. To 86 it at one outlet only, use the outlet controls below." }}>
+              confirm={item.soldOut ? undefined : { title: `Mark ${item.name} sold out everywhere?`, message: "Every outlet stops selling it until it is marked back in stock, and any connected delivery platform is told to switch it off. To 86 it at one outlet only, use the outlet controls below." }}>
               {item.soldOut ? "Back in stock (all outlets)" : "Sold out (all outlets)"}
             </ActionButton>
             <ActionButton variant={item.active ? "danger" : "success"} action={() => setOrg({ active: !item.active })} success={item.active ? "Removed from the menu" : "Back on the menu"} onDone={menu.reload}
@@ -298,7 +309,7 @@ export function MenuItemDetail({ id }: { id: string }) {
       <Card className="mb-4">
         <Details cols={4} items={[
           ["Menu price", formatMoney(item.price)], ["Tax", formatPct(item.taxPct)], ["Station", humanize(item.station)], ["POS code", item.posCode],
-          ["Type", item.isVeg ? "Veg" : "Non-veg"], ["Sold out (all outlets)", item.soldOut ? "Yes" : "No"], ["Description", item.description],
+          ["Type", item.isVeg ? "Veg" : "Non-veg"], ["Cuisine tags", item.cuisineTags ? item.cuisineTags.split(",").join(", ") : null], ["Sold out (all outlets)", item.soldOut ? "Yes" : "No"], ["Description", item.description],
         ]} />
       </Card>
 

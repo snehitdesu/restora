@@ -146,6 +146,20 @@ describe("menu items", () => {
     expect(posts()[1].body).toEqual({ name: "Veg Biryani", categoryId: "c2", price: 280, taxPct: 5, station: "KITCHEN", posCode: "PT", isVeg: true });
   });
 
+  it("cuisine tags are cleaned up when sent: lower case, dashes for spaces, no duplicates; an edit can clear them", async () => {
+    state.routes = { "GET /api/menu": () => [item({ cuisineTags: "snack,hot" })], "GET /api/menu/categories": () => cats, "POST /api/menu/items": () => ({ id: "m9" }), "PATCH /api/menu/items/m1": () => ({ id: "m1" }) };
+    const first = renderAs(<MenuItemsScreen />, ["menu.view", "menu.manage"], { orgWide: true });
+    await userEvent.click(await screen.findByRole("button", { name: /New item/ }));
+    const d = await dialog();
+    await userEvent.type(within(d).getByLabelText(/^Name/), "Masala Dosa");
+    setValue(within(d).getByLabelText(/^Price/), "120");
+    await userEvent.type(within(d).getByLabelText(/^Cuisine tags/), "South Indian, Breakfast, breakfast,");
+    await userEvent.click(within(d).getByRole("button", { name: "Create item" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0].body).toMatchObject({ name: "Masala Dosa", cuisineTags: ["south-indian", "breakfast"] });
+    first.unmount();
+  });
+
   it("an outlet manager overrides price / sold-out / offered for this outlet only; no structural actions", async () => {
     state.routes = {
       "GET /api/menu": () => [item()], "GET /api/menu/categories": () => cats, "GET /api/menu/modifier-groups": () => [group],
