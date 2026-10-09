@@ -211,7 +211,8 @@ jobs:
       - name: "E2E: install the Playwright browser (Chromium)"
         run: npx playwright install --with-deps chromium
       - name: "Build: web (next build, PostgreSQL client)"
-        run: DATABASE_URL=$PG_BASE/aharos_e2e npm run build
+        # Not `npm run build`: that regenerates the default (SQLite) Prisma client first and would undo the step above.
+        run: DATABASE_URL=$PG_BASE/aharos_e2e npx next build
       - name: "E2E: every browser spec on PostgreSQL (committed migrations via migrate deploy, then the demo seed)"
         env:
           E2E_DATABASE_URL: ${{ env.PG_BASE }}/aharos_e2e
