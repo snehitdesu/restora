@@ -4,19 +4,20 @@ import { useState } from "react";
 import Link from "next/link";
 import { api, describeError } from "@/lib/api/client";
 import { Button } from "@/components/ui/Button";
-import { FormAlert, inputClass, readFields, focusFirstEmpty } from "@/components/auth/PasswordFields";
+import { FormAlert, inputClass, readFields, focusFirstEmpty, useHydrated } from "@/components/auth/PasswordFields";
 
 export function ForgotPasswordForm() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const hydrated = useHydrated();
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (busy) return;
     const entered = readFields(e.currentTarget, "email");
     const email = entered.email.trim();
-    // The button stays actionable (the page may not have hydrated when the address was typed); an empty field is explained.
+    // An empty field is explained, not silently refused: the button is enabled as soon as the page is interactive.
     if (!email) {
       setError("Enter the email address of your account");
       focusFirstEmpty(entered);
@@ -45,7 +46,7 @@ export function ForgotPasswordForm() {
             <input id="email" name="email" type="email" autoComplete="username" required className={inputClass} />
           </div>
           {error && <FormAlert>{error}</FormAlert>}
-          <Button type="submit" variant="primary" size="lg" className="w-full" loading={busy}>
+          <Button type="submit" variant="primary" size="lg" className="w-full" loading={busy} disabled={!hydrated}>
             Request reset link
           </Button>
         </form>

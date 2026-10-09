@@ -3,12 +3,13 @@
 import { useState } from "react";
 import { api } from "@/lib/api/client";
 import { Button } from "@/components/ui/Button";
-import { PasswordInput, FormAlert, PASSWORD_HINT, passwordErrorMessage, readFields, focusFirstEmpty } from "@/components/auth/PasswordFields";
+import { PasswordInput, FormAlert, PASSWORD_HINT, passwordErrorMessage, readFields, focusFirstEmpty, useHydrated } from "@/components/auth/PasswordFields";
 
 export function ChangePasswordForm({ email }: { email: string }) {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const hydrated = useHydrated();
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -43,7 +44,7 @@ export function ChangePasswordForm({ email }: { email: string }) {
       <PasswordInput id="confirm-password" label="Repeat new password" autoComplete="new-password" />
       {error && <FormAlert>{error}</FormAlert>}
       {done && <FormAlert tone="success">{done}</FormAlert>}
-      <Button type="submit" variant="primary" size="lg" className="w-full" loading={busy}>
+      <Button type="submit" variant="primary" size="lg" className="w-full" loading={busy} disabled={!hydrated}>
         Change password
       </Button>
     </form>

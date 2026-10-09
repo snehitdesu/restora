@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { ApiError, describeError } from "@/lib/api/client";
 import { PASSWORD_MIN_LENGTH } from "@/constants/password";
 
@@ -20,6 +21,16 @@ export function PasswordInput({ id, label, autoComplete, hint }: { id: string; l
       {hint && <p id={`${id}-hint`} className="mt-1 text-xs text-ink-500">{hint}</p>}
     </div>
   );
+}
+
+/**
+ * False until the page's scripts are running. A server-rendered form's submit button waits for it: a click before then would be a
+ * plain browser POST that only re-renders the page (the answer never shows), whereas text typed before then is still read at submit.
+ */
+export function useHydrated(): boolean {
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => setHydrated(true), []);
+  return hydrated;
 }
 
 /** What is in the form's fields right now, by field name. */

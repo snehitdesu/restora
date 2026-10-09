@@ -157,7 +157,7 @@ test.describe.serial("account provisioning and password lifecycle", () => {
     expect(messages[0]).toBe(messages[1]);
   });
 
-  test("PWD-007 an address typed before the page hydrates is kept and used; an empty form is explained, not silently disabled", async ({ browser }) => {
+  test("PWD-007 an address typed before the page hydrates is kept and used once it is interactive; an empty form is explained, not silently disabled", async ({ browser }) => {
     const { context, page } = await freshPage(browser);
     // A slow phone: hold back the scripts so the form is on screen but not yet interactive.
     await page.route("**/_next/static/**/*.js", async (route) => {
@@ -166,6 +166,8 @@ test.describe.serial("account provisioning and password lifecycle", () => {
     });
     await page.goto("/forgot-password", { waitUntil: "commit" });
     await page.getByLabel("Email").fill(email);
+    // Not interactive yet: the button waits, so an early click cannot turn into a plain browser POST that loses the answer.
+    await expect(page.getByRole("button", { name: "Request reset link" })).toBeDisabled();
     await page.waitForLoadState("load");
     await page.unroute("**/_next/static/**/*.js");
     await expect(page.getByLabel("Email")).toHaveValue(email);

@@ -142,6 +142,7 @@ shutdown fix, on this host and on the previous release).
 | Found by | Defect | Fix |
 |---|---|---|
 | CI (SQLite E2E) | forgot-password button stayed disabled when the address was typed before the page hydrated (a slow phone gets this too) | read the fields on submit like the sign-in form; `PWD-007` |
+| CI (PostgreSQL E2E, next run) | with that fix the button was enabled before hydration, so `PWD-005` clicked it early: a plain browser POST that re-rendered the page and never showed the answer (the old disabled state had hidden this race) | the forgot / change-password buttons wait until the page is interactive (`useHydrated`), not until something is typed; `PWD-007` asserts the early state |
 | CI (PostgreSQL E2E job) | `npm run build` regenerated the SQLite client under the PostgreSQL build | the job builds with `npx next build` |
 | Desktop tests | the desktop migrator could not run migrations containing triggers | statement splitter understands `CREATE TRIGGER … BEGIN … END` |
 | Test run | the Coders' Cafe reset was refused by the append-only triggers | reset runs inside `withAppendOnlyGuardsOff` (disposable-database wipe only) |
