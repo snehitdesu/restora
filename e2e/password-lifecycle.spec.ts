@@ -157,6 +157,34 @@ test.describe.serial("account provisioning and password lifecycle", () => {
     expect(messages[0]).toBe(messages[1]);
   });
 
+  test("PWD-007 an address typed before the page hydrates is kept and used; an empty form is explained, not silently disabled", async ({ browser }) => {
+    const { context, page } = await freshPage(browser);
+    // A slow phone: hold back the scripts so the form is on screen but not yet interactive.
+    await page.route("**/_next/static/**/*.js", async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue();
+    });
+    await page.goto("/forgot-password", { waitUntil: "commit" });
+    await page.getByLabel("Email").fill(email);
+    await page.waitForLoadState("load");
+    await page.unroute("**/_next/static/**/*.js");
+    await expect(page.getByLabel("Email")).toHaveValue(email);
+    await page.waitForFunction(() => typeof (window as unknown as { next?: unknown }).next === "object");
+    await page.getByRole("button", { name: "Request reset link" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "If an active account exists" })).toBeVisible();
+    await context.close();
+
+    const empty = await freshPage(browser);
+    await empty.page.goto("/forgot-password");
+    await empty.page.waitForFunction(() => typeof (window as unknown as { next?: unknown }).next === "object");
+    const button = empty.page.getByRole("button", { name: "Request reset link" });
+    await expect(button).toBeEnabled();
+    await button.click();
+    await expect(empty.page.getByRole("alert").filter({ hasText: "Enter the email address of your account" })).toBeVisible();
+    await expect(empty.page.getByLabel("Email")).toBeFocused();
+    await empty.context.close();
+  });
+
   test("PWD-006 the change-password page requires a session", async ({ browser }) => {
     const { context, page } = await freshPage(browser);
     await page.goto("/account/password");

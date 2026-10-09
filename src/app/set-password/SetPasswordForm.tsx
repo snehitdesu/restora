@@ -4,12 +4,10 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api/client";
 import { Button } from "@/components/ui/Button";
-import { PasswordInput, FormAlert, PASSWORD_HINT, passwordErrorMessage } from "@/components/auth/PasswordFields";
+import { PasswordInput, FormAlert, PASSWORD_HINT, passwordErrorMessage, readFields, focusFirstEmpty } from "@/components/auth/PasswordFields";
 
 export function SetPasswordForm() {
   const [token, setToken] = useState<string | null | undefined>(undefined);
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [doneEmail, setDoneEmail] = useState<string | null>(null);
@@ -21,14 +19,20 @@ export function SetPasswordForm() {
     if (t) window.history.replaceState(null, "", window.location.pathname);
   }, []);
 
-  async function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (busy || !token) return;
-    if (password !== confirm) return setError("The passwords do not match");
+    const entered = readFields(e.currentTarget, "new-password", "confirm-password");
+    if (Object.values(entered).some((v) => !v)) {
+      setError("Choose a password and repeat it");
+      focusFirstEmpty(entered);
+      return;
+    }
+    if (entered["new-password"] !== entered["confirm-password"]) return setError("The passwords do not match");
     setBusy(true);
     setError(null);
     try {
-      const res = await api<{ email: string }>("/api/auth/password/complete", { method: "POST", body: { token, password } });
+      const res = await api<{ email: string }>("/api/auth/password/complete", { method: "POST", body: { token, password: entered["new-password"] } });
       setDoneEmail(res.email);
     } catch (err) {
       setError(passwordErrorMessage(err));
@@ -55,10 +59,10 @@ export function SetPasswordForm() {
   }
   return (
     <form method="post" onSubmit={submit} className="space-y-4" noValidate>
-      <PasswordInput id="new-password" label="New password" value={password} onChange={setPassword} autoComplete="new-password" hint={PASSWORD_HINT} />
-      <PasswordInput id="confirm-password" label="Repeat new password" value={confirm} onChange={setConfirm} autoComplete="new-password" />
+      <PasswordInput id="new-password" label="New password" autoComplete="new-password" hint={PASSWORD_HINT} />
+      <PasswordInput id="confirm-password" label="Repeat new password" autoComplete="new-password" />
       {error && <FormAlert>{error}</FormAlert>}
-      <Button type="submit" variant="primary" size="lg" className="w-full" loading={busy} disabled={!password || !confirm}>
+      <Button type="submit" variant="primary" size="lg" className="w-full" loading={busy}>
         Set password
       </Button>
     </form>
