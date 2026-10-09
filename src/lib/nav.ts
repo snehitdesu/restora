@@ -86,7 +86,7 @@ export const NAV_ITEMS: NavItem[] = [
 
   { href: "/analytics", label: "Analytics", icon: "chart", anyOf: ["reports.view", "finance.view", "inventory.view", "purchase.view"], section: "Insights", description: "Sales, menu, stock and finance analytics with rule-based insights" },
   { href: "/analytics/menu-engineering", label: "Menu engineering", icon: "star", permission: "reports.view", section: "Insights", description: "Stars, plow-horses, puzzles and dogs from real sales and costs" },
-  { href: "/analytics/prep-times", label: "Kitchen prep times", icon: "clock", permission: "kot.view", section: "Insights", description: "How long dishes really take, measured from the KDS" },
+  { href: "/analytics/prep-times", label: "Dish prep times", icon: "clock", permission: "kot.view", section: "Insights", description: "How long dishes really take, measured from the KDS" },
   { href: "/analytics/departments", label: "Department costing", icon: "factory", permission: "reports.view", section: "Insights", description: "Department P&L and daily costing" },
   { href: "/reports", label: "Reports", icon: "chart", anyOf: ["reports.view", "inventory.view", "purchase.view", "finance.view", "customer.view"], section: "Insights", description: "Report center" },
   { href: "/exports", label: "Exports", icon: "download", permission: "export.run", section: "Insights", description: "Background CSV exports" },

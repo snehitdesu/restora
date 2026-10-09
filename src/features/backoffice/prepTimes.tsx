@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Kitchen prep times: how long dishes really take, measured from the KOT lifecycle (reached the kitchen -> marked READY).
+ * Dish prep times: how long dishes really take, measured from the KOT lifecycle (reached the kitchen -> marked READY).
  * The KDS uses the same numbers to flag a ticket as late before the guest complains.
  */
 import { useState } from "react";
@@ -27,7 +27,7 @@ export function PrepTimesScreen() {
   const r = q.data;
   return (
     <>
-      <PageHeader title="Kitchen prep times" subtitle={`Measured at ${outlet?.name ?? "this outlet"}: from the moment a ticket reaches the kitchen to the moment it is marked ready`} />
+      <PageHeader title="Dish prep times" subtitle={`Measured at ${outlet?.name ?? "this outlet"}: from the moment a ticket reaches the kitchen to the moment it is marked ready`} />
       <FilterBar><SelectFilter label="Period" value={days} onChange={setDays} anyLabel="Last 30 days" options={[{ value: "7", label: "Last 7 days" }, { value: "14", label: "Last 14 days" }, { value: "90", label: "Last 90 days" }, { value: "365", label: "Last year" }]} /></FilterBar>
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Tickets measured" value={r ? r.overall.tickets : "…"} />
