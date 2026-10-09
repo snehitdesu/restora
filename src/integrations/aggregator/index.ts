@@ -41,6 +41,8 @@ export interface AggregatorProvider {
   parseCancellation(payload: unknown): AggregatorCancellation;
   /** Report an order state to the platform. Optional capability. */
   pushStatus?(input: { externalId: string; status: AggregatorOutboundStatus }): Promise<{ providerRef: string }>;
+  /** Switch one dish on or off on the platform's menu for a store (`itemCode` is the dish's POS code). Optional capability. */
+  setItemAvailability?(input: { storeRef: string; itemCode: string; available: boolean }): Promise<{ providerRef: string }>;
   /**
    * Verify the webhook signature. `secret` is the tenant's own signing secret
    * (IntegrationConnection) when one is configured; otherwise the adapter's
@@ -96,6 +98,7 @@ const cancelSchema = z.object({ eventId: z.string().min(1), event: z.literal("or
 export class MockAggregatorProvider implements AggregatorProvider {
   readonly mode = "MOCK" as const;
   readonly pushed: Array<{ externalId: string; status: AggregatorOutboundStatus }> = [];
+  readonly itemsPushed: Array<{ storeRef: string; itemCode: string; available: boolean }> = [];
   eventKind(payload: unknown): "ORDER" | "CANCEL" | "UNKNOWN" {
     const e = stringAt(payload, "event") ?? "order.placed";
     return e === "order.placed" ? "ORDER" : e === "order.cancelled" ? "CANCEL" : "UNKNOWN";
@@ -107,6 +110,10 @@ export class MockAggregatorProvider implements AggregatorProvider {
   async pushStatus(input: { externalId: string; status: AggregatorOutboundStatus }): Promise<{ providerRef: string }> {
     this.pushed.push(input);
     return { providerRef: `mockstatus_${input.externalId}_${input.status}` };
+  }
+  async setItemAvailability(input: { storeRef: string; itemCode: string; available: boolean }): Promise<{ providerRef: string }> {
+    this.itemsPushed.push(input);
+    return { providerRef: `mockitem_${input.storeRef}_${input.itemCode}_${input.available ? "on" : "off"}` };
   }
   constructor(
     readonly name: string = "mock",

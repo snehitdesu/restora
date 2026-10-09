@@ -283,7 +283,7 @@ export async function queueCustomerMessage(ctx: AccessContext, input: CustomerMe
 
 // ---------------- staff-facing ----------------
 
-const listSchema = z.object({ kind: z.enum(["MESSAGE", "AGGREGATOR_STATUS", "ACCOUNTING_VOUCHER"]).optional(), status: z.enum(["PENDING", "SENT", "DELIVERED", "FAILED", "SKIPPED"]).optional(), take: z.coerce.number().int().min(1).max(200).default(50) });
+const listSchema = z.object({ kind: z.enum(["MESSAGE", "AGGREGATOR_STATUS", "AGGREGATOR_ITEM", "ACCOUNTING_VOUCHER"]).optional(), status: z.enum(["PENDING", "SENT", "DELIVERED", "FAILED", "SKIPPED"]).optional(), take: z.coerce.number().int().min(1).max(200).default(50) });
 
 /** Outbox (integration.manage): what was sent where, status, attempts, last error. */
 export async function listDeliveries(db: PrismaClient, ctx: AccessContext, input: z.input<typeof listSchema> = {}) {
