@@ -21,8 +21,8 @@ mocks or emulators and labelled `NOT EXTERNALLY VERIFIED`: no real payment gatew
 provider, accounting system, spreadsheet, printer, hosting or code-signing certificate has been used. Multi-outlet inside one
 organization works; multi-restaurant tenancy (and PostgreSQL row-level security) is **intentionally deferred**.
 
-Of the 187 rows of the feature audit: {{VERIFIED}} IMPLEMENTED + VERIFIED, {{NEV}} IMPLEMENTED + NOT EXTERNALLY VERIFIED, {{PARTIAL}} PARTIAL,
-{{NOTBUILT}} NOT BUILT (later-phase items: native apps, e-invoice, event / catering modules, own ordering website ...), 3 deferred.
+Of the 187 rows of the feature audit: 130 IMPLEMENTED + VERIFIED, 25 IMPLEMENTED + NOT EXTERNALLY VERIFIED, 9 PARTIAL,
+20 NOT BUILT (later-phase items: native apps, e-invoice, event / catering modules, own ordering website ...), 3 deferred.
 
 Start here: `PROJECT_STATUS.md` (state), `docs/master-feature-audit.md` (feature by feature, source of truth),
 `docs/stabilization-report.md` (evidence and the external-dependency list), `docs/group-delivery-map.md` (where each group lives).

@@ -118,18 +118,23 @@ pass or read from the GitHub Actions run named next to it.
 | Check | Result | Evidence |
 |---|---|---|
 | Typecheck, lint | clean on the SQLite client and on the PostgreSQL client | CI jobs "SQLite" and "PostgreSQL 16" |
-| Vitest, SQLite | {{SQLITE}} | local run and CI |
-| Vitest, PostgreSQL 16 (fresh migrated database) | {{PG}} | local run and CI |
+| Vitest, SQLite | 160 files, 1605 passed, 8 skipped, 0 failed | local run and CI |
+| Vitest, PostgreSQL 16 (fresh migrated database) | 160 files (157 run, 3 skipped), 1582 passed, 31 skipped, 0 failed | local run and CI |
 | Migrations | both histories apply to an empty database; `migrate status` up to date; no drift (committed history vs schema, deployed database vs schema) | CI |
-| Browser E2E, SQLite, production build | {{E2E_SQLITE}} | CI run {{RUN}} |
-| Browser E2E, PostgreSQL 16 | {{E2E_PG}} | CI run {{RUN}} |
-| Investor business flow | {{INVESTOR}} | CI run {{RUN}} |
-| Desktop: build with payload secret scan, E2E, packaging, packaged-app verification (fuses, upgrade from the previous release, launch attacks, asar integrity), DMG | Windows, macOS arm64, macOS x64 | CI run {{RUN}} |
+| Browser E2E, SQLite, production build | 133/133 (5 sign-in setups + 128 specs), CI | CI run 24 (`2e5a1d4`; later commits: see below) |
+| Browser E2E, PostgreSQL 16 | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) | CI run 24 (`2e5a1d4`; later commits: see below) |
+| Investor business flow | 3/3, CI | CI run 24 (`2e5a1d4`; later commits: see below) |
+| Desktop: build with payload secret scan, E2E, packaging, packaged-app verification (fuses, upgrade from the previous release, launch attacks, asar integrity), DMG | Windows, macOS arm64, macOS x64 | CI run 24 (`2e5a1d4`; later commits: see below) |
 | Backup → destroy → restore drill on the current schema | 10/10 in 38 s, append-only triggers intact after the restore | `docs/production-infrastructure.md` §8.0 |
 | End-to-end HTTP load (PostgreSQL 16, production build, mock providers) | 0 correctness violations, 0 deadlocks, outbox drained; only non-200: documented `503 Busy` on contended goods-receipt posting | §7.1 |
 | Accessibility, responsive | axe WCAG 2.1 A / AA at a phone and a desktop width on every screen, ten viewports 320-1920 px: serious / critical findings fail the suite; the guest split-bill screen is scanned too | `e2e/quality-sweep.spec.ts`, `QR-004` |
 | Secret sweep | no key material, credential, `.env`, database or dump is tracked; the only hits are fake strings in tests and a UI placeholder | `git grep` patterns, this pass |
 | Dead-code sweep | 22 unreferenced exports removed; found one notification path that was never wired (below) | commit "Wire the operational notifications…" |
+
+Run 24 verified the branch through `2e5a1d4`. Four commits came after it and are covered by the final CI run: the 08:00 check's single lookup,
+the cuisine report (XC-06, PARTIAL), the graceful-shutdown refusal grace (found by the runtime verification script below), and documentation.
+The local re-runs on that head: Vitest SQLite 160 files, 1605 passed, 8 skipped; PostgreSQL 160 files, 1582 passed, 31 skipped; `scripts/ops/verify-runtime.mjs` 18/18 (it was 17/18 before the
+shutdown fix, on this host and on the previous release).
 
 ### 8.2 Defects found and fixed in this phase
 

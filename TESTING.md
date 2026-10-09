@@ -3,11 +3,11 @@
 ## Current totals (2026-10-09, end of the master program)
 | Suite | Command | Result |
 |---|---|---|
-| Unit + DB integration, SQLite | `npm test` | {{SQLITE}} |
-| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | {{PG}} |
-| Browser E2E (production build), SQLite | `npm run e2e` | {{E2E_SQLITE}} |
-| Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | {{E2E_PG}} |
-| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | {{INVESTOR}} |
+| Unit + DB integration, SQLite | `npm test` | 160 files, 1605 passed, 8 skipped, 0 failed |
+| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 160 files (157 run, 3 skipped), 1582 passed, 31 skipped, 0 failed |
+| Browser E2E (production build), SQLite | `npm run e2e` | 133/133 (5 sign-in setups + 128 specs), CI |
+| Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) |
+| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3, CI |
 | Desktop E2E + packaged-app verification | `npm run desktop:build && npm run desktop:e2e`; `npx electron-builder --dir && npm run desktop:verify` | Windows, macOS arm64 and macOS x64 in CI: build, E2E, packaging (fuses, asar integrity, upgrade from the previous release, launch attacks), DMG |
 | Backup / restore drill, load test | `node scripts/ops/backup-drill.mjs`, `node scripts/ops/load-test.mjs` | 2026-10-09 on the current schema: drill 10/10; load run 0 correctness violations (`docs/production-infrastructure.md` §7.1, §8.0). PITR drill and post-deploy smoke last run 2026-10-05 |
 

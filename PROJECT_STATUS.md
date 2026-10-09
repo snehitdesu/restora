@@ -7,8 +7,8 @@ historical record up to Phase 5B and are kept as written._
 
 ## Current status (2026-10-09)
 Groups 1-9 of the master program are implemented on branch `claude/serene-ramanujan-rmvdss` (PR #1 into `main`).
-Of the 187 audited rows: **{{VERIFIED}} IMPLEMENTED + VERIFIED, {{NEV}} IMPLEMENTED + NOT EXTERNALLY VERIFIED (mock / emulator only),
-{{PARTIAL}} PARTIAL, {{NOTBUILT}} NOT BUILT, 3 INTENTIONALLY DEFERRED** (multi-outlet / multi-restaurant). Nothing is claimed live
+Of the 187 audited rows: **130 IMPLEMENTED + VERIFIED, 25 IMPLEMENTED + NOT EXTERNALLY VERIFIED (mock / emulator only),
+9 PARTIAL, 20 NOT BUILT, 3 INTENTIONALLY DEFERRED** (multi-outlet / multi-restaurant). Nothing is claimed live
 that has not run against its provider.
 
 | Group | Contents | State |
@@ -25,8 +25,8 @@ that has not run against its provider.
 | QR-08, notifications | order again / split the bill from the phones; purchase-approval, reservation, low-stock and vendor-dues notifications | IMPLEMENTED + VERIFIED |
 
 **Verified at the final commit** (details and dates: `docs/stabilization-report.md` §8): typecheck and lint clean on both Prisma clients;
-Vitest {{SQLITE}} on SQLite and {{PG}} on PostgreSQL 16; both migration histories apply to an empty database with no drift; browser E2E
-{{E2E}}; investor flow 3/3; desktop build, E2E, packaging and DMG on Windows and both macOS architectures in CI; backup / restore
+Vitest 160 files, 1605 passed, 8 skipped, 0 failed on SQLite and 160 files (157 run, 3 skipped), 1582 passed, 31 skipped, 0 failed on PostgreSQL 16; both migration histories apply to an empty database with no drift; browser E2E
+133/133 on SQLite and on PostgreSQL 16 in CI; investor flow 3/3; desktop build, E2E, packaging and DMG on Windows and both macOS architectures in CI; backup / restore
 drill 10/10 and an end-to-end load run with zero correctness violations on the current schema; axe (WCAG 2.1 A / AA) and ten-viewport
 sweeps clean. The browser suites are CI release gates.
 
