@@ -9,14 +9,24 @@
 #              verification (fuses, upgrade, launch attacks, asar integrity)
 #   desktop-macos — the same on macOS, once per arch (Apple Silicon + Intel
 #              runners), plus the RESTORA.app + DMG for that arch
+#   web-e2e  — the web release gate: every browser spec (e2e/*.spec.ts) against the
+#              production build in real Chromium on SQLite, then the investor
+#              acceptance suite (Coders' Cafe, Razorpay emulator)
+#   web-e2e-postgres — the same browser specs on PostgreSQL 16 (production path):
+#              fresh database, committed migrations, demo seed, `next start`
 #
 # Every step is named for what it proves, so a red step says which area failed.
 # Nothing is reset or pushed: no `db push`, no `--force-reset`, no `|| true`.
 name: ci
 
+# Pushes to main and every pull request run CI (a branch with a pull request would
+# otherwise run everything twice, once for the push and once for the pull request: the
+# macOS runners are the expensive part). `workflow_dispatch` runs it on any branch by hand.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -136,6 +146,86 @@ jobs:
         env:
           TEST_DATABASE_URL: ${{ env.PG_BASE }}/aharos_test
         run: npx vitest run
+
+  web-e2e:
+    name: Web E2E (real browser, production build, SQLite) + investor acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DATABASE_URL: file:./ci-build.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: Prisma generate (SQLite client)
+        run: npx prisma generate
+      - name: "E2E: install the Playwright browser (Chromium)"
+        run: npx playwright install --with-deps chromium
+      - name: "E2E: build, then every browser spec on the production build (serial, one seeded SQLite database)"
+        run: npm run e2e
+      - name: "E2E: investor acceptance (real Coders' Cafe menu, Razorpay emulator, cash) on the same build"
+        run: npm run e2e:investor
+      - name: Keep the report and traces when a spec fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-e2e-failure
+          path: |
+            e2e/.report
+            e2e/.results
+            e2e/.report-investor
+            e2e/.results-investor
+          retention-days: 7
+          if-no-files-found: ignore
+
+  web-e2e-postgres:
+    name: Web E2E (real browser, production build, PostgreSQL 16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aharos
+          POSTGRES_PASSWORD: aharos
+          POSTGRES_DB: aharos_ci
+          TZ: Asia/Kolkata
+          PGTZ: Asia/Kolkata
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aharos" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PG_BASE: postgresql://aharos:aharos@localhost:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - name: Install dependencies
+        run: npm ci
+      - name: "PostgreSQL: create the fresh, disposable E2E database"
+        run: docker exec ${{ job.services.postgres.id }} createdb -U aharos aharos_e2e
+      - name: Generate the PostgreSQL schema and Prisma client
+        run: npm run db:pg:schema && npx prisma generate --schema prisma/postgres/schema.prisma
+      - name: "E2E: install the Playwright browser (Chromium)"
+        run: npx playwright install --with-deps chromium
+      - name: "Build: web (next build, PostgreSQL client)"
+        run: DATABASE_URL=$PG_BASE/aharos_e2e npm run build
+      - name: "E2E: every browser spec on PostgreSQL (committed migrations via migrate deploy, then the demo seed)"
+        env:
+          E2E_DATABASE_URL: ${{ env.PG_BASE }}/aharos_e2e
+        run: npx playwright test
+      - name: Keep the report and traces when a spec fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-e2e-postgres-failure
+          path: |
+            e2e/.report
+            e2e/.results
+          retention-days: 7
+          if-no-files-found: ignore
 
   desktop:
     name: Desktop (Windows) build, E2E and packaged-app verification
