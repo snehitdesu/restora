@@ -231,7 +231,7 @@ export function CampaignDetailScreen({ id }: { id: string }) {
           <p className="text-sm text-ink-700">Guests who have not been written to yet are dropped. Messages already sent stay sent.</p>
         </Dialog>
       )}
-      <p className="mt-4 text-sm text-ink-500">Guests&apos; own preferences are on <Link className="text-brand-600 hover:underline" href="/customers">their profiles</Link>.</p>
+      <p className="mt-4 text-sm text-ink-500">Guests&apos; own preferences are on <Link className="text-brand-600 underline underline-offset-2 hover:no-underline" href="/customers">their profiles</Link>.</p>
     </>
   );
 }

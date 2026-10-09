@@ -17,6 +17,7 @@ import { Card, PageHeader } from "@/components/ui/Page";
 import { EmptyState, ErrorState, LoadingState } from "@/components/ui/States";
 import { ActionButton } from "@/components/ui/Confirm";
 import { DataTable } from "@/components/ui/Table";
+import { ScrollRegion } from "@/components/ui/ScrollRegion";
 import { PeopleNav } from "@/features/backoffice/staff";
 import type { RosterView } from "@/server/services/staffOps";
 
@@ -108,7 +109,7 @@ export function RosterScreen() {
           {grid.error ? <ErrorState error={grid.error} onRetry={grid.reload} /> : !g ? <LoadingState /> : g.days[0].shifts.length === 0 ? (
             <EmptyState title="No shifts yet" hint="Add the shifts this outlet runs (for example Lunch and Dinner), then put people on them." icon="clock" />
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-ink-200 bg-paper">
+            <ScrollRegion label="Roster (scrolls sideways)" className="rounded-lg border border-ink-200 bg-paper">
               <table className="w-full min-w-[56rem] border-collapse text-left text-sm">
                 <caption className="sr-only">Roster for the week starting {from}</caption>
                 <thead className="bg-ink-50 text-xs text-ink-600">
@@ -142,7 +143,7 @@ export function RosterScreen() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollRegion>
           )}
         </>
       )}

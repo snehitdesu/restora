@@ -187,7 +187,8 @@
   background: #efe6d6;
   border-bottom: 1px solid rgb(36 24 15 / 0.08);
   font-size: 0.75rem;
-  color: var(--s-muted);
+  /* The back window of the hero is drawn at 90% opacity; the muted ink would then dip under 4.5:1 on this bar. */
+  color: var(--s-ink-2);
 }
 .s-window-bar i { width: 0.5rem; height: 0.5rem; border-radius: 999px; background: rgb(36 24 15 / 0.16); }
 .s-window-bar span { margin-inline: auto; transform: translateX(-1rem); font-weight: 500; }

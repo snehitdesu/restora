@@ -79,7 +79,7 @@ function SettingsForm({ initial, coupons, canManage, onSaved }: { initial: Setti
             <Field label="Win-back after (days without a visit)" name="winbackAfterDays"><Input type="number" inputMode="numeric" min={7} max={730} step={1} value={s.winbackAfterDays} onChange={(e) => set("winbackAfterDays", Number(e.target.value))} disabled={!canManage || !s.winbackCouponId} /></Field>
             <Field label="Ask again no sooner than (days)" name="winbackCooldownDays"><Input type="number" inputMode="numeric" min={7} max={730} step={1} value={s.winbackCooldownDays} onChange={(e) => set("winbackCooldownDays", Number(e.target.value))} disabled={!canManage || !s.winbackCouponId} /></Field>
           </div>
-          <p className="mt-2 text-xs text-ink-500">{coupons.length ? "Choose a coupon so the guest has a reason to come back." : <>Create a coupon first on the <Link className="text-brand-600 hover:underline" href="/customers/coupons">Coupons</Link> screen.</>}</p>
+          <p className="mt-2 text-xs text-ink-500">{coupons.length ? "Choose a coupon so the guest has a reason to come back." : <>Create a coupon first on the <Link className="text-brand-600 underline underline-offset-2 hover:no-underline" href="/customers/coupons">Coupons</Link> screen.</>}</p>
         </Card>
         <Card title="Feedback after the meal">
           <Checkbox label="Ask guests how it was" checked={s.feedbackEnabled} onChange={(v) => set("feedbackEnabled", v)} disabled={!canManage} />

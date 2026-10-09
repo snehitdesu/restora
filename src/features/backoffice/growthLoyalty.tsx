@@ -123,7 +123,7 @@ export function LoyaltyScreen() {
               <p className="text-sm text-ink-700">
                 {settings.data.referralEnabled ? <Badge tone="ok">On</Badge> : <Badge tone="neutral">Off</Badge>}{" "}
                 The guest who refers gets <strong>{settings.data.referrerPoints}</strong> points, the friend gets <strong>{settings.data.refereePoints}</strong>, once the friend&apos;s first order of at least {formatMoney(settings.data.referralMinOrderValue)} is paid. At most {settings.data.referralMonthlyCap} rewards per guest each month.
-                Each guest&apos;s code is on their <Link className="text-brand-600 hover:underline" href="/customers">profile</Link>.
+                Each guest&apos;s code is on their <Link className="text-brand-600 underline underline-offset-2 hover:no-underline" href="/customers">profile</Link>.
               </p>
             ) : <p className="text-sm text-ink-500">Loading…</p>}
           </Card>

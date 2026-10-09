@@ -101,7 +101,7 @@ export function ManagerApp({ outletId, outletName, perms }: { outletId: string; 
       ) : (
         <AlertsPanel d={data!} />
       )}
-      {data && tab !== "staff" && <p className="mt-4 text-center text-xs text-ink-400">Updated {formatDateTime(data.generatedAt, data.timezone)} · refreshes every minute</p>}
+      {data && tab !== "staff" && <p className="mt-4 text-center text-xs text-ink-500">Updated {formatDateTime(data.generatedAt, data.timezone)} · refreshes every minute</p>}
     </MobileShell>
   );
 }

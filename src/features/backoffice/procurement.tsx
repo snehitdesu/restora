@@ -291,8 +291,8 @@ export function PurchaseOrderDetail({ id }: { id: string }) {
           </Card>
           <DataTable label="PO lines" rows={d.lines ?? []} rowKey={(l) => l.id}
             columns={[
-              { key: "m", header: "Material", cell: (l) => <span className={l.lineStatus === "REJECTED" ? "text-ink-400 line-through" : ""}>{materialLabel(materials.byId, l.materialId)}{l.lineStatus === "REJECTED" && <Badge tone="bad" className="ml-2 no-underline">Rejected</Badge>}</span> },
-              { key: "q", header: "Ordered", numeric: true, cell: (l) => <span className={l.lineStatus === "REJECTED" ? "text-ink-400 line-through" : ""}>{formatQty(l.qty)} {unitOf(materials.byId, l.materialId)}{l.requestedQty && Number(l.requestedQty) !== Number(l.qty) ? <span className="block text-xs text-ink-500 no-underline">was {formatQty(l.requestedQty)}</span> : null}</span> },
+              { key: "m", header: "Material", cell: (l) => <span className={l.lineStatus === "REJECTED" ? "text-ink-500 line-through" : ""}>{materialLabel(materials.byId, l.materialId)}{l.lineStatus === "REJECTED" && <Badge tone="bad" className="ml-2 no-underline">Rejected</Badge>}</span> },
+              { key: "q", header: "Ordered", numeric: true, cell: (l) => <span className={l.lineStatus === "REJECTED" ? "text-ink-500 line-through" : ""}>{formatQty(l.qty)} {unitOf(materials.byId, l.materialId)}{l.requestedQty && Number(l.requestedQty) !== Number(l.qty) ? <span className="block text-xs text-ink-500 no-underline">was {formatQty(l.requestedQty)}</span> : null}</span> },
               { key: "r", header: "Received", numeric: true, cell: (l) => <span className={Number(l.receivedQty) >= Number(l.qty) ? "text-ok-500" : Number(l.receivedQty) > 0 ? "text-warn-500" : ""}>{formatQty(l.receivedQty)}</span> },
               { key: "rate", header: "Rate", numeric: true, cell: (l) => formatMoney(l.rate) },
               { key: "tax", header: "Tax %", numeric: true, cell: (l) => formatQty(l.taxPct) },
@@ -369,7 +369,7 @@ export function ReviewLinesDialog({ po, materials, onClose, onDone }: { po: PO; 
           const name = m?.name ?? "Material";
           return (
             <li key={l.id} className="flex flex-wrap items-center gap-2 py-2">
-              <span className={`min-w-0 flex-1 text-sm ${rejected[l.id] ? "text-ink-400 line-through" : ""}`}>{name}<span className="block text-xs text-ink-500">{formatMoney(l.rate)} each{Number(l.taxPct) ? ` + ${formatQty(l.taxPct)}% tax` : ""}</span></span>
+              <span className={`min-w-0 flex-1 text-sm ${rejected[l.id] ? "text-ink-500 line-through" : ""}`}>{name}<span className="block text-xs text-ink-500">{formatMoney(l.rate)} each{Number(l.taxPct) ? ` + ${formatQty(l.taxPct)}% tax` : ""}</span></span>
               <Input type="number" inputMode="decimal" min={0} step="any" aria-label={`Quantity of ${name}`} className="w-24" disabled={rejected[l.id]} value={qty[l.id]} onChange={(e) => setQty((x) => ({ ...x, [l.id]: e.target.value }))} />
               <span className="w-24 text-right text-sm tabular-nums">{formatMoney(money(l))}</span>
               <Button type="button" size="sm" variant={rejected[l.id] ? "secondary" : "danger"} aria-label={rejected[l.id] ? `Put ${name} back` : `Take ${name} off`} onClick={() => setRejected((x) => ({ ...x, [l.id]: !x[l.id] }))}>{rejected[l.id] ? "Put back" : "Take off"}</Button>

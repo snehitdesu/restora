@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Checkbox, Field, Input } from "@/components/ui/Form";
 import { Card } from "@/components/ui/Page";
 import { ErrorState } from "@/components/ui/States";
+import { ScrollRegion } from "@/components/ui/ScrollRegion";
 
 type Consent = { channel: "SMS" | "WHATSAPP" | "EMAIL"; marketing: boolean; transactional: boolean; source: string | null; updatedAt: string | null };
 type Loyalty = { tier: { code: string; name: string; perks: string | null; earnMultiplierPct: number } | null; spend: number; next: { code: string; name: string; remaining: number } | null; configured: boolean };
@@ -36,7 +37,7 @@ function ConsentCard({ customerId, phone, email }: { customerId: string; phone: 
   return (
     <Card title="Offers and messages" bodyClassName="p-0">
       {consent.error ? <ErrorState error={consent.error} onRetry={consent.reload} compact /> : (
-        <div className="overflow-x-auto">
+        <ScrollRegion label="Message preferences (scrolls sideways)">
           <table className="w-full text-sm" aria-label="Message preferences">
             <thead><tr className="border-b border-ink-200 text-left text-[11px] font-semibold uppercase tracking-eyebrow text-ink-600"><th scope="col" className="px-4 py-2.5">Channel</th><th scope="col" className="px-4 py-2.5">Offers and promotions</th><th scope="col" className="px-4 py-2.5">Order and booking messages</th><th scope="col" className="px-4 py-2.5">Last changed</th></tr></thead>
             <tbody>
@@ -54,7 +55,7 @@ function ConsentCard({ customerId, phone, email }: { customerId: string; phone: 
             </tbody>
           </table>
           <p className="border-t border-ink-100 px-4 py-2.5 text-xs text-ink-500">Offers are only sent to guests who agreed, on the channel they agreed to, and carry an unsubscribe link. Never tick “Agreed” on a guest&apos;s behalf unless they told you so.</p>
-        </div>
+        </ScrollRegion>
       )}
     </Card>
   );

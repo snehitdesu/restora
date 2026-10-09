@@ -49,7 +49,7 @@ export function AppShell({ shell, nav, unread, children }: { shell: ShellData; n
             <Icon name="menu" className="h-5 w-5" />
           </button>
           <OutletSwitcher outlets={shell.outlets} outletId={shell.outletId} />
-          <div className="ml-auto flex items-center gap-1.5 sm:gap-2.5">
+          <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2.5">
             <SearchPalette />
             {unread !== null && (
               <Link href="/notifications" className="relative inline-flex h-9 w-9 items-center justify-center rounded-md text-ink-600 transition-colors hover:bg-ink-100 hover:text-ink-900" aria-label={`${unread} unread notifications`}>
@@ -61,14 +61,14 @@ export function AppShell({ shell, nav, unread, children }: { shell: ShellData; n
               <span className="flex h-8 w-8 items-center justify-center rounded-full border border-ink-900 bg-vanilla-200 font-display text-xs font-bold uppercase text-ink-900" aria-hidden>
                 {initials(shell.user.name)}
               </span>
-              <span className="text-right text-sm leading-tight">
+              <span className="hidden text-right text-sm leading-tight xl:block">
                 <span className="block font-medium text-ink-900">{shell.user.name}</span>
                 <span className="block text-xs capitalize text-ink-500">{shell.roles.join(", ").toLowerCase()}</span>
               </span>
             </div>
             <Link href="/account/password" aria-label="Password" className="inline-flex h-9 items-center rounded-md px-2.5 text-sm font-medium text-ink-600 transition-colors hover:bg-ink-100 hover:text-ink-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500" title="Account & password">
-              <Icon name="shield" className="h-4 w-4 sm:mr-1.5" />
-              <span className="hidden sm:inline">Password</span>
+              <Icon name="shield" className="h-4 w-4 xl:mr-1.5" />
+              <span className="hidden xl:inline">Password</span>
             </Link>
             <LogoutButton />
           </div>

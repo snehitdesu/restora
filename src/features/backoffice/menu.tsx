@@ -63,7 +63,7 @@ function useCategories() {
 }
 
 function VegMark({ veg }: { veg: boolean }) {
-  return <span title={veg ? "Veg" : "Non-veg"} aria-label={veg ? "Veg" : "Non-veg"} className={`mr-1.5 inline-block h-2.5 w-2.5 rounded-sm border ${veg ? "border-ok-500 bg-ok-500" : "border-bad-500 bg-bad-500"}`} />;
+  return <span role="img" title={veg ? "Veg" : "Non-veg"} aria-label={veg ? "Veg" : "Non-veg"} className={`mr-1.5 inline-block h-2.5 w-2.5 rounded-sm border ${veg ? "border-ok-500 bg-ok-500" : "border-bad-500 bg-bad-500"}`} />;
 }
 
 /** Availability at the selected outlet, from the server's effective fields. */
