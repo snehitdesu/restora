@@ -59,6 +59,6 @@ webhook, an operator with database access.
 | No RLS | a code-level tenant bug could cross organizations | single-organization deployments for V1; RLS before multi-tenant hosting |
 | `script-src 'unsafe-inline'` | weaker XSS containment | nonce-based CSP |
 | No MFA | stolen password = account | TOTP for owner / manager (post-V1) |
-| In-memory rate limits | per instance only | single instance (V1); shared store before scaling out |
+| Rate limits per process by default | with `RATE_LIMIT_STORE=database` the counters are shared by every instance (one atomic upsert per limited request; a database failure falls back to per-process counting and is logged) | choose `database` when running more than one instance |
 | Unsigned Windows installer | SmartScreen warnings; no publisher identity | code-signing certificate (external) |
 | No customer data erasure workflow | privacy requests handled manually | `docs/data-retention.md` |

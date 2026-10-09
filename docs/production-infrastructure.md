@@ -16,7 +16,7 @@ work (outbox worker, exports, after-commit side effects) · §6 database
 
 | Component | V1 decision |
 |---|---|
-| App | **One** Node.js process (`next start`) behind an HTTPS reverse proxy / load balancer. Rate limits, the export runner and the in-process transaction queues (§6.4) are per process. A second instance is *safe* (the database still guarantees correctness) but weakens rate limits and adds retries. |
+| App | **One** Node.js process (`next start`) behind an HTTPS reverse proxy / load balancer. The export runner and the in-process transaction queues (§6.4) are per process; rate limits are per process unless `RATE_LIMIT_STORE=database` (counters kept in the database, shared by every instance). A second instance is *safe* (the database still guarantees correctness) but adds retries and, without the shared store, multiplies the rate limits. |
 | Database | PostgreSQL 16 (managed or self-hosted). Schema via `npm run db:pg:deploy` (`prisma migrate deploy`) as the owner role; the app connects as the DML-only `restora_app` role (`scripts/ops/pg-roles.sql`). |
 | Files | `EXPORT_DIR` on a persistent private volume. Backups (`BACKUP_DIR`) on separate storage, encrypted, with an off-host copy. |
 | Desktop | Electron + embedded SQLite (single terminal) — see `docs/desktop-architecture.md`; this document covers the web/server deployment. |
@@ -33,7 +33,7 @@ risky-but-legal setting. Messages name the variable only, never its value.
 | `DATABASE_URL` | yes | PostgreSQL URL of the **app role**; size the pool explicitly: `?connection_limit=10&pool_timeout=10` (§6.2). SQLite → warning. |
 | `AUTH_SECRET` | yes | ≥ 32 chars, not the dev placeholder. |
 | `SESSION_TTL_SECONDS`, `SESSION_IDLE_TIMEOUT_SECONDS`, `REAUTH_TTL_SECONDS` | no | positive integers. |
-| `RATE_LIMIT_DISABLED` | no | must not be `true`. `RATE_LIMIT_STORE` must be `memory`. |
+| `RATE_LIMIT_DISABLED` | no | must not be `true`. `RATE_LIMIT_STORE` is `memory` (default, one instance) or `database` (counters in the application database, shared by every instance; recommended on PostgreSQL, and a boot warning says so when it is not set). |
 | `TRUSTED_PROXY_HOPS` | no (default 1) | number of reverse proxies appending to `X-Forwarded-For`. |
 | `PAYMENT_PROVIDER`, `POS_PROVIDER`, `WHATSAPP_PROVIDER`, `EMAIL_PROVIDER`, `GOOGLE_SHEETS_PROVIDER` | no | `mock` refused unless `ALLOW_MOCK_PROVIDERS=true` (non-public test deployments only; warning at every boot). |
 | `PAYMENT_WEBHOOK_SECRET`, `AGGREGATOR_WEBHOOK_SECRET`, `PETPOOJA_WEBHOOK_SECRET`, `CRON_SECRET` | per integration | dev placeholders refused. |
@@ -351,7 +351,7 @@ committed before the failure. Follow §8.3; then enter the paper bills.
 - Desktop: `docs/desktop-architecture.md`, `docs/desktop-release.md`.
 
 ## 10. Known limits (V1)
-- Single app instance (in-memory rate limits; in-process queues; local export files).
+- Single app instance for exports and the in-process queues (local export files). Rate limits can be shared with `RATE_LIMIT_STORE=database`.
 - Settlement throughput is serial per outlet (by design, ~4.5–5/s measured).
 - Residual SSI false positives on concurrent rounds of different orders at
   ≥ 10 simultaneous rounds per outlet (client auto-retries keyed requests).

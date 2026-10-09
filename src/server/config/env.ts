@@ -150,7 +150,7 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
   }
 
   // --- Operational tuning ---
-  if (isSet(env.RATE_LIMIT_STORE) && env.RATE_LIMIT_STORE.toLowerCase() !== "memory") problems.push('RATE_LIMIT_STORE must be "memory" (no shared store is implemented)');
+  if (isSet(env.RATE_LIMIT_STORE) && !["memory", "database"].includes(env.RATE_LIMIT_STORE.trim().toLowerCase())) problems.push('RATE_LIMIT_STORE must be "memory" (one instance) or "database" (counters shared by every instance)');
   if (isSet(env.LOG_LEVEL) && !LOG_LEVELS.includes(env.LOG_LEVEL.toLowerCase())) problems.push(`LOG_LEVEL must be one of ${LOG_LEVELS.join(", ")}`);
   if (isSet(env.LOG_FORMAT) && !["json", "pretty"].includes(env.LOG_FORMAT)) problems.push('LOG_FORMAT must be "json" or "pretty"');
   for (const p of [
@@ -194,6 +194,7 @@ export function productionEnvWarnings(env: NodeJS.ProcessEnv = process.env): str
     if (!isSet(env.ALERT_WEBHOOK_URL)) w.push("ALERT_WEBHOOK_URL is unset: alerts are written to the log only");
     if (!isSet(env.PUBLIC_BASE_URL)) w.push("PUBLIC_BASE_URL is unset: table QR codes use the address the Tables screen is viewed on, which guests' phones may not reach");
     if (!isSet(env.NEXT_PUBLIC_SITE_URL)) w.push("NEXT_PUBLIC_SITE_URL is unset (it must be set when building the website too): the website's canonical links, sitemap and Open Graph URLs point at http://localhost:3000");
+    if (db.startsWith("postgres") && (env.RATE_LIMIT_STORE ?? "memory").trim().toLowerCase() !== "database") w.push("RATE_LIMIT_STORE is not \"database\": login and other limits are counted per process, so each additional instance multiplies them (set RATE_LIMIT_STORE=database when running more than one instance)");
     if (!isSet(env.INTEGRATION_SECRETS_KEY)) w.push("INTEGRATION_SECRETS_KEY is unset: integration secrets are encrypted with a key derived from AUTH_SECRET (rotating AUTH_SECRET then makes them unreadable)");
   }
   return w;

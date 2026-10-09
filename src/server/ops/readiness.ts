@@ -14,6 +14,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/server/db/client";
+import { missingAppendOnlyGuards } from "@/server/db/appendOnly";
 import { log } from "@/server/observability/log";
 import { raiseAlert } from "@/server/observability/alerts";
 import { isDraining } from "@/server/ops/lifecycle";
@@ -23,7 +24,7 @@ import { isDraining } from "@/server/ops/lifecycle";
  * BOTH prisma/migrations (SQLite) and prisma/postgres/migrations —
  * tests/ops/infrastructure.test.ts fails the build otherwise.
  */
-export const EXPECTED_MIGRATION = "20261020100000_staff_ops";
+export const EXPECTED_MIGRATION = "20261021100000_append_only_rate_limit";
 
 export type CheckState = "up" | "down";
 export type MigrationState = "ok" | "pending" | "failed" | "unknown";
@@ -69,6 +70,15 @@ export async function checkMigrations(db: PrismaClient = prisma, now = Date.now(
     if (rows.some((r) => !r.finished_at && !r.rolled_back_at)) state = "failed";
     else if (!rows.some((r) => r.migration_name === EXPECTED_MIGRATION && r.finished_at && !r.rolled_back_at)) state = "pending";
     else state = "ok";
+    // The migrations ran, but the database must also still refuse edits to the audit trail and the ledger (a table rebuild by a
+    // later migration drops triggers silently). Counted as a failed deploy: it should not serve until someone restores them.
+    if (state === "ok") {
+      const missing = await timeout(missingAppendOnlyGuards(db), dbTimeoutMs(), "append-only guard check");
+      if (missing.length) {
+        log.error("readiness: the database no longer refuses edits to the audit trail or the ledger", { event: "append_only_guards_missing", missing });
+        state = "failed";
+      }
+    }
   } catch (e) {
     log.error("readiness: migration check failed", { event: "migration_check_failed", error: e });
     state = "unknown";

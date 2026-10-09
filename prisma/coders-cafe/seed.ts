@@ -20,6 +20,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import { systemContext } from "@/server/auth/context";
 import { hashPassword } from "@/server/auth/password";
 import { importCodersCafeStarter, STARTER_TABLE_CODES } from "@/server/services/starterMenu";
+import { withAppendOnlyGuardsOff } from "@/server/db/appendOnly";
 
 export const CAFE = {
   orgName: "Coders' Cafe",
@@ -100,7 +101,8 @@ export async function seedCodersCafe(db: PrismaClient, opts: { reset?: boolean }
   const existing = await findCafe(db);
   if (existing) {
     if (!opts.reset) throw new Error(`${CAFE.orgName} already exists (organization ${existing.id}); pass reset to rebuild it`);
-    await deleteOrganizationData(db, existing.id);
+    // The audit trail and the ledger refuse deletion (src/server/db/appendOnly.ts); rebuilding the demo café is the one deliberate exception.
+    await withAppendOnlyGuardsOff(db, () => deleteOrganizationData(db, existing.id));
   }
   // Tokens are unique across the database: a leftover table elsewhere holding one would collide.
   const clash = await db.restaurantTable.findFirst({ where: { qrToken: { in: CAFE.tableCodes.map(cafeTableToken) } } });

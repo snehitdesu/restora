@@ -41,8 +41,20 @@ describe("splitSqlStatements", () => {
     const sql = `-- comment; with semicolon\nCREATE TABLE "a;b" (x TEXT DEFAULT 'it''s; fine');\n/* block; */ INSERT INTO t VALUES ('x;y');\nPRAGMA foreign_keys=ON`;
     expect(splitSqlStatements(sql)).toEqual([`CREATE TABLE "a;b" (x TEXT DEFAULT 'it''s; fine')`, "INSERT INTO t VALUES ('x;y')", "PRAGMA foreign_keys=ON"]);
   });
-  it("refuses triggers and unterminated literals instead of guessing", () => {
-    expect(() => splitSqlStatements("CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT 1; END;")).toThrow(UnsafeMigrationSqlError);
+  it("keeps a trigger whole: its body holds ';', the statement ends after the END that closes the BEGIN", () => {
+    const trigger = `CREATE TRIGGER "T_no_update" BEFORE UPDATE ON "T" BEGIN SELECT RAISE(ABORT, 'T is append-only; no end, begin or case here'); END`;
+    expect(splitSqlStatements(`CREATE TABLE a (x INT);\n${trigger};\nCREATE TRIGGER "T_no_delete" BEFORE DELETE ON "T" BEGIN SELECT RAISE(ABORT, 'nope'); END;\nINSERT INTO a VALUES (1);`)).toEqual([
+      "CREATE TABLE a (x INT)",
+      trigger,
+      `CREATE TRIGGER "T_no_delete" BEFORE DELETE ON "T" BEGIN SELECT RAISE(ABORT, 'nope'); END`,
+      "INSERT INTO a VALUES (1)",
+    ]);
+    // A CASE ... END inside the body does not close the trigger early; a body with several statements stays in one piece.
+    const multi = "CREATE TEMP TRIGGER m AFTER INSERT ON a BEGIN UPDATE b SET y = CASE WHEN new.x > 1 THEN 1 ELSE 0 END; DELETE FROM c; END";
+    expect(splitSqlStatements(`${multi}; SELECT 1;`)).toEqual([multi, "SELECT 1"]);
+  });
+  it("refuses a trigger that never closes, and unterminated literals, instead of guessing", () => {
+    expect(() => splitSqlStatements("CREATE TRIGGER t AFTER INSERT ON a BEGIN SELECT 1;")).toThrow(UnsafeMigrationSqlError);
     expect(() => splitSqlStatements("SELECT 'oops;")).toThrow(UnsafeMigrationSqlError);
   });
   it("splits every shipped migration into the same statements a semicolon-at-line-end split gives", () => {

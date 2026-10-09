@@ -41,6 +41,7 @@ import { purgeExpiredSessions } from "@/server/auth/session";
 import { deliverMessage } from "@/server/services/messaging";
 import { pushAggregatorStatus } from "@/server/services/aggregatorSync";
 import { deliverItemAvailability } from "@/server/services/aggregatorMenu";
+import { sweepRateLimitWindows } from "@/server/api/rateLimitDb";
 import { deliverAccountingSync, recoverInterruptedAccountingSync } from "@/server/services/accountingSync";
 import { failStaleExportJobs } from "@/server/services/exportJobs";
 import { webhookClaimStaleMs } from "@/server/services/pos";
@@ -138,7 +139,8 @@ export async function recoverStuckWork(db: PrismaClient = prisma, now = new Date
 export async function housekeeping(db: PrismaClient = prisma, now = new Date()) {
   const sessions = await purgeExpiredSessions(db);
   const tokens = await db.passwordToken.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600_000) } } });
-  if (sessions || tokens.count) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count });
+  const rateLimitWindows = await sweepRateLimitWindows(db, now.getTime());
+  if (sessions || tokens.count || rateLimitWindows) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count, rateLimitWindows });
   return { sessions, passwordTokens: tokens.count };
 }
 

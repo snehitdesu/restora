@@ -15,7 +15,10 @@ cross-outlet negatives; browser test RBAC-004 for outlet isolation). Given that:
      run as a separate owner role.
    - `REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog", "InventoryLedger" FROM <app role>;`
      — verified safe: no code path updates or deletes these rows (the demo seed does,
-     and must run only as the owner role on disposable databases).
+     and must run only as the owner role on disposable databases). **Since migration
+     `20261021100000_append_only_rate_limit` the database also refuses those statements
+     itself, whoever sends them, with triggers on both SQLite and PostgreSQL**
+     (`src/server/db/appendOnly.ts`, `tests/db/append-only.test.ts`); the REVOKE stays as a second layer.
 2. **Required before a second, mutually untrusted organization shares the database:**
    the full design below (per-transaction `set_config` via a Prisma extension,
    `FORCE ROW LEVEL SECURITY`, org + outlet policies, `aharos_admin` for login /

@@ -200,6 +200,15 @@ describe("production configuration (Phase 9)", () => {
     expect(productionEnvWarnings({ ...base, DATABASE_URL: "file:./x.db", AHAROS_DESKTOP: "1" })).toEqual([]);
     expect(productionEnvWarnings({ NODE_ENV: "development" })).toEqual([]);
   });
+
+  it("the shared rate-limit store is accepted, and a PostgreSQL deployment still counting per process is warned about", () => {
+    expect(() => validateProductionEnv({ ...base, RATE_LIMIT_STORE: "database" })).not.toThrow();
+    expect(() => validateProductionEnv({ ...base, RATE_LIMIT_STORE: "Memory" })).not.toThrow();
+    fails({ RATE_LIMIT_STORE: "redis" }, /RATE_LIMIT_STORE must be "memory".*"database"/);
+    expect(productionEnvWarnings({ ...base }).join("\n")).toMatch(/RATE_LIMIT_STORE is not "database"/);
+    expect(productionEnvWarnings({ ...base, RATE_LIMIT_STORE: "database" }).join("\n")).not.toMatch(/RATE_LIMIT_STORE/);
+    expect(productionEnvWarnings({ ...base, DATABASE_URL: "file:./x.db" }).join("\n")).not.toMatch(/RATE_LIMIT_STORE/); // SQLite is one instance
+  });
 });
 
 // ---------------------------------------------------------------- health / readiness / shutdown

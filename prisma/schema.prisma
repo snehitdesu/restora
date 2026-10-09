@@ -2627,3 +2627,15 @@ model ProcurementSettings {
   updatedById           String?
   updatedAt             DateTime @updatedAt
 }
+
+/// Shared rate-limit counters (audit SE-03): one fixed window per key, advanced atomically with a single upsert so that
+/// several app instances count against the same number. Used when RATE_LIMIT_STORE=database; expired windows are swept by
+/// the worker.
+model RateLimitWindow {
+  key     String @id
+  count   Int
+  /// End of the window, milliseconds since the epoch.
+  resetAt BigInt
+
+  @@index([resetAt])
+}

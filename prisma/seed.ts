@@ -17,6 +17,7 @@ import { randomBytes } from "node:crypto";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
 import { hashPassword } from "@/server/auth/password";
+import { withAppendOnlyGuardsOff } from "@/server/db/appendOnly";
 import { businessDateKey } from "@/domain/time";
 import {
   recordPurchaseReceipt,
@@ -59,16 +60,20 @@ async function deleteAll() {
     prisma.vendorMaterial, prisma.vendor,
     prisma.outletMaterialCost, prisma.material, prisma.materialCategory, prisma.unitConversion, prisma.unit,
     prisma.restaurantTable, prisma.floor, prisma.kitchenStation, prisma.department,
-    prisma.attendance, prisma.shift, prisma.leaveRequest, prisma.task,
+    prisma.attendance, prisma.shiftAssignment, prisma.shift, prisma.leaveRequest, prisma.task, prisma.checklistTemplateItem, prisma.checklistTemplate,
+    prisma.procurementSettings, prisma.rateLimitWindow,
     prisma.expense, prisma.pettyCashTxn, prisma.cashDrawerSession, prisma.reconciliationLine, prisma.reconciliation, prisma.bankDeposit, prisma.dayClose,
     prisma.aggregatorOrder, prisma.aggregatorSettlement, prisma.aggregator,
     prisma.anomaly, prisma.notification, prisma.auditLog, prisma.webhookEvent, prisma.unmappedSale, prisma.integrationConnection, prisma.syncJob, prisma.exportJob,
     prisma.session, prisma.membership, prisma.user, prisma.outlet, prisma.organization,
   ];
-  for (const model of ops) {
-    // @ts-expect-error uniform deleteMany across delegates
-    await model.deleteMany({});
-  }
+  // The audit trail and the ledger are protected by the database itself; wiping a disposable demo database is the one time that is lifted.
+  await withAppendOnlyGuardsOff(prisma, async () => {
+    for (const model of ops) {
+      // @ts-expect-error uniform deleteMany across delegates
+      await model.deleteMany({});
+    }
+  });
 }
 
 /**

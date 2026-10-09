@@ -104,7 +104,7 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 
 | ID | Proposal Section | Feature | Current Status | Existing Implementation | Missing Work | Priority | Dependencies | Verification |
 |---|---|---|---|---|---|---|---|---|
-| IN-01 | M03 p6 / S09 p21 | Append-only ledger, balances derived, corrections are new rows | PARTIAL | `InventoryLedger`, `appendLedger` single writer, `recordCorrection`; enforced in the services | the proposal says "the database physically refuses" edits: PostgreSQL triggers / RLS are design only | P0 | SE-08 | `tests/db/invariants.test.ts` |
+| IN-01 | M03 p6 / S09 p21 | Append-only ledger, balances derived, corrections are new rows | IMPLEMENTED + VERIFIED | `InventoryLedger`, `appendLedger` single writer, `recordCorrection`; the database itself refuses UPDATE and DELETE on the ledger (and TRUNCATE on PostgreSQL) with triggers from migration `20261021100000_append_only_rate_limit` on SQLite and PostgreSQL, so not even the schema owner or a hand-typed query can rewrite it; readiness fails if a trigger is missing | none | P0 | SE-08 | `tests/db/invariants.test.ts`, `tests/db/append-only.test.ts` (A1–A5) |
 | IN-02 | M03 p6 | Live stock matrix: materials x departments, qty and value at WAC | IMPLEMENTED + VERIFIED | `stockMatrix` (group 4): every material against every department, qty and flags, valued at average cost for cost viewers only; kitchen sees quantities only and has no export; `/inventory/matrix` | none | P1 | IN-11 | advanced-inventory test (M1), costing-screens test, `e2e/costing.spec.ts` (G4-MX-001, G4-MX-002) |
 | IN-03 | M03 p6 | Stock value grouped by category | IMPLEMENTED + VERIFIED | analytics inventory value by category | none | P2 | | analytics tests |
 | IN-04 | M03 p6 | Below-PAR highlighted, negative stock flagged | IMPLEMENTED + VERIFIED | `lowStock`, `negativeStock`, Stock screen | none | P1 | | |
@@ -301,12 +301,12 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 |---|---|---|---|---|---|---|---|---|
 | SE-01 | S09 p21 | Authentication, opaque sessions, idle timeout, step-up re-auth | IMPLEMENTED + VERIFIED | `src/server/auth/*` | none | P0 | | auth tests, session E2E |
 | SE-02 | | CSRF / origin checks on every state change | IMPLEMENTED + VERIFIED | `assertSameOrigin` | none | P0 | | same-origin tests |
-| SE-03 | | Rate limiting (login, webhooks, guest, reports) | PARTIAL | in-memory limiter | shared store for multi-instance | P0 | hosting | security tests |
+| SE-03 | | Rate limiting (login, webhooks, guest, reports) | IMPLEMENTED + VERIFIED | per-process limiter by default; `RATE_LIMIT_STORE=database` keeps the counters in the application database (`src/server/api/rateLimitDb.ts`, one atomic upsert per limited request, expired windows swept by the worker) so every instance counts against the same number; a database failure falls back to per-process counting and is logged; a PostgreSQL deployment still on the per-process store gets a boot warning | the shared store was exercised with several store objects over one database, never with two real app processes behind a load balancer | P0 | hosting | `tests/api/rate-limit-store.test.ts`, `tests/ops/infrastructure.test.ts`, security tests |
 | SE-04 | | Webhook signatures + idempotency | IMPLEMENTED + VERIFIED | HMAC, `WebhookEvent` unique | none | P0 | | webhook tests |
 | SE-05 | | Payment never trusted from the client; refunds capped at captured | IMPLEMENTED + VERIFIED | `svc/payment.ts` | none | P0 | | idempotency-refunds, payment-balance tests |
 | SE-06 | | Audit log with before / after | IMPLEMENTED + VERIFIED | `AuditLog`, `/audit` | none | P0 | | |
 | SE-07 | | Secrets never sent to the browser; integration secrets encrypted | IMPLEMENTED + VERIFIED | `server/integrations/secrets.ts` | none | P0 | | integrations tests |
-| SE-08 | S09 p21 | Append-only enforced by the database | PARTIAL | service-level only on SQLite | PostgreSQL triggers / RLS | P0 | PostgreSQL deploy | |
+| SE-08 | S09 p21 | Append-only enforced by the database | IMPLEMENTED + VERIFIED | triggers on `AuditLog` and `InventoryLedger` abort UPDATE and DELETE (and TRUNCATE on PostgreSQL) whoever sends them; created by migration `20261021100000_append_only_rate_limit` on both databases; `src/server/db/appendOnly.ts` lifts them only for wiping a disposable database (the demo seed, test fixtures); the readiness check fails if one is missing; `scripts/ops/pg-roles.sql` still revokes the same rights from the app role | PostgreSQL row-level security for tenant isolation is not applied (PA-02) | P0 | PostgreSQL deploy | `tests/db/append-only.test.ts`, `tests/ops/infrastructure.test.ts` |
 | SE-09 | | Background jobs and failure recovery (outbox worker) | IMPLEMENTED + VERIFIED | `src/server/ops/worker.ts` | none | P0 | | ops tests |
 | SE-10 | | Observability: health, metrics, request timing | IMPLEMENTED + VERIFIED | `/api/health/*`, metrics | none | P1 | | config tests |
 | SE-11 | | Production configuration validation | IMPLEMENTED + VERIFIED | `src/server/config/env.ts` | none | P0 | | env-validation tests |
@@ -324,9 +324,9 @@ Counted from the tables above by script (one row = one feature), after the 2026-
 
 | Status | Rows |
 |---|---|
-| IMPLEMENTED + VERIFIED | 125 |
+| IMPLEMENTED + VERIFIED | 128 |
 | IMPLEMENTED + NOT EXTERNALLY VERIFIED | 26 |
-| PARTIAL | 11 |
+| PARTIAL | 8 |
 | NOT BUILT | 22 |
 | INTENTIONALLY DEFERRED | 3 |
 | **Total** | **187** |
