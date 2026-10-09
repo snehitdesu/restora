@@ -25,8 +25,8 @@ const menu = [
   { id: "m1", name: "Dosa", description: null, price: 100, taxPct: 5, station: "KITCHEN", isVeg: true, active: true, soldOut: false, categoryId: "c1", category: { id: "c1", name: "Tiffin", sortOrder: 1 }, variants: [], modifierGroups: [], effectivePrice: 100, offered: true, effectiveSoldOut: false },
 ];
 const board = (tables: unknown[]) => ({ tables, counts: { all: tables.length, available: 1, occupied: tables.length - 1, kitchen: 1, ready: 0, payment: 0 } });
-const freeTable = { id: "t1", code: "T1", capacity: 4, floor: null, status: "AVAILABLE", order: null, tags: ["available"] };
-const busyTable = { id: "t2", code: "T2", capacity: 2, floor: null, status: "OCCUPIED", tags: ["occupied", "kitchen"], order: { id: "o2", status: "SENT", total: 210, paid: 0, due: 210, items: 2, unsent: 0, kots: { live: 1, ready: 0, served: 0, cancelled: 0 }, payment: "UNPAID", openedAt: now, elapsedMinutes: 12, openedBy: "Asha" } };
+const freeTable = { id: "t1", code: "T1", capacity: 4, floor: null, status: "AVAILABLE", order: null, others: [], tags: ["available"] };
+const busyTable = { id: "t2", code: "T2", capacity: 2, floor: null, status: "OCCUPIED", others: [], tags: ["occupied", "kitchen"], order: { id: "o2", status: "SENT", total: 210, paid: 0, due: 210, items: 2, unsent: 0, kots: { live: 1, ready: 0, served: 0, cancelled: 0 }, payment: "UNPAID", openedAt: now, elapsedMinutes: 12, openedBy: "Asha" } };
 
 describe("captain app", () => {
   it("board + filters; a new table's first send is ONE keyed POST, and a retry reuses the key", async () => {

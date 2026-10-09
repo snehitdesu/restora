@@ -50,6 +50,8 @@ export type BoardTable = {
     elapsedMinutes: number;
     openedBy: string | null;
   };
+  /** Other running orders at the same table (a split bill, or guests' own QR orders): the captain switches between them. */
+  others: Array<{ id: string; status: string; total: number; due: number }>;
   /** Which board filters this table matches (besides "all"). */
   tags: Exclude<TableFilter, "all">[];
 };
@@ -74,17 +76,20 @@ export async function tableBoard(db: PrismaClient, ctx: AccessContext, outletId:
   ]);
   const users = await db.user.findMany({ where: { organizationId: ctx.organizationId, id: { in: [...new Set(orders.map((o) => o.createdById).filter((x): x is string => Boolean(x)))] } }, select: { id: true, name: true } });
   const names = new Map(users.map((u) => [u.id, u.name]));
-  // One running order per table is the norm; if there are several, the oldest is shown.
-  const byTable = new Map<string, (typeof orders)[number]>();
-  for (const o of orders) if (o.tableId && !byTable.has(o.tableId)) byTable.set(o.tableId, o);
+  // One running order per table is the norm; with several (a split bill, a guest's QR order next to the captain's) the
+  // oldest is the table's order and the rest are listed beside it.
+  const byTable = new Map<string, Array<(typeof orders)[number]>>();
+  for (const o of orders) if (o.tableId) (byTable.get(o.tableId) ?? byTable.set(o.tableId, []).get(o.tableId)!).push(o);
+  const paidOf = (o: (typeof orders)[number]) => o.payments.reduce((a, p) => a.plus(D(p.amount)).minus(p.refunds.reduce((r, x) => r.plus(D(x.amount)), D(0))), D(0));
 
   const out: BoardTable[] = tables.map((t) => {
-    const o = byTable.get(t.id);
+    const [o, ...rest] = byTable.get(t.id) ?? [];
     if (!o) {
       const tags: BoardTable["tags"] = t.status === "AVAILABLE" ? ["available"] : ["occupied"];
-      return { id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, order: null, tags };
+      return { id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, order: null, others: [], tags };
     }
-    const paid = o.payments.reduce((a, p) => a.plus(D(p.amount)).minus(p.refunds.reduce((r, x) => r.plus(D(x.amount)), D(0))), D(0));
+    const others = rest.map((r) => ({ id: r.id, status: r.status, total: m2(r.total), due: m2(D(r.total).minus(paidOf(r)).isNegative() ? 0 : D(r.total).minus(paidOf(r))) }));
+    const paid = paidOf(o);
     const total = D(o.total);
     const kots = { live: o.kots.filter((k) => LIVE_KOT.includes(k.status)).length, ready: o.kots.filter((k) => k.status === "READY").length, served: o.kots.filter((k) => k.status === "SERVED").length, cancelled: o.kots.filter((k) => k.status === "CANCELLED").length };
     const payment = paid.lte(0) ? "UNPAID" : paid.gte(total) ? "PAID" : "PARTIAL";
@@ -93,7 +98,7 @@ export async function tableBoard(db: PrismaClient, ctx: AccessContext, outletId:
     if (kots.ready) tags.push("ready");
     if (o.status === "BILLED" || payment === "PARTIAL") tags.push("payment");
     return {
-      id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, tags,
+      id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, tags, others,
       order: {
         id: o.id, status: o.status, total: m2(total), paid: m2(paid), due: m2(total.minus(paid).isNegative() ? 0 : total.minus(paid)),
         items: o._count.items, unsent: o.items.length, kots, payment,

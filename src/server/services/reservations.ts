@@ -40,6 +40,8 @@ export const OVERLAP_MINUTES = 90;
 export const SLOT_MINUTES = 15;
 const ACTIVE_RES: ResStatus[] = ["BOOKED", "CONFIRMED", "SEATED"];
 const CLOSED_ORDER = ["PAID", "CANCELLED", "REFUNDED"];
+/** The note given to the booking made when a waitlist party is seated: bookkeeping, not something for the kitchen. */
+export const WALKIN_NOTE_PREFIX = "Walk-in from waitlist:";
 
 function actor(ctx: AccessContext): string | null {
   return ctx.userId === "system" ? null : ctx.userId;
@@ -61,7 +63,7 @@ export function occupancySlots(at: Date): Date[] {
 }
 
 /** Claim the table's slots for this reservation; a unique violation means someone else holds them. */
-async function lockSlots(tx: Tx, ctx: AccessContext, tableId: string, reservationId: string, at: Date) {
+export async function lockSlots(tx: Tx, ctx: AccessContext, tableId: string, reservationId: string, at: Date) {
   try {
     await tx.reservationSlot.createMany({ data: occupancySlots(at).map((slot) => ({ organizationId: ctx.organizationId, tableId, slot, reservationId })) });
   } catch (e) {
@@ -70,12 +72,12 @@ async function lockSlots(tx: Tx, ctx: AccessContext, tableId: string, reservatio
   }
 }
 
-async function releaseSlots(tx: Tx, reservationId: string) {
+export async function releaseSlots(tx: Tx, reservationId: string) {
   await tx.reservationSlot.deleteMany({ where: { reservationId } });
 }
 
 /** Throw if the table already has an active reservation overlapping the time. */
-async function assertNoTableConflict(tx: Tx, ctx: AccessContext, tableId: string, at: Date, excludeId?: string) {
+export async function assertNoTableConflict(tx: Tx, ctx: AccessContext, tableId: string, at: Date, excludeId?: string) {
   const windowStart = new Date(at.getTime() - OVERLAP_MINUTES * 60000);
   const windowEnd = new Date(at.getTime() + OVERLAP_MINUTES * 60000);
   const clash = await tx.reservation.findFirst({
@@ -307,7 +309,7 @@ export async function promoteWaitlistEntry(ctx: AccessContext, entryId: string, 
     await tx.waitlistEntry.update({ where: { id: entryId }, data: { status: "SEATED" } });
     await tx.restaurantTable.update({ where: { id: tableId }, data: { status: "OCCUPIED" } });
     const reservation = await tx.reservation.create({
-      data: { organizationId: ctx.organizationId, outletId: entry.outletId, tableId, partySize: entry.partySize, reservedAt: now, status: "SEATED", notes: `Walk-in from waitlist: ${entry.customerName}`, createdById: actor(ctx) },
+      data: { organizationId: ctx.organizationId, outletId: entry.outletId, tableId, partySize: entry.partySize, reservedAt: now, status: "SEATED", notes: `${WALKIN_NOTE_PREFIX} ${entry.customerName}`, createdById: actor(ctx) },
     });
     await lockSlots(tx, ctx, tableId, reservation.id, now);
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "WaitlistEntry", entityId: entryId, outletId: entry.outletId, before: { status: entry.status }, after: { status: "SEATED", tableId, reservationId: reservation.id } });

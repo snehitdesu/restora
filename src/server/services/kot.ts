@@ -29,7 +29,7 @@ const onPostgres = () => /^postgres(ql)?:/.test(process.env.DATABASE_URL ?? "");
  * predicate lock, no extra connection; a rolled-back order may leave a gap.
  * SQLite serializes writers, so max + 1 is safe and stays gap-free there.
  */
-async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
+export async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
   if (onPostgres()) {
     const [row] = await tx.$queryRaw<{ n: number }[]>`SELECT nextval('"kot_number_seq"')::int AS n`;
     return Number(row.n);

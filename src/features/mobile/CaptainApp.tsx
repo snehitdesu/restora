@@ -10,6 +10,8 @@
  * the server confirms: a double tap, a lost response or a retry after a dead
  * network replays the original order / round instead of creating a second one.
  * Board and order refresh by polling (15 s / 10 s); there is no offline queue.
+ * A running order can be moved to another table, merged with another, or split into
+ * bills (OrderActions); a table with several bills lets the captain switch between them.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -22,6 +24,7 @@ import { newIdempotencyKey } from "@/lib/idempotency";
 import { needsConfiguration } from "@/features/pos/modifiers";
 import { ModifierDialog } from "@/features/pos/components/ModifierDialog";
 import { UpsellStrip, type UpsellHint } from "@/features/pos/components/UpsellStrip";
+import { OrderActions } from "@/features/mobile/OrderActions";
 import type { CartLine } from "@/features/pos/cart";
 import type { MenuItemDTO, OrderDTO } from "@/features/pos/types";
 import type { BoardTable, TableFilter } from "@/server/services/mobile";
@@ -87,6 +90,11 @@ export function CaptainApp({ outletId, outletName, perms, timeZone }: { outletId
     setTab("table");
   };
   const refreshBoard = () => void poller.current?.refresh();
+  // An order moved to another table: load the board again first, so the new table already shows the order when it opens.
+  const followOrder = async (tableId: string) => {
+    await poller.current?.refresh();
+    setSelected(tableId);
+  };
 
   return (
     <MobileShell
@@ -143,13 +151,13 @@ export function CaptainApp({ outletId, outletName, perms, timeZone }: { outletId
           )}
         </section>
       )}
-      {tab === "table" && (table ? <TablePanel key={table.id} outletId={outletId} table={table} perms={perms} online={online} onChanged={refreshBoard} onBack={() => setTab("tables")} /> : <EmptyState title="Pick a table" hint="Open a table from the Tables tab." icon="table" />)}
+      {tab === "table" && (table ? <TablePanel key={table.id} outletId={outletId} table={table} tables={board?.tables ?? []} perms={perms} online={online} onChanged={refreshBoard} onMoved={followOrder} onBack={() => setTab("tables")} /> : <EmptyState title="Pick a table" hint="Open a table from the Tables tab." icon="table" />)}
       {tab === "alerts" && <AlertCenter timeZone={timeZone} />}
     </MobileShell>
   );
 }
 
-function TablePanel({ outletId, table, perms, online, onChanged, onBack }: { outletId: string; table: BoardTable; perms: CaptainPerms; online: boolean; onChanged: () => void; onBack: () => void }) {
+function TablePanel({ outletId, table, tables, perms, online, onChanged, onMoved, onBack }: { outletId: string; table: BoardTable; tables: BoardTable[]; perms: CaptainPerms; online: boolean; onChanged: () => void; onMoved: (tableId: string) => void | Promise<void>; onBack: () => void }) {
   const toast = useToast();
   const [order, setOrder] = useState<FullOrder | null>(null);
   const [orderId, setOrderId] = useState<string | null>(table.order?.id ?? null);
@@ -258,12 +266,25 @@ function TablePanel({ outletId, table, perms, online, onChanged, onBack }: { out
   const unsent = order?.items.filter((i) => !kotOfItem.has(i.id)) ?? [];
   const paid = (order?.payments ?? []).filter((p) => p.status === "SUCCESS" || p.status === "PARTIAL").reduce((a, p) => a + toNumber(p.amount) - (p.refunds ?? []).reduce((r, x) => r + toNumber(x.amount), 0), 0);
   const total = order ? toNumber(order.total) : 0;
+  // Every running order at this table, oldest first (several after a split bill, or beside a guest's own QR order).
+  const bills = [...(table.order ? [{ id: table.order.id, total: table.order.total }] : []), ...table.others.map((o) => ({ id: o.id, total: o.total }))];
   const draftEstimate = draft.reduce((a, l) => a + l.qty * (l.unitPrice + l.modifiersPerUnit), 0);
 
   if (loading) return <LoadingState label="Loading order…" />;
   return (
     <div className="space-y-3">
       <button type="button" onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-brand-700"><Icon name="chevronLeft" /> All tables</button>
+
+      {bills.length > 1 && (
+        <div role="group" aria-label="Bills at this table" className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+          {bills.map((b, n) => (
+            <button key={b.id} type="button" aria-pressed={b.id === orderId} onClick={() => { setOrderId(b.id); setOrder(null); setLoading(true); }}
+              className={`shrink-0 rounded-full border px-3.5 py-2 text-sm font-medium ${b.id === orderId ? "border-brand-600 bg-brand-600 text-white" : "border-ink-300 bg-paper text-ink-700"}`}>
+              Bill {n + 1} · {formatMoney(b.total)}
+            </button>
+          ))}
+        </div>
+      )}
 
       {order && (
         <section aria-label="Order status" className="rounded-xl border border-ink-200 bg-paper p-3 shadow-card">
@@ -320,6 +341,11 @@ function TablePanel({ outletId, table, perms, online, onChanged, onBack }: { out
             ))}
           </ul>
         </section>
+      )}
+
+      {order && !closed && perms.modify && orderId === order.id && (
+        <OrderActions order={order} table={table} tables={tables} paid={paid}
+          onMoved={onMoved} onChanged={async (showOrderId) => { if (showOrderId) { setOrderId(showOrderId); setOrder(null); setLoading(true); } else if (orderId) await loadOrder(orderId, true); onChanged(); }} />
       )}
 
       {canAdd && !closed && (
