@@ -35,6 +35,7 @@ import { assertOutletInOrg } from "@/server/db/outletGuard";
 import { assertCan } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
 import { type Client, type Tx, runInTx, assertTransition } from "@/server/services/_workflow";
+import { notify } from "@/server/services/notifications";
 
 export const OVERLAP_MINUTES = 90;
 export const SLOT_MINUTES = 15;
@@ -145,6 +146,9 @@ export async function createReservation(ctx: AccessContext, input: z.input<typeo
     });
     if (data.tableId) await lockSlots(tx, ctx, data.tableId, reservation.id, data.reservedAt);
     await writeAudit(tx, ctx, { action: "CREATE", entityType: "Reservation", entityId: reservation.id, outletId: data.outletId, after: { reservedAt: data.reservedAt, tableId: data.tableId, partySize: data.partySize } });
+    const outlet = await tx.outlet.findUniqueOrThrow({ where: { id: data.outletId }, select: { timezone: true } });
+    const when = new Intl.DateTimeFormat("en-IN", { timeZone: outlet.timezone, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true }).format(data.reservedAt);
+    await notify.reservation(tx, ctx, data.outletId, `Party of ${data.partySize}, ${when}`);
     return reservation;
   });
 }

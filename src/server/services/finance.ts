@@ -559,6 +559,3 @@ export async function computePnL(db: PrismaClient, ctx: AccessContext, filter: A
     payments: pays,
   };
 }
-
-// Re-export for convenience so callers can build reconciliation status literals safely.
-export const ReconStatuses = ReconciliationStatus.values;

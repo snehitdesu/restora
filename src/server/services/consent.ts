@@ -80,12 +80,6 @@ export async function mayMessage(db: PrismaClient | Tx, organizationId: string, 
   return purpose === "MARKETING" ? r?.marketing === true : r?.transactional !== false;
 }
 
-/** Of these guests, who said yes to marketing on this channel (campaign audiences). */
-export async function marketingOptedIn(db: PrismaClient, organizationId: string, channel: MessageChannel, customerIds?: string[]): Promise<Set<string>> {
-  const rows = await db.customerConsent.findMany({ where: { organizationId, channel, marketing: true, ...(customerIds ? { customerId: { in: customerIds } } : {}) }, select: { customerId: true } });
-  return new Set(rows.map((r) => r.customerId));
-}
-
 /** Counts for the Growth screen. */
 export async function consentSummary(db: PrismaClient, ctx: AccessContext) {
   assertCan(ctx, "growth.view");

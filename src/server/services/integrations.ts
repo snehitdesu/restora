@@ -77,7 +77,6 @@ const view = (c: ConnectionRow) => ({
   config: c.config ? (JSON.parse(c.config) as Record<string, unknown>) : null,
   lastCheckedAt: c.lastCheckedAt, lastSuccessAt: c.lastSuccessAt, lastFailureAt: c.lastFailureAt, lastError: c.lastError, updatedAt: c.updatedAt,
 });
-export type IntegrationView = ReturnType<typeof view>;
 
 function validateFor(d: z.output<typeof upsertSchema>) {
   if (WEBHOOK_KINDS.has(d.kind) && !d.externalRef) throw new ValidationError("This integration needs the provider's account / store id", { fieldErrors: { externalRef: ["Required"] } });

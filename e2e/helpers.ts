@@ -189,3 +189,14 @@ export async function confirmPasswordIfPrompted(page: Page, done: Locator, passw
   if (await dlg.isVisible()) await confirmPassword(page, password);
   await expect(done).toBeVisible();
 }
+
+/** WCAG 2.1 A / AA scan of the page as it is now (axe-core): serious and critical violations fail the test. */
+export async function expectNoSeriousA11yViolations(page: Page) {
+  await page.addScriptTag({ path: path.join(process.cwd(), "node_modules", "axe-core", "axe.min.js") });
+  const violations = await page.evaluate(async () => {
+    const axe = (window as unknown as { axe: { run: (ctx: Document, opts: unknown) => Promise<{ violations: Array<{ id: string; impact: string; help: string; nodes: Array<{ target: string[] }> }> }> } }).axe;
+    const r = await axe.run(document, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"] }, resultTypes: ["violations"] });
+    return r.violations.filter((v) => v.impact === "serious" || v.impact === "critical").map((v) => `${v.id} (${v.impact}): ${v.help}: ${v.nodes.slice(0, 3).map((n) => n.target.join(" ")).join(" | ")}`);
+  });
+  expect(violations).toEqual([]);
+}

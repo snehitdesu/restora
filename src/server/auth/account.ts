@@ -79,9 +79,6 @@ let delivery: PasswordLinkDelivery | null = null;
 export function setPasswordLinkDelivery(fn: PasswordLinkDelivery | null): void {
   delivery = fn;
 }
-export function passwordLinkDeliveryConfigured(): boolean {
-  return delivery !== null;
-}
 
 /**
  * Always resolves the same way whether or not the account exists (no account

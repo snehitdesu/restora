@@ -21,7 +21,6 @@ import { prisma } from "@/server/db/client";
 import { type AccessContext, NotFoundError, ValidationError, ForbiddenError } from "@/server/db/scope";
 import { can, type Permission } from "@/server/auth/rbac";
 import { type Client, type Tx, runInTx } from "@/server/services/_workflow";
-import { lowStock } from "@/server/services/inventory";
 import { getNotificationProvider, type NotificationChannel, type SendResult } from "@/integrations/notification";
 
 export const NotificationType = [
@@ -37,7 +36,7 @@ export type NotificationTypeT = (typeof NotificationType)[number];
 export const NOTIFICATION_PERMISSION: Record<NotificationTypeT, Permission | null> = {
   LOW_STOCK: "inventory.view",
   PURCHASE_APPROVAL: "purchase.approve",
-  VENDOR_DUE: "finance.view",
+  VENDOR_DUE: "vendor.pay",
   RESERVATION: "reservation.manage",
   ORDER_READY: "order.view",
   NEW_ORDER: "order.view",
@@ -202,24 +201,12 @@ export async function markAllRead(ctx: AccessContext, db: Client = prisma): Prom
 const DAY = 24 * 60;
 
 export const notify = {
-  lowStock: (ctx: AccessContext, outletId: string, count: number, db?: Client) =>
-    createNotification(ctx, { outletId, type: "LOW_STOCK", title: "Low stock alert", body: `${count} item(s) at or below reorder level`, dedupeWindowMinutes: DAY }, db),
-  purchaseApproval: (ctx: AccessContext, outletId: string, poNumber: string, db?: Client) =>
-    createNotification(ctx, { outletId, type: "PURCHASE_APPROVAL", title: "Purchase order awaiting approval", body: poNumber, dedupeWindowMinutes: DAY }, db),
-  vendorDue: (ctx: AccessContext, outletId: string, amount: number, db?: Client) =>
-    createNotification(ctx, { outletId, type: "VENDOR_DUE", title: "Vendor payment due", body: `Outstanding ₹${amount}`, dedupeWindowMinutes: DAY }, db),
-  reservation: (ctx: AccessContext, outletId: string, when: Date, db?: Client) =>
-    createNotification(ctx, { outletId, type: "RESERVATION", title: "New reservation", body: when.toISOString() }, db),
-  orderReady: (ctx: AccessContext, outletId: string, orderId: string, db?: Client) =>
-    createNotification(ctx, { outletId, type: "ORDER_READY", title: "Order ready", body: orderId, dedupeWindowMinutes: 60 }, db),
-  anomaly: (ctx: AccessContext, outletId: string | undefined, message: string, db?: Client) =>
-    createNotification(ctx, { outletId, type: "ANOMALY", title: "Anomaly detected", body: message }, db),
+  lowStock: (tx: Tx, ctx: AccessContext, outletId: string, count: number) =>
+    createNotificationTx(tx, ctx, { outletId, type: "LOW_STOCK", title: "Low stock alert", body: `${count} item${count === 1 ? "" : "s"} at or below reorder level`, dedupeWindowMinutes: DAY }),
+  purchaseApproval: (tx: Tx, ctx: AccessContext, outletId: string, what: string) =>
+    createNotificationTx(tx, ctx, { outletId, type: "PURCHASE_APPROVAL", title: "Purchase order awaiting approval", body: what, dedupeWindowMinutes: DAY }),
+  vendorDue: (tx: Tx, ctx: AccessContext, outletId: string, overdue: string) =>
+    createNotificationTx(tx, ctx, { outletId, type: "VENDOR_DUE", title: "Vendor payments overdue", body: `Overdue ₹${overdue}`, dedupeWindowMinutes: DAY }),
+  reservation: (tx: Tx, ctx: AccessContext, outletId: string, summary: string) =>
+    createNotificationTx(tx, ctx, { outletId, type: "RESERVATION", title: "New reservation", body: summary }),
 };
-
-/** Check reorder levels at an outlet and raise one (deduplicated) LOW_STOCK notification. */
-export async function checkLowStockAndNotify(ctx: AccessContext, outletId: string, db: PrismaClient = prisma) {
-  const low = await lowStock(db, ctx, outletId);
-  if (!low.length) return { lowCount: 0, notified: false };
-  const res = await notify.lowStock(ctx, outletId, low.length, db);
-  return { lowCount: low.length, notified: !res.deduplicated };
-}

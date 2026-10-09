@@ -32,6 +32,7 @@ import { authorizedOutletIds } from "@/server/services/analytics";
 import { D, dMul, dDiv, money, moneyAmount, num, qty as roundQty, type Decimalish } from "@/domain/money";
 import { type Client, type Tx, runInTx, assertTransition, nextNumber } from "@/server/services/_workflow";
 import { approvalPlan, getProcurementRules } from "@/server/services/procurementRules";
+import { notify } from "@/server/services/notifications";
 
 // ============================================================
 // Purchase Indent
@@ -212,6 +213,7 @@ export function transitionPurchaseOrder(ctx: AccessContext, poId: string, to: Pu
       if (!po.firstApprovedById) {
         const first = await tx.purchaseOrder.update({ where: { id: poId }, data: { firstApprovedById: ctx.userId, firstApprovedAt: new Date() } });
         await writeAudit(tx, ctx, { action: "APPROVE", entityType: "PurchaseOrder", entityId: poId, outletId: po.outletId, before: { status: po.status }, after: { status: po.status, approval: "1 of 2", limit: rules.dualApprovalAtOrAbove } });
+        await notify.purchaseApproval(tx, ctx, po.outletId, `${po.number}: second approval needed`);
         return first;
       }
       if (po.firstApprovedById === ctx.userId) throw new ValidationError("This order needs a second, different approver: you gave the first approval");
@@ -229,6 +231,8 @@ export function transitionPurchaseOrder(ctx: AccessContext, poId: string, to: Pu
       await writeAudit(tx, ctx, { action: "APPROVE", entityType: "PurchaseOrder", entityId: poId, outletId: po.outletId, before: { status: "SUBMITTED" }, after: { status: "APPROVED", auto: true, limit: rules.autoApproveBelow } });
       return auto;
     }
+    // Waiting for an approver: tell the people who can approve at this outlet.
+    if (to === "SUBMITTED") await notify.purchaseApproval(tx, ctx, po.outletId, po.number);
     return updated;
   });
 }

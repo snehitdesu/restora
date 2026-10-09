@@ -20,6 +20,11 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
 import { reconcilePOSOrders } from "@/server/services/reconciliation";
+import { lowStock } from "@/server/services/inventory";
+import { vendorDues } from "@/server/services/procurement";
+import { notify } from "@/server/services/notifications";
+import { runInTx } from "@/server/services/_workflow";
+import { D, money } from "@/domain/money";
 import { getPOSProvider, type POSProvider } from "@/integrations/pos";
 import { safeMessage } from "@/integrations/http";
 import { businessDayRange } from "@/domain/time";
@@ -29,6 +34,9 @@ import { raiseAlert } from "@/server/observability/alerts";
 
 export const POS_REPULL = "POS_REPULL";
 export const REPULL_AT = { hour: 1, minute: 30 };
+/** Once a day per outlet, from 08:00 on its own clock: low stock and overdue vendor bills reach the people who act on them. */
+export const OPS_ALERTS = "OPS_ALERTS";
+export const OPS_ALERTS_AT = { hour: 8, minute: 0 };
 const MAX_ATTEMPTS = 3;
 const RETRY_AFTER_MS = 60 * 60_000;
 const STALE_RUNNING_MS = 30 * 60_000;
@@ -116,9 +124,59 @@ export async function runNightlyPosRepull(db: PrismaClient = prisma, now = new D
   return result;
 }
 
+export type OpsAlertsResult = { outlets: number; started: number; succeeded: number; failed: number; skipped: number; lowStock: number; overdue: number };
+
+/**
+ * Morning check for every active outlet whose clock has passed 08:00: one LOW_STOCK notification when anything is at or
+ * below its reorder level, one VENDOR_DUE notification when vendor bills are past their due date. The claim (JobRun) makes
+ * it run once per outlet per day across any number of instances; nothing is sent when there is nothing to say.
+ */
+export async function runOperationsAlerts(db: PrismaClient = prisma, now = new Date(), onlyOutletId?: string): Promise<OpsAlertsResult> {
+  const result: OpsAlertsResult = { outlets: 0, started: 0, succeeded: 0, failed: 0, skipped: 0, lowStock: 0, overdue: 0 };
+  const outlets = await db.outlet.findMany({ where: { active: true, organization: { active: true }, ...(onlyOutletId ? { id: onlyOutletId } : {}) }, select: { id: true, organizationId: true, timezone: true } });
+  for (const outlet of outlets) {
+    result.outlets++;
+    const c = localClock(now, outlet.timezone);
+    if (c.hour * 60 + c.minute < OPS_ALERTS_AT.hour * 60 + OPS_ALERTS_AT.minute) { result.skipped++; continue; }
+    const day = businessDayRange(now, outlet.timezone).date;
+    if (!(await claimJobRun(db, OPS_ALERTS, outlet.id, day, now))) { result.skipped++; continue; }
+    result.started++;
+    try {
+      const ctx = systemContext(outlet.organizationId, [outlet.id]);
+      const low = await lowStock(db, ctx, outlet.id);
+      const dues = await vendorDues(db, ctx, { outletId: outlet.id, asOf: now });
+      const overdue = dues.reduce((a, d) => a.plus(D(d.overdue)), D(0));
+      await runInTx(db, async (tx) => {
+        if (low.length) await notify.lowStock(tx, ctx, outlet.id, low.length);
+        if (overdue.gt(0)) await notify.vendorDue(tx, ctx, outlet.id, money(overdue).toFixed(2));
+      });
+      await finishJobRun(db, OPS_ALERTS, outlet.id, day, "SUCCESS", { lowStock: low.length, overdue: money(overdue).toFixed(2) });
+      result.succeeded++;
+      result.lowStock += low.length ? 1 : 0;
+      result.overdue += overdue.gt(0) ? 1 : 0;
+      inc("restora_job_runs_total", { job: OPS_ALERTS, status: "success" });
+    } catch (e) {
+      const why = safeMessage(e);
+      await finishJobRun(db, OPS_ALERTS, outlet.id, day, "FAILED", { error: why }, now);
+      result.failed++;
+      inc("restora_job_runs_total", { job: OPS_ALERTS, status: "failed" });
+      inc("restora_job_failures_total", { type: "ops_alerts" });
+      log.warn("morning stock and dues check failed", { event: "ops_alerts_failed", outletId: outlet.id, date: day, error: why });
+    }
+  }
+  return result;
+}
+
 /** All scheduled jobs; called from the worker tick (cheap when nothing is due). */
 export async function runScheduledJobs(db: PrismaClient = prisma, now = new Date()) {
   const posRepull = await runNightlyPosRepull(db, now);
+  let opsAlerts: OpsAlertsResult | null = null;
+  try {
+    opsAlerts = await runOperationsAlerts(db, now);
+  } catch (e) {
+    inc("restora_job_failures_total", { type: "ops_alerts" });
+    log.error("morning stock and dues check failed", { event: "ops_alerts_failed", error: e });
+  }
   // Group 6 automations (campaigns, feedback requests, booking messages, birthday / win-back offers, the 9 AM summary).
   // Loaded lazily: they import this module's claim helpers. A failure there never costs the POS re-pull its result.
   const { runGrowthJobs } = await import("@/server/services/lifecycle");
@@ -129,5 +187,5 @@ export async function runScheduledJobs(db: PrismaClient = prisma, now = new Date
     inc("restora_job_failures_total", { type: "growth" });
     log.error("growth jobs failed", { event: "growth_jobs_failed", error: e });
   }
-  return { posRepull, growth };
+  return { posRepull, opsAlerts, growth };
 }

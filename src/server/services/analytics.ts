@@ -69,9 +69,6 @@ export function authorizedOutletIds(ctx: AccessContext, filter: AnalyticsFilter,
   return allowed;
 }
 
-/** @deprecated use authorizedOutletIds (kept for existing callers). */
-export const resolveOutletIds = (ctx: AccessContext, filter: AnalyticsFilter) => authorizedOutletIds(ctx, filter);
-
 function dateRange(filter: AnalyticsFilter) {
   const range: { gte?: Date; lte?: Date } = {};
   if (filter.from) range.gte = filter.from;

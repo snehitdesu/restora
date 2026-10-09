@@ -160,9 +160,6 @@ export async function listStations(db: PrismaClient, ctx: AccessContext, outletI
   return db.kitchenStation.findMany({ where: { organizationId: ctx.organizationId, outletId, active: true }, orderBy: { name: "asc" }, select: { id: true, name: true, kind: true } });
 }
 
-/** KDS is the kitchen's view of the same lifecycle. */
-export const updateKDSStatus = updateKOTStatus;
-
 export async function routeKOTToStation(ctx: AccessContext, kotId: string, stationId: string, db: Client = prisma) {
   const kot = await db.kot.findUnique({ where: { id: kotId } });
   if (!kot || kot.organizationId !== ctx.organizationId) throw new NotFoundError("KOT not found");

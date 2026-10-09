@@ -11,7 +11,7 @@
  * labels it as a test gateway and the server still verifies every payment.
  */
 import { test, expect, type Browser, type Page } from "@playwright/test";
-import { statePath, outletByCode, order, openPos, toast, sessionFor, materialByName, stockQty, ledgerForOrder, apiAs, apiData, CENTRAL, money } from "./helpers";
+import { statePath, outletByCode, order, openPos, toast, sessionFor, materialByName, stockQty, ledgerForOrder, apiAs, apiData, expectNoSeriousA11yViolations, CENTRAL, money } from "./helpers";
 
 test.use({ storageState: statePath("cashier") });
 
@@ -204,6 +204,7 @@ test.describe("QR guest transaction", () => {
     // ---- Phone A: split two ways; the share is the server's figure, the page sends only the number of people.
     await a.getByRole("button", { name: "Split the bill" }).click();
     await expect(a.getByTestId("split-share")).toContainText("Your part: ₹42.00");
+    await expectNoSeriousA11yViolations(a); // the split-bill screen on a phone
     const start = a.waitForRequest((r) => r.method() === "POST" && r.url().endsWith(`/api/qr/orders/${orderId}/payments`));
     await a.getByRole("button", { name: /^Pay your part .*42\.00/ }).click();
     expect((await start).postDataJSON()).toEqual({ parts: 2 });

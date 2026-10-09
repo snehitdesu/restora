@@ -89,5 +89,3 @@ export async function dishPrepTimes(db: PrismaClient, ctx: AccessContext, input:
   const stations: StationPrep[] = [...station.values()].map((s) => ({ stationId: s.stationId, name: s.name, ...stat(s.totals, s.cooks) })).sort((a, b) => b.medianMinutes - a.medianMinutes);
   return { outletId: q.outletId, days: q.days, minSamples: PREP_MIN_SAMPLES, overall: stat(all, allCook), dishes, stations, truncated: kots.length >= PREP_MAX_TICKETS };
 }
-
-export type DishPrepResult = Awaited<ReturnType<typeof dishPrepTimes>>;
