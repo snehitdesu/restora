@@ -1769,7 +1769,57 @@ model Shift {
   startTime      String // "09:00"
   endTime        String // "17:00"
 
+  assignments ShiftAssignment[]
+
   @@index([organizationId, outletId])
+}
+
+/// Who works which shift on which day (the roster). One person once per shift per day.
+model ShiftAssignment {
+  id             String   @id @default(cuid())
+  organizationId String
+  outletId       String
+  shiftId        String
+  shift          Shift    @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  userId         String
+  /// The calendar day at the outlet, YYYY-MM-DD.
+  date           String
+  createdById    String?
+  createdAt      DateTime @default(now())
+
+  @@unique([shiftId, userId, date])
+  @@index([organizationId, outletId, date])
+  @@index([userId, date])
+}
+
+/// A reusable duty list (opening, closing, training): a named set of items that becomes one task per item each time it is started.
+model ChecklistTemplate {
+  id             String                  @id @default(cuid())
+  organizationId String
+  outletId       String
+  name           String
+  /// OPENING | CLOSING | TRAINING | OTHER
+  kind           String                  @default("OPENING")
+  active         Boolean                 @default(true)
+  createdById    String?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  items          ChecklistTemplateItem[]
+
+  @@unique([outletId, name])
+  @@index([organizationId, outletId])
+}
+
+model ChecklistTemplateItem {
+  id          String            @id @default(cuid())
+  templateId  String
+  template    ChecklistTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  priority    String            @default("MEDIUM")
+  sortOrder   Int               @default(0)
+
+  @@index([templateId])
 }
 
 model LeaveRequest {
@@ -1801,9 +1851,13 @@ model Task {
   completedAt    DateTime?
   verifiedById   String?
   createdById    String?
+  /// Set when the task came from a checklist: which template item, and for which day. Starting a checklist twice for a day makes each task once.
+  templateItemId String?
+  runDate        String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
+  @@unique([templateItemId, runDate])
   @@index([organizationId, outletId, status])
   @@index([assignedToId])
 }

@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Badge } from "@/components/ui/Badge";
 import { Dialog } from "@/components/ui/Dialog";
-import { Field, FormDialog, Input, Select, Textarea, opt } from "@/components/ui/Form";
+import { Checkbox, Field, FormDialog, Input, Select, Textarea, opt } from "@/components/ui/Form";
 import { DataTable, Pager } from "@/components/ui/Table";
 import { ActiveBadge, Card, PageHeader, StatusBadge, SubNav, Tabs } from "@/components/ui/Page";
 import { ErrorState } from "@/components/ui/States";
@@ -30,9 +30,9 @@ type AttendanceRow = { id: string; outletId: string; userId: string; userName: s
 type LeaveRow = { id: string; outletId: string; userId: string; userName: string; fromDate: string; toDate: string; reason: string | null; status: string; approvedByName: string | null; createdAt: string };
 type Task = { id: string; outletId: string; title: string; description: string | null; assignedToId: string | null; priority: string; status: TaskStatusT; dueAt: string | null; completedById: string | null; createdAt: string };
 
-function PeopleNav() {
+export function PeopleNav() {
   const { can } = useShell();
-  return <SubNav label="People" items={[{ href: "/staff", label: "Team", hidden: !can("staff.manage") }, { href: "/staff/attendance", label: "Attendance" }, { href: "/staff/leave", label: "Leave" }, { href: "/staff/tasks", label: "Tasks", hidden: !can("task.view") }]} />;
+  return <SubNav label="People" items={[{ href: "/staff", label: "Team", hidden: !can("staff.manage") }, { href: "/staff/roster", label: "Roster" }, { href: "/staff/attendance", label: "Attendance" }, { href: "/staff/leave", label: "Leave" }, { href: "/staff/tasks", label: "Tasks", hidden: !can("task.view") }, { href: "/staff/checklists", label: "Checklists", hidden: !can("task.view") }]} />;
 }
 
 function useOutletLabel() {
@@ -64,9 +64,11 @@ function ScopeSelect({ value, onChange }: { value: string; onChange: (v: string)
 }
 
 export type PasswordLink = { email: string; token: string; purpose: "SETUP" | "RESET"; expiresAt: string };
+/** What happened to the invitation e-mail, when one was asked for. */
+export type InviteOutcome = { sent: boolean; to: string; status: "SENT" | "FAILED" | "NOT_SENT"; reason?: string };
 
 /** Shows a one-time setup/reset link exactly once; the server never returns it again. */
-export function PasswordLinkDialog({ link, onClose }: { link: PasswordLink; onClose: () => void }) {
+export function PasswordLinkDialog({ link, invite, onClose }: { link: PasswordLink; invite?: InviteOutcome; onClose: () => void }) {
   const url = `${window.location.origin}/set-password#token=${link.token}`;
   const [copied, setCopied] = useState(false);
   const copy = async () => {
@@ -81,23 +83,27 @@ export function PasswordLinkDialog({ link, onClose }: { link: PasswordLink; onCl
     <Dialog open onClose={onClose} title={link.purpose === "SETUP" ? "Password setup link" : "Password reset link"} size="md"
       description={`For ${link.email}. Share it privately — it works once and expires ${formatDateTime(link.expiresAt)}.`}
       footer={<><Button onClick={copy}>{copied ? "Copied" : "Copy link"}</Button><Button variant="primary" onClick={onClose}>Done</Button></>}>
+      {invite && (invite.sent
+        ? <p role="status" className="mb-3 rounded-md border border-ok-200 bg-ok-50 px-3 py-2 text-sm text-ok-700" data-testid="invite-status">Invitation e-mailed to {invite.to}. You can still copy the link below.</p>
+        : <p role="status" className="mb-3 rounded-md border border-warn-200 bg-warn-50 px-3 py-2 text-sm text-warn-700" data-testid="invite-status">The invitation e-mail was not sent{invite.reason ? `: ${invite.reason}` : ""}. Copy the link below and send it yourself.</p>)}
       <Field label="Link" name="link"><Input readOnly value={url} onFocus={(e) => e.currentTarget.select()} data-testid="password-link" /></Field>
       <p className="mt-2 text-xs text-ink-500">This link is shown only now. Issuing a new link cancels this one.</p>
     </Dialog>
   );
 }
 
-export function NewStaffDialog({ open, onClose, onDone, roles }: { open: boolean; onClose: () => void; onDone: (link: PasswordLink) => void; roles: RoleMatrix["roles"] }) {
+export function NewStaffDialog({ open, onClose, onDone, roles }: { open: boolean; onClose: () => void; onDone: (link: PasswordLink, invite?: InviteOutcome) => void; roles: RoleMatrix["roles"] }) {
   const outletId = useOutletId();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [role, setRole] = useState("");
   const [scope, setScope] = useState(outletId);
+  const [emailInvite, setEmailInvite] = useState(false);
   return (
     <FormDialog open={open} onClose={onClose} title="Add staff member" submitLabel="Add" description="The server checks that you may grant this role at this scope."
-      onSubmit={() => api<{ email: string; setup: Omit<PasswordLink, "email"> }>("/api/staff", { method: "POST", body: { name: name.trim(), email: email.trim(), phone: opt(phone), role, outletId: opt(scope) } })}
-      onDone={(r) => { setName(""); setEmail(""); setPhone(""); setRole(""); onDone({ email: r.email, ...r.setup }); }}>
+      onSubmit={() => api<{ email: string; setup: Omit<PasswordLink, "email">; invite?: InviteOutcome }>("/api/staff", { method: "POST", body: { name: name.trim(), email: email.trim(), phone: opt(phone), role, outletId: opt(scope), ...(emailInvite ? { emailInvite: true } : {}) } })}
+      onDone={(r) => { setName(""); setEmail(""); setPhone(""); setRole(""); onDone({ email: r.email, ...r.setup }, r.invite); }}>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Name" name="name" required><Input value={name} onChange={(e) => setName(e.target.value)} required maxLength={120} /></Field>
         <Field label="Email" name="email" required><Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required maxLength={200} /></Field>
@@ -105,6 +111,7 @@ export function NewStaffDialog({ open, onClose, onDone, roles }: { open: boolean
         <Field label="Role" name="role" required><RoleSelect roles={roles} value={role} onChange={setRole} /></Field>
       </div>
       <Field label="Outlet" name="outletId"><ScopeSelect value={scope} onChange={setScope} /></Field>
+      <Checkbox label="E-mail them the invitation (needs an e-mail provider under Integrations)" checked={emailInvite} onChange={setEmailInvite} name="emailInvite" />
     </FormDialog>
   );
 }
@@ -154,7 +161,7 @@ export function TeamScreen() {
   const [scope, setScope] = useState<"outlet" | "all">("outlet");
   const [open, setOpen] = useState(false);
   const [managing, setManaging] = useState<string | null>(null);
-  const [link, setLink] = useState<PasswordLink | null>(null);
+  const [shown, setShown] = useState<{ link: PasswordLink; invite?: InviteOutcome } | null>(null);
   const roles = useQuery<RoleMatrix>("/api/staff/roles");
   const list = usePaged<StaffRow>("/api/staff", { outletId: scope === "outlet" ? outletId ?? undefined : undefined });
   const managed = list.items.find((u) => u.id === managing);
@@ -175,9 +182,15 @@ export function TeamScreen() {
                 <div className="flex justify-end gap-1">
                   <Button size="sm" onClick={() => setManaging(r.id)} disabled={!roles.data}>Access</Button>
                   {r.active && (
-                    <ActionButton size="sm" action={async () => setLink(await api<PasswordLink>(`/api/staff/users/${r.id}/password-link`, { method: "POST" }))}
+                    <ActionButton size="sm" action={async () => setShown({ link: await api<PasswordLink>(`/api/staff/users/${r.id}/password-link`, { method: "POST" }) })}
                       confirm={{ title: `Issue password link for ${r.name}?`, message: "Creates a one-time link they use to set a new password. Any earlier link stops working; their current password keeps working until the link is used.", confirmLabel: "Issue link" }}>
                       Password link
+                    </ActionButton>
+                  )}
+                  {r.active && (
+                    <ActionButton size="sm" aria-label={`E-mail an invitation to ${r.name}`} action={async () => { const r2 = await api<{ link: PasswordLink; invite: InviteOutcome }>(`/api/staff/users/${r.id}/invite`, { method: "POST" }); setShown({ link: r2.link, invite: r2.invite }); }}
+                      confirm={{ title: `E-mail an invitation to ${r.name}?`, message: "Sends a one-time link to set a password to their address and cancels any earlier link. Needs an e-mail provider connected under Integrations.", confirmLabel: "Send invitation" }}>
+                      Invite
                     </ActionButton>
                   )}
                   <ActionButton size="sm" variant={r.active ? "danger" : "success"} action={() => api(`/api/staff/users/${r.id}/active`, { method: "POST", body: { active: !r.active } })}
@@ -188,8 +201,8 @@ export function TeamScreen() {
           },
         ]} />
       <Pager {...list} />
-      {roles.data && <NewStaffDialog open={open} onClose={() => setOpen(false)} onDone={(l) => { setLink(l); list.reload(); }} roles={roles.data.roles} />}
-      {link && <PasswordLinkDialog link={link} onClose={() => setLink(null)} />}
+      {roles.data && <NewStaffDialog open={open} onClose={() => setOpen(false)} onDone={(l, invite) => { setShown({ link: l, invite }); list.reload(); }} roles={roles.data.roles} />}
+      {shown && <PasswordLinkDialog link={shown.link} invite={shown.invite} onClose={() => setShown(null)} />}
       {managed && roles.data && <AccessDialog user={managed} roles={roles.data.roles} onClose={() => setManaging(null)} onChanged={list.reload} />}
     </>
   );

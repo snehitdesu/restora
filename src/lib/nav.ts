@@ -73,9 +73,11 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/customers/growth-settings", label: "Growth settings", icon: "sliders", permission: "growth.view", section: "Customers", description: "Automatic offers, quiet hours, feedback and the morning summary" },
 
   { href: "/staff", label: "Staff", icon: "user", permission: "staff.manage", section: "People", description: "Users, roles and outlet access" },
+  { href: "/staff/roster", label: "Roster", icon: "calendar", section: "People", description: "Who works which shift, and my shifts" },
   { href: "/staff/attendance", label: "Attendance", icon: "clock", section: "People", description: "Check-in / check-out" },
   { href: "/staff/leave", label: "Leave", icon: "calendar", section: "People", description: "Leave requests" },
-  { href: "/staff/tasks", label: "Tasks", icon: "check", permission: "task.view", section: "People", description: "Checklists and tasks" },
+  { href: "/staff/tasks", label: "Tasks", icon: "check", permission: "task.view", section: "People", description: "Tasks and follow-ups" },
+  { href: "/staff/checklists", label: "Checklists", icon: "list", permission: "task.view", section: "People", description: "Opening, closing and training duty lists" },
 
   { href: "/finance/money-desk", label: "Money desk", icon: "scale", permission: "finance.view", section: "Finance", description: "Close the day: POS vs declared vs bank, deposits, discrepancies" },
   { href: "/finance/aggregators", label: "Aggregators", icon: "truck", permission: "finance.view", section: "Finance", description: "Zomato and Swiggy payouts against orders, charges and net margin" },

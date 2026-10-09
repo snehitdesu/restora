@@ -122,7 +122,7 @@ describe("report registry", () => {
       // Phase 5 analytics
       "MATERIAL_CONSUMPTION", "MODIFIER_SALES", "OUTLET_COMPARISON", "PURCHASE_TREND", "SALES_TREND", "STOCK_AGEING", "VARIANT_SALES", "VENDOR_PURCHASING",
       // Groups 3 / 4 (one outlet each)
-      "CONSUMPTION_VARIANCE", "MENU_ENGINEERING", "DEPARTMENT_PNL", "DAILY_COSTING", "STOCK_BY_DEPARTMENT", "SUPPLIER_PRICES", "PURCHASE_PRICE_HISTORY", "COUNT_VARIANCE_TREND"].sort());
+      "CONSUMPTION_VARIANCE", "MENU_ENGINEERING", "DEPARTMENT_PNL", "DAILY_COSTING", "STOCK_BY_DEPARTMENT", "SUPPLIER_PRICES", "PURCHASE_PRICE_HISTORY", "COUNT_VARIANCE_TREND", "STAFF_HOURS", "SALES_BY_STAFF"].sort());
   });
 
   it("consumption variance: expected (sales) vs actual per material for one outlet, as rows and CSV", async () => {

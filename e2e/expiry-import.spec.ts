@@ -58,7 +58,7 @@ test.describe("import (desktop)", () => {
     expect((await apiData<{ items: unknown[] }>(owner, `/api/master/materials?search=${a}`)).items).toHaveLength(0); // checking saves nothing
     await dlg.getByRole("button", { name: "Import 2 rows" }).click();
     await expect(dlg.getByTestId("import-summary")).toContainText("Imported: 2 to create");
-    await dlg.getByRole("button", { name: "Close" }).click();
+    await dlg.getByRole("button", { name: "Close", exact: true }).click();
     await expect(dlg).toBeHidden();
     await page.getByPlaceholder(/Search name, brand or SKU/).fill(`Imported Alpha ${RUN}`);
     const row = page.getByRole("table", { name: "Materials" }).getByRole("row").filter({ hasText: `Imported Alpha ${RUN}` });
