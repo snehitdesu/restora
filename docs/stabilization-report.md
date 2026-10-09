@@ -141,6 +141,7 @@ pass or read from the GitHub Actions run named next to it.
 | Test run | the Coders' Cafe reset was refused by the append-only triggers | reset runs inside `withAppendOnlyGuardsOff` (disposable-database wipe only) |
 | Dead-code sweep | `LOW_STOCK`, `PURCHASE_APPROVAL`, `VENDOR_DUE`, `RESERVATION` notifications existed as types and permissions but nothing ever raised them | wired (approver queue, bookings, 08:00 stock and dues check); `VENDOR_DUE` now needs `vendor.pay` instead of `finance.view` (the cashier holds it) |
 | Load run | the load script depended on the time of day (guest ordering is correctly refused outside opening hours) and sent a made-up gateway reference (correctly refused) | script corrected; the server behaviour was right |
+| Runtime verification script (`scripts/ops/verify-runtime.mjs`, 18 checks), run for the first time since 2026-10-05 | 17/18 on this host **and on the previous release**: during a graceful shutdown with 24 simultaneous heavy requests, 4 were reset (connection accepted by the kernel, not yet read by Node, closed with the server) | the process keeps refusing with 503 for `SHUTDOWN_REFUSE_GRACE_MS` (default 300 ms) after the drain; 18/18, no resets (`tests/ops/infrastructure.test.ts`); with a production-style `SHUTDOWN_DELAY_MS` it also passed |
 | Review of the new job | the 08:00 check would have attempted a claim insert for every outlet on every worker tick | one lookup of the outlets already done today |
 
 ### 8.3 What is verified, and what is not

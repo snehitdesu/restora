@@ -59,7 +59,7 @@ backups), `BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY`, `PG_BIN_DIR`.
 | Endpoint | Meaning | Auth |
 |---|---|---|
 | `GET /api/health/live` | process + event loop answer (no I/O) — liveness probe | none |
-| `GET /api/health/ready` | not draining, DB answers within `READINESS_DB_TIMEOUT_MS`, schema contains this build's newest migration (`EXPECTED_MIGRATION`, currently `20261011100000_fk_indexes`) with nothing failed/half-applied — readiness probe | none |
+| `GET /api/health/ready` | not draining, DB answers within `READINESS_DB_TIMEOUT_MS`, schema contains this build's newest migration (`EXPECTED_MIGRATION`, currently `20261021100000_append_only_rate_limit`) with nothing failed/half-applied — readiness probe | none |
 | `GET /api/health` | legacy combined check (200 / 503) | none |
 | `GET /api/health/metrics` | Prometheus text | `Bearer METRICS_TOKEN` |
 
@@ -67,7 +67,11 @@ Responses carry coarse states only (`up/down/pending/failed`); details go to the
 
 Shutdown (`src/server/ops/lifecycle.ts`): SIGTERM/SIGINT → readiness 503 →
 after `SHUTDOWN_DELAY_MS` new API requests get 503 + `Retry-After` → in-flight
-requests are awaited (≤ `SHUTDOWN_TIMEOUT_MS`) → worker stopped, post-commit side
+requests are awaited (≤ `SHUTDOWN_TIMEOUT_MS`) → the process keeps refusing for
+`SHUTDOWN_REFUSE_GRACE_MS` (default 300) so connections the kernel accepted but Node had not read yet
+receive their 503 instead of a connection reset (found 2026-10-09: with no grace, 4 of 24 simultaneous
+requests were reset on a Linux host, also on the previous release; behind a load balancer also set
+`SHUTDOWN_DELAY_MS` to a few seconds so it sees readiness = 503 first) → worker stopped, post-commit side
 effects settled, export runner finished, DB disconnected → exit 0. Verified by
 `scripts/ops/verify-runtime.mjs` (in-flight requests complete; hard-kill recovery).
 Nothing durable depends on the drain: every side effect is a row the next process recovers.

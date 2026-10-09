@@ -287,6 +287,17 @@ describe("health, readiness and graceful shutdown", () => {
     expect(isDraining()).toBe(true); // stays down: the process is about to exit
   });
 
+  it("after the drain the process keeps refusing for the grace period, so requests that were not read yet get a 503, not a reset", async () => {
+    const c = capture();
+    const t0 = Date.now();
+    const done = shutdown("TEST", { delayMs: 0, timeoutMs: 5_000, graceMs: 250 });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(beginRequest()).toBeNull(); // nothing was in flight, yet it is still refusing while it waits
+    await done;
+    c.restore();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(240);
+  });
+
   it("a hung shutdown task cannot block exit beyond the deadline", async () => {
     onShutdown("hang", () => new Promise(() => undefined));
     const c = capture();

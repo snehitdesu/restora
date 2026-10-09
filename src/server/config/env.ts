@@ -158,6 +158,7 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
     intProblem(env, "SLOW_REQUEST_MS", 1),
     intProblem(env, "SHUTDOWN_TIMEOUT_MS", 1000, 600_000),
     intProblem(env, "SHUTDOWN_DELAY_MS", 0, 120_000),
+    intProblem(env, "SHUTDOWN_REFUSE_GRACE_MS", 0, 60_000),
     intProblem(env, "OUTBOX_WORKER_INTERVAL_MS", 1000, 3_600_000),
     intProblem(env, "SESSION_IDLE_TIMEOUT_SECONDS", 1),
     intProblem(env, "BACKUP_MAX_AGE_HOURS", 1),
