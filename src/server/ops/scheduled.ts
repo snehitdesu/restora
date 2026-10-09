@@ -134,11 +134,18 @@ export type OpsAlertsResult = { outlets: number; started: number; succeeded: num
 export async function runOperationsAlerts(db: PrismaClient = prisma, now = new Date(), onlyOutletId?: string): Promise<OpsAlertsResult> {
   const result: OpsAlertsResult = { outlets: 0, started: 0, succeeded: 0, failed: 0, skipped: 0, lowStock: 0, overdue: 0 };
   const outlets = await db.outlet.findMany({ where: { active: true, organization: { active: true }, ...(onlyOutletId ? { id: onlyOutletId } : {}) }, select: { id: true, organizationId: true, timezone: true } });
+  // The worker ticks every 30 seconds: one query tells which outlets are already done today, so the claim (an insert that
+  // fails on a duplicate) is only attempted for the rest.
+  const due = outlets.filter((o) => { const c = localClock(now, o.timezone); return c.hour * 60 + c.minute >= OPS_ALERTS_AT.hour * 60 + OPS_ALERTS_AT.minute; });
+  const days = new Map(due.map((o) => [o.id, businessDayRange(now, o.timezone).date]));
+  const finished = due.length
+    ? await db.jobRun.findMany({ where: { name: OPS_ALERTS, status: "SUCCESS", scopeKey: { in: due.map((o) => o.id) }, runDate: { in: [...new Set(days.values())] } }, select: { scopeKey: true, runDate: true } })
+    : [];
+  const doneToday = new Set(finished.map((r) => `${r.scopeKey}:${r.runDate}`));
   for (const outlet of outlets) {
     result.outlets++;
-    const c = localClock(now, outlet.timezone);
-    if (c.hour * 60 + c.minute < OPS_ALERTS_AT.hour * 60 + OPS_ALERTS_AT.minute) { result.skipped++; continue; }
-    const day = businessDayRange(now, outlet.timezone).date;
+    const day = days.get(outlet.id);
+    if (!day || doneToday.has(`${outlet.id}:${day}`)) { result.skipped++; continue; }
     if (!(await claimJobRun(db, OPS_ALERTS, outlet.id, day, now))) { result.skipped++; continue; }
     result.started++;
     try {

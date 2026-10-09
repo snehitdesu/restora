@@ -34,6 +34,8 @@ webhook, an operator with database access.
 - Security headers on every response: CSP (`default-src 'self'`; `script-src` still needs `'unsafe-inline'` for Next.js hydration — nonce CSP deferred), HSTS (production), `X-Content-Type-Options`, `Referrer-Policy`, `frame-ancestors 'none'`, `Permissions-Policy`; API `Cache-Control: no-store`. Verified `SEC-HDR-001/002` (zero CSP violations on the main screens).
 - Input validation with Zod at every service boundary; body size caps; numeric overflow → 422.
 - Errors: no stack traces or internals in responses (500 = generic message + request id).
+- Forms that handle passwords read their fields when submitted, so text typed before the page finished loading is never lost and the button is never silently disabled; they post with `method="post"`, so an early submit never puts anything in the address bar (`LOGIN-002b`, `PWD-007`).
+- Guest bill splits: the request body is only the number of people (a strict schema refuses an amount or any other field); the share is computed on the server from the balance at that moment, every phone gets its own payment, and the payment is verified with the gateway like any other (`tests/domain/guest-split-reorder.test.ts`).
 - Idempotency keys on every money / stock creation (orders, rounds, payments, refunds, vendor payments, GRNs, transfers, wastage, expenses, drawer movements) — retries never double-charge or double-post.
 
 ## 5. Integrations and webhooks
@@ -45,6 +47,7 @@ webhook, an operator with database access.
 - Logs: structured JSON; credential keys redacted, secrets in free text scrubbed, email / phone masked (`tests/ops/infrastructure.test.ts`; `verify-runtime.mjs` "no secret material in server logs").
 - Backups: AES-256-GCM encrypted with a key kept apart from the backups; checksum + authenticated decryption on restore (`backup-drill.mjs`).
 - Database roles: the app role cannot alter schema and cannot UPDATE / DELETE / TRUNCATE `AuditLog` or `InventoryLedger` (`scripts/ops/pg-roles.sql`, verified in the drill).
+- **History the database itself refuses to rewrite** (2026-10-09): triggers on `AuditLog` and `InventoryLedger` abort every UPDATE and DELETE (and TRUNCATE on PostgreSQL) whoever sends it, including the schema owner; they survive backup and restore; the readiness check reports missing triggers (`src/server/db/appendOnly.ts`, `tests/db/append-only.test.ts` on both engines, backup drill 10/10 afterwards). Only a disposable-database wipe lifts them, and nothing in the running application does.
 - Exports: re-authorized at download, owner-bound, expire after `EXPORT_RETENTION_HOURS`.
 - Desktop: DPAPI-protected install secret, loopback-only server, renderer sandbox / context isolation / no Node, navigation locked, Electron fuses (no RunAsNode, no NODE_OPTIONS, no inspector), asar integrity — `desktop:verify` 23/23.
 
