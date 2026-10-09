@@ -15,6 +15,7 @@ import { formatDateTime, formatMoney, humanize, isoDay } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { DataTable, Pager } from "@/components/ui/Table";
+import { VarianceTrendChart, type VarianceRow } from "@/features/backoffice/varianceTrend";
 import { Card, PageHeader, StatusBadge } from "@/components/ui/Page";
 import { ErrorState, LoadingState, EmptyState } from "@/components/ui/States";
 import { DateRangeFilter, FilterBar, SelectFilter, type DateRange } from "@/components/ui/Filters";
@@ -95,6 +96,7 @@ export function ReportsScreen() {
       </FilterBar>
       {invalid ? <p className="text-sm text-bad-500">The start date must be on or before the end date.</p> : result.error ? <ErrorState error={result.error} onRetry={result.reload} /> : (
         <>
+          {r?.report === "COUNT_VARIANCE_TREND" && r.rows.length > 0 && <VarianceTrendChart rows={r.rows as unknown as VarianceRow[]} />}
           {r?.truncated && <p className="mb-2 text-xs text-ink-500">Showing rows {r.offset + 1}–{r.offset + r.rowCount}. More rows are available.</p>}
           <DataTable<Record<string, unknown>> label={selected?.title ?? "Report"} rows={r?.rows ?? []} rowKey={(row) => JSON.stringify(row)} loading={result.loading} empty="No rows for this period"
             columns={(r?.columns ?? selected?.columns ?? []).map((c) => ({ key: c.key, header: c.header, numeric: r?.rows.some((row) => typeof row[c.key] === "number"), cell: (row) => renderCell(c.key, row[c.key], outlet?.timezone) }))} />
