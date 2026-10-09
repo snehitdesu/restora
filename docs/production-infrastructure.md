@@ -248,6 +248,45 @@ client now retries a 503 automatically (≤ 2×, honouring `Retry-After`) for
 requests carrying an Idempotency-Key and for reads — rounds, placements and
 payments all carry keys, so a retry returns the original result and never acts twice.
 
+### 7.1 End-to-end HTTP load test, re-run after Group 9 (2026-10-09)
+
+`scripts/ops/load-test.mjs --scale 1` against `next start` (production build, PostgreSQL 16 client, pool default),
+a freshly migrated and seeded **disposable** database, mock payment / messaging / printer providers, one
+container (a few vCPUs, server and load generator on the same machine, so absolute numbers are machine-bound).
+Run twice, once per rate-limit store (`RATE_LIMIT_STORE=memory` and `database`):
+
+| Scenario (n requests) | memory: rps / p95 | database: rps / p95 |
+|---|---|---|
+| login (160, bcrypt cost 10) | 10.6 / 1100 ms | 10.7 / 1036 ms |
+| POS order create (600) | 40.1 / 560 ms | 42.4 / 524 ms |
+| payment create + verify (1000) | 22.1 / 1584 ms | 22.0 / 1592 ms |
+| 4 concurrent payments on one order (400) | 74.3 / 788 ms | 83.7 / 651 ms |
+| duplicate order requests, same key (300) | 118.3 / 485 ms | 121.4 / 468 ms |
+| guest QR order + pay (600) | 51.5 / 758 ms | 51.5 / 747 ms |
+| payment webhooks, each delivered 4x (240) | 64.2 / 640 ms | 62.9 / 662 ms |
+| kitchen display (200) | 68.9 / 188 ms | 69.9 / 174 ms |
+| analytics (180) | 129.6 / 85 ms | 146.0 / 72 ms |
+| peak mix for 60 s (about 1,880) | 30.3 / 1644 ms | 30.4 / 1716 ms |
+
+* **The shared (database) rate-limit store costs nothing measurable**: every scenario is within run-to-run noise
+  of the in-memory store, so choosing it for a multi-instance deployment is free at this scale.
+* **Correctness after both runs: 0 violations**: no overpaid order, no order with more than one successful payment
+  (40 orders paid concurrently, each once), no duplicate order per Idempotency-Key, every webhook payment captured
+  once (60/60), every confirmation message sent, the outbox and print queue fully drained, 0 deadlocks.
+* **Only expected non-200 outcome**: posting goods receipts for the same three materials from 5 concurrent
+  managers: 3-4 of 157 requests get **503 Busy with Retry-After** (the documented answer when a hot ledger row
+  exhausts its retries; the browser client retries it) and the vendor bill that referenced the unposted receipt is
+  refused with 422. No data is lost or doubled.
+* Login is slow on purpose (bcrypt cost 10); settlement is serial per outlet by design (§7). Where the peak mix
+  (about 30 requests per second, p95 1.7 s on this one machine) is limited was not profiled in this run.
+* The script itself was corrected while re-running it: its guest scenario now opens the outlet's hours (guest
+  ordering correctly refuses outside opening hours, so the scenario depended on the time of day) and no longer
+  sends a made-up gateway reference (the server correctly refuses a reference that does not match the payment).
+  The database rate-limit counters persist across server restarts by design: clear `RateLimitWindow` on the
+  disposable database between runs of the same accounts.
+* Not covered: more than one application instance, a remote database, real providers, a network between the load
+  generator and the server. These need a staging environment (listed as external dependencies).
+
 ## 8. Backup, restore, point-in-time recovery, DR
 
 Tooling (`scripts/ops/`, plain Node + PostgreSQL client tools, credentials only
@@ -260,6 +299,17 @@ via environment, every message redacted):
 | `db-verify.mjs` | migrations applied/not failed, constraints, payment/ledger/invoice invariants, optional per-table fingerprint. |
 | `backup-drill.mjs` | full DR drill on a disposable DB (fingerprint → backup → negative tests → DROP → restore → fingerprint compare → roles re-applied). |
 | `pitr-drill.mjs` | self-hosted PITR drill: base backup + WAL archive → simulated destructive SQL → recovery to the moment before it. |
+
+### 8.0 Backup / restore drill re-run on the current schema (2026-10-09)
+
+Because migration `20261021100000_append_only_rate_limit` put triggers on `AuditLog` and `InventoryLedger`, the
+backup → destroy → restore drill was repeated on a freshly migrated and seeded **disposable** database
+(PostgreSQL 16, 118 tables, 1,162 rows, the demo data): **PASSED 10/10 in 38 s**, including the tampered-backup,
+wrong-key and refuse-to-overwrite negative tests, and "every table identical to the pre-backup fingerprint
+(118/118 tables, count + md5)". After the restore the four append-only triggers are present and an `UPDATE` of an
+audit row is still refused by the database. `db-verify.mjs` on a fresh `db:pg:deploy` database: INTEGRITY OK
+(118 tables, 71 foreign keys, latest migration `20261021100000_append_only_rate_limit`); on an older database it
+correctly fails with "expected migration … is not applied". The point-in-time-recovery drill was not repeated.
 
 ### 8.1 Drills executed (2026-10-05, PostgreSQL 16.14, disposable copies of the 210 MB load-test database)
 
