@@ -20,6 +20,7 @@ import { analyticsInternals as A } from "@/server/services/analytics";
 import { lowStock, negativeStock } from "@/server/services/inventory";
 import { vendorAging } from "@/server/services/vendorFinance";
 import { businessInsights } from "@/server/services/insights";
+import { approvalStateOf, getProcurementRules, userNames } from "@/server/services/procurementRules";
 
 const CLOSED = ["PAID", "CANCELLED", "REFUNDED"];
 const LIVE_KOT = ["NEW", "ACCEPTED", "PREPARING"];
@@ -50,6 +51,8 @@ export type BoardTable = {
     elapsedMinutes: number;
     openedBy: string | null;
   };
+  /** Other running orders at the same table (a split bill, or guests' own QR orders): the captain switches between them. */
+  others: Array<{ id: string; status: string; total: number; due: number }>;
   /** Which board filters this table matches (besides "all"). */
   tags: Exclude<TableFilter, "all">[];
 };
@@ -74,17 +77,20 @@ export async function tableBoard(db: PrismaClient, ctx: AccessContext, outletId:
   ]);
   const users = await db.user.findMany({ where: { organizationId: ctx.organizationId, id: { in: [...new Set(orders.map((o) => o.createdById).filter((x): x is string => Boolean(x)))] } }, select: { id: true, name: true } });
   const names = new Map(users.map((u) => [u.id, u.name]));
-  // One running order per table is the norm; if there are several, the oldest is shown.
-  const byTable = new Map<string, (typeof orders)[number]>();
-  for (const o of orders) if (o.tableId && !byTable.has(o.tableId)) byTable.set(o.tableId, o);
+  // One running order per table is the norm; with several (a split bill, a guest's QR order next to the captain's) the
+  // oldest is the table's order and the rest are listed beside it.
+  const byTable = new Map<string, Array<(typeof orders)[number]>>();
+  for (const o of orders) if (o.tableId) (byTable.get(o.tableId) ?? byTable.set(o.tableId, []).get(o.tableId)!).push(o);
+  const paidOf = (o: (typeof orders)[number]) => o.payments.reduce((a, p) => a.plus(D(p.amount)).minus(p.refunds.reduce((r, x) => r.plus(D(x.amount)), D(0))), D(0));
 
   const out: BoardTable[] = tables.map((t) => {
-    const o = byTable.get(t.id);
+    const [o, ...rest] = byTable.get(t.id) ?? [];
     if (!o) {
       const tags: BoardTable["tags"] = t.status === "AVAILABLE" ? ["available"] : ["occupied"];
-      return { id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, order: null, tags };
+      return { id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, order: null, others: [], tags };
     }
-    const paid = o.payments.reduce((a, p) => a.plus(D(p.amount)).minus(p.refunds.reduce((r, x) => r.plus(D(x.amount)), D(0))), D(0));
+    const others = rest.map((r) => ({ id: r.id, status: r.status, total: m2(r.total), due: m2(D(r.total).minus(paidOf(r)).isNegative() ? 0 : D(r.total).minus(paidOf(r))) }));
+    const paid = paidOf(o);
     const total = D(o.total);
     const kots = { live: o.kots.filter((k) => LIVE_KOT.includes(k.status)).length, ready: o.kots.filter((k) => k.status === "READY").length, served: o.kots.filter((k) => k.status === "SERVED").length, cancelled: o.kots.filter((k) => k.status === "CANCELLED").length };
     const payment = paid.lte(0) ? "UNPAID" : paid.gte(total) ? "PAID" : "PARTIAL";
@@ -93,7 +99,7 @@ export async function tableBoard(db: PrismaClient, ctx: AccessContext, outletId:
     if (kots.ready) tags.push("ready");
     if (o.status === "BILLED" || payment === "PARTIAL") tags.push("payment");
     return {
-      id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, tags,
+      id: t.id, code: t.code, capacity: t.capacity, floor: t.floor?.name ?? null, status: t.status, tags, others,
       order: {
         id: o.id, status: o.status, total: m2(total), paid: m2(paid), due: m2(total.minus(paid).isNegative() ? 0 : total.minus(paid)),
         items: o._count.items, unsent: o.items.length, kots, payment,
@@ -120,8 +126,9 @@ export async function managerSummary(db: PrismaClient, ctx: AccessContext, outle
     kitchen: can(ctx, "kot.view", outletId),
     inventory: can(ctx, "inventory.view", outletId),
     finance: can(ctx, "finance.view", outletId),
+    approvals: can(ctx, "purchase.approve", outletId),
   };
-  if (!may.sales && !may.ops && !may.inventory && !may.finance) throw new ForbiddenError("Missing permission for the manager view at this outlet");
+  if (!may.sales && !may.ops && !may.inventory && !may.finance && !may.approvals) throw new ForbiddenError("Missing permission for the manager view at this outlet");
   const tz = await outletTimeZone(db, ctx, outletId);
   const day = businessDayRange(now, tz);
   const today = { from: day.start, to: new Date(day.end.getTime() - 1) };
@@ -206,6 +213,28 @@ export async function managerSummary(db: PrismaClient, ctx: AccessContext, outle
       })()
     : null;
 
+  // Purchase orders waiting for the owner's yes (audit MB-05): the oldest first, with the vendor and the amount.
+  const approvals = may.approvals
+    ? await (async () => {
+        const where = { ...scope, status: "SUBMITTED" };
+        const [count, rows] = await Promise.all([
+          db.purchaseOrder.count({ where }),
+          db.purchaseOrder.findMany({ where, orderBy: { createdAt: "asc" }, take: 20, select: { id: true, number: true, vendorId: true, total: true, status: true, createdAt: true, expectedDate: true, notes: true, firstApprovedById: true, autoApproved: true, _count: { select: { lines: true } } } }),
+        ]);
+        const vendors = await db.vendor.findMany({ where: { organizationId: ctx.organizationId, id: { in: [...new Set(rows.map((p) => p.vendorId))] } }, select: { id: true, name: true } });
+        const vendorName = new Map(vendors.map((v) => [v.id, v.name]));
+        const [rules, approverNames] = await Promise.all([getProcurementRules(db, ctx.organizationId), userNames(db, ctx.organizationId, rows.map((p) => p.firstApprovedById))]);
+        return {
+          pendingPurchaseOrders: count,
+          purchaseOrders: rows.map((p) => ({
+            id: p.id, number: p.number, vendor: vendorName.get(p.vendorId) ?? "Unknown vendor", total: m2(p.total), lines: p._count.lines, raisedAt: p.createdAt.toISOString(), expectedDate: p.expectedDate?.toISOString() ?? null, notes: p.notes,
+            // One approver or two (the organization's rules), who gave the first, and whether it was this person (they cannot give the second).
+            approval: { ...approvalStateOf(p, rules, (uid) => approverNames.get(uid) ?? null), youApprovedFirst: Boolean(p.firstApprovedById) && p.firstApprovedById === ctx.userId },
+          })),
+        };
+      })()
+    : null;
+
   // Phase 5 deterministic insights (same engine; it filters rules by permission itself).
   const insights = await businessInsights(db, ctx, { outletId, asOf: now }).then((r) => ({ window: r.window, items: r.insights }))
     .catch((e) => {
@@ -213,5 +242,5 @@ export async function managerSummary(db: PrismaClient, ctx: AccessContext, outle
       throw e;
     });
 
-  return { outletId, businessDate: day.date, timezone: tz, generatedAt: now.toISOString(), sales, ops, inventory, finance, insights };
+  return { outletId, businessDate: day.date, timezone: tz, generatedAt: now.toISOString(), sales, ops, inventory, finance, approvals, insights };
 }

@@ -18,10 +18,6 @@ export function formatElapsed(from: string | Date, now: number = Date.now()): st
   return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m`;
 }
 
-export function minutesSince(from: string | Date, now: number = Date.now()): number {
-  return Math.max(0, (now - new Date(from).getTime()) / 60000);
-}
-
 /** Short, human-friendly reference for a cuid (last 6 chars, upper-case). */
 export function shortRef(id: string): string {
   return id.slice(-6).toUpperCase();

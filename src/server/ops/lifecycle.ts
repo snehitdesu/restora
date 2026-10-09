@@ -6,7 +6,10 @@
  *            -> draining (SIGTERM / SIGINT): readiness answers 503 so the load
  *               balancer stops routing here; after SHUTDOWN_DELAY_MS new API
  *               requests are refused with 503 + Retry-After; in-flight API
- *               requests are awaited (bounded by SHUTDOWN_TIMEOUT_MS)
+ *               requests are awaited (bounded by SHUTDOWN_TIMEOUT_MS); the
+ *               process then keeps refusing for SHUTDOWN_REFUSE_GRACE_MS so
+ *               connections the kernel accepted but Node had not read yet get
+ *               their 503 instead of a connection reset when the server closes
  *            -> shutdown tasks (stop background workers, settle post-commit
  *               side effects, let the export runner finish, disconnect the
  *               database) -> stopped -> Next.js closes the HTTP server and exits.
@@ -67,10 +70,11 @@ async function withDeadline<T>(p: Promise<T>, ms: number): Promise<"done" | "tim
 }
 
 /** Drain and run shutdown tasks once (idempotent). Never throws. */
-export function shutdown(reason: string, opts: { delayMs?: number; timeoutMs?: number } = {}): Promise<void> {
+export function shutdown(reason: string, opts: { delayMs?: number; timeoutMs?: number; graceMs?: number } = {}): Promise<void> {
   state.shutdown ??= (async () => {
     const delayMs = opts.delayMs ?? envMs("SHUTDOWN_DELAY_MS", 0);
     const timeoutMs = opts.timeoutMs ?? envMs("SHUTDOWN_TIMEOUT_MS", 25_000);
+    const graceMs = opts.graceMs ?? envMs("SHUTDOWN_REFUSE_GRACE_MS", 300);
     const t0 = Date.now();
     state.phase = "draining";
     log.info("shutdown started", { event: "shutdown", reason, inFlight: state.inFlight, delayMs, timeoutMs });
@@ -79,6 +83,7 @@ export function shutdown(reason: string, opts: { delayMs?: number; timeoutMs?: n
     const deadline = t0 + delayMs + timeoutMs;
     while (state.inFlight > 0 && Date.now() < deadline) await sleep(25);
     if (state.inFlight > 0) log.warn("shutdown: in-flight requests did not finish in time", { event: "shutdown", inFlight: state.inFlight });
+    if (graceMs) await sleep(graceMs); // requests that arrive now are refused politely (503) rather than reset
     for (const t of state.tasks) {
       const left = Math.max(1_000, deadline - Date.now());
       try {

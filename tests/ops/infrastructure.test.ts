@@ -200,6 +200,15 @@ describe("production configuration (Phase 9)", () => {
     expect(productionEnvWarnings({ ...base, DATABASE_URL: "file:./x.db", AHAROS_DESKTOP: "1" })).toEqual([]);
     expect(productionEnvWarnings({ NODE_ENV: "development" })).toEqual([]);
   });
+
+  it("the shared rate-limit store is accepted, and a PostgreSQL deployment still counting per process is warned about", () => {
+    expect(() => validateProductionEnv({ ...base, RATE_LIMIT_STORE: "database" })).not.toThrow();
+    expect(() => validateProductionEnv({ ...base, RATE_LIMIT_STORE: "Memory" })).not.toThrow();
+    fails({ RATE_LIMIT_STORE: "redis" }, /RATE_LIMIT_STORE must be "memory".*"database"/);
+    expect(productionEnvWarnings({ ...base }).join("\n")).toMatch(/RATE_LIMIT_STORE is not "database"/);
+    expect(productionEnvWarnings({ ...base, RATE_LIMIT_STORE: "database" }).join("\n")).not.toMatch(/RATE_LIMIT_STORE/);
+    expect(productionEnvWarnings({ ...base, DATABASE_URL: "file:./x.db" }).join("\n")).not.toMatch(/RATE_LIMIT_STORE/); // SQLite is one instance
+  });
 });
 
 // ---------------------------------------------------------------- health / readiness / shutdown
@@ -276,6 +285,17 @@ describe("health, readiness and graceful shutdown", () => {
     c.restore();
     expect(order).toEqual(["first", "second"]);
     expect(isDraining()).toBe(true); // stays down: the process is about to exit
+  });
+
+  it("after the drain the process keeps refusing for the grace period, so requests that were not read yet get a 503, not a reset", async () => {
+    const c = capture();
+    const t0 = Date.now();
+    const done = shutdown("TEST", { delayMs: 0, timeoutMs: 5_000, graceMs: 250 });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(beginRequest()).toBeNull(); // nothing was in flight, yet it is still refusing while it waits
+    await done;
+    c.restore();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(240);
   });
 
   it("a hung shutdown task cannot block exit beyond the deadline", async () => {

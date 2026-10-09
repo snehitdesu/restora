@@ -23,7 +23,7 @@ import { prisma } from "@/server/db/client";
 import { type AccessContext, assertOutletAccess, NotFoundError, ValidationError } from "@/server/db/scope";
 import { assertCan, type Permission } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
-import { authorizedOutletIds, dailySales, itemSales, categorySales, salesTrend, outletComparison, variantSales, modifierSales, materialConsumption, stockAgeing, vendorPurchasing, purchaseTrend, SETTLED_ORDER_STATUSES } from "@/server/services/analytics";
+import { authorizedOutletIds, dailySales, itemSales, categorySales, cuisineSales, salesTrend, outletComparison, variantSales, modifierSales, materialConsumption, stockAgeing, vendorPurchasing, purchaseTrend, SETTLED_ORDER_STATUSES } from "@/server/services/analytics";
 import { vendorDues } from "@/server/services/procurement";
 import { computePnL } from "@/server/services/finance";
 import { segmentFor } from "@/server/services/crm";
@@ -37,6 +37,7 @@ import { consumptionVariance } from "@/server/services/variance";
 import { departmentPnl, dailyCosting, stockMatrix } from "@/server/services/departmentCosting";
 import { supplierPriceComparison } from "@/server/services/supplierPrices";
 import { countVarianceTrend, vendorNames } from "@/server/services/inventoryInsights";
+import { staffHours, salesByStaff } from "@/server/services/staffOps";
 import { outletTimeZone } from "@/server/services/businessDay";
 import { businessDayRange } from "@/domain/time";
 
@@ -127,6 +128,18 @@ export const REPORTS: Record<string, AnyReport> = {
       { key: "item", header: "Item", value: (r) => r.name }, { key: "menuItemId", header: "Menu item id", value: (r) => r.menuItemId ?? "UNMAPPED" },
       { key: "qty", header: "Qty", value: (r) => r.qty }, { key: "grossRevenue", header: "Gross revenue", value: (r) => r.grossRevenue },
       { key: "discount", header: "Discount", value: (r) => r.discount }, { key: "refundedQty", header: "Refunded qty", value: (r) => r.refundedQty },
+      { key: "refundedRevenue", header: "Refunded revenue", value: (r) => r.refundedRevenue }, { key: "revenue", header: "Net revenue", value: (r) => r.revenue },
+      { key: "contributionPct", header: "Share %", value: (r) => r.contributionPct },
+    ]),
+
+  // Audit XC-06: sales by cuisine / meal-type tag (a dish with several tags counts under each).
+  CUISINE_SALES: define({
+    id: "CUISINE_SALES", title: "Sales by cuisine tag", permission: "reports.view", maxRows: 1000, aggregate: true,
+    schema: baseFilter.refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed(await cuisineSales(db, ctx, f), w),
+  })([
+      { key: "cuisine", header: "Cuisine tag", value: (r) => r.cuisine }, { key: "dishes", header: "Dishes", value: (r) => r.dishes }, { key: "qty", header: "Qty", value: (r) => r.qty },
+      { key: "grossRevenue", header: "Gross revenue", value: (r) => r.grossRevenue }, { key: "discount", header: "Discount", value: (r) => r.discount },
       { key: "refundedRevenue", header: "Refunded revenue", value: (r) => r.refundedRevenue }, { key: "revenue", header: "Net revenue", value: (r) => r.revenue },
       { key: "contributionPct", header: "Share %", value: (r) => r.contributionPct },
     ]),
@@ -843,6 +856,27 @@ export const REPORTS: Record<string, AnyReport> = {
       { key: "number", header: "Count", value: (r) => r.number }, { key: "approvedAt", header: "Approved at", value: (r) => r.approvedAt }, { key: "department", header: "Department", value: (r) => r.department },
       { key: "itemsCounted", header: "Items counted", value: (r) => r.itemsCounted }, { key: "itemsAdjusted", header: "Items adjusted", value: (r) => r.itemsAdjusted },
       { key: "loss", header: "Loss", value: (r) => r.loss }, { key: "surplus", header: "Surplus", value: (r) => r.surplus }, { key: "net", header: "Net", value: (r) => r.net },
+    ]),
+
+  // Proposal p. 17: overtime and hours feeding payroll. Hours per person from the attendance records.
+  STAFF_HOURS: define({
+    id: "STAFF_HOURS", title: "Staff hours and overtime", permission: "staff.manage", maxRows: 2000, aggregate: true,
+    schema: baseFilter.extend({ dailyHours: z.coerce.number().min(1).max(24).default(8) }).refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed((await staffHours(db, ctx, { outletId: f.outletId, from: f.from ?? new Date(0), to: f.to ?? new Date(), dailyHours: f.dailyHours })).rows, w),
+  })([
+      { key: "name", header: "Name", value: (r) => r.name }, { key: "days", header: "Days worked", value: (r) => r.days }, { key: "shifts", header: "Shifts", value: (r) => r.shifts },
+      { key: "hours", header: "Hours", value: (r) => r.hours }, { key: "regularHours", header: "Regular hours", value: (r) => r.regularHours }, { key: "overtimeHours", header: "Overtime hours", value: (r) => r.overtimeHours },
+      { key: "openRecords", header: "Open records (no check-out)", value: (r) => r.openRecords },
+    ]),
+
+  // Proposal p. 17: sales per staff member.
+  SALES_BY_STAFF: define({
+    id: "SALES_BY_STAFF", title: "Sales by staff member", permission: "reports.view", maxRows: 1000, aggregate: true,
+    schema: baseFilter.refine(rangeOk, RANGE_MSG),
+    run: async ({ db, ctx, f, ...w }) => windowed(await salesByStaff(db, ctx, { outletId: f.outletId, from: f.from ?? new Date(0), to: f.to ?? new Date() }), w),
+  })([
+      { key: "name", header: "Name", value: (r) => r.name }, { key: "orders", header: "Orders", value: (r) => r.orders }, { key: "covers", header: "Covers", value: (r) => r.covers },
+      { key: "sales", header: "Sales", value: (r) => r.sales }, { key: "avgOrder", header: "Average order", value: (r) => r.avgOrder }, { key: "discounts", header: "Discounts given", value: (r) => r.discounts },
     ]),
 };
 

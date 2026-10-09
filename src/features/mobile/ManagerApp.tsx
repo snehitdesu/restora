@@ -2,8 +2,8 @@
 
 /**
  * Owner / manager app (phone-first): today's numbers, live operations, alerts
- * (Phase 5 insights + inventory / finance signals + the in-app alert centre)
- * and staff administration. One summary request (/api/mobile/manager), polled
+ * (Phase 5 insights + inventory / finance signals + the in-app alert centre),
+ * purchase orders waiting for approval and staff administration. One summary request (/api/mobile/manager), polled
  * every 60 s; sections the role may not see are simply absent (the server
  * leaves them out). Staff actions reuse the back-office flows and APIs (rank
  * ceilings, self-edit block and password re-confirmation are server-side).
@@ -35,10 +35,11 @@ type Summary = {
   ops: null | { openOrders: number; notSent: number; billsRequested: number; ordersWithReadyFood: number; outstanding: number; kitchenPending: number | null; kitchenReady: number | null; tables: { total: number; available: number; occupied: number; billRequested: number } };
   inventory: null | { lowStock: number; criticalStock: number; lowItems: Array<{ materialId: string; name: string; quantity: number; reorderLevel: number; critical: boolean }>; negativeStock: number; unmappedSales: number; wastageToday: number };
   finance: null | { drawerSessionsClosed: number; drawerVariance: number; reconciliationMismatches7d: number; vendorDue: number; vendorOverdue: number; expensesToday: number; expenseCount: number; refundsToday: number; refundCount: number };
+  approvals: null | { pendingPurchaseOrders: number; purchaseOrders: Array<{ id: string; number: string; vendor: string; total: number; lines: number; raisedAt: string; expectedDate: string | null; notes: string | null; approval?: { needed: 0 | 1 | 2; done: 0 | 1 | 2; firstApprovedBy: string | null; youApprovedFirst: boolean } }> };
   insights: null | { window: { from: string; to: string }; items: Array<{ code: string; severity: "INFO" | "WARNING" | "CRITICAL"; category: string; title: string; detail: string; link: string }> };
 };
-export type ManagerPerms = { staff: boolean; captain: boolean; pos: boolean; kitchen: boolean };
-type Tab = "today" | "ops" | "alerts" | "staff";
+export type ManagerPerms = { staff: boolean; captain: boolean; pos: boolean; kitchen: boolean; approve: boolean };
+type Tab = "today" | "ops" | "alerts" | "approvals" | "staff";
 
 function Tile({ label, value, hint, tone }: { label: string; value: React.ReactNode; hint?: React.ReactNode; tone?: "bad" | "warn" | "ok" }) {
   return (
@@ -78,6 +79,7 @@ export function ManagerApp({ outletId, outletName, perms }: { outletId: string; 
     { value: "today" as const, label: "Today", icon: "chart" as const },
     { value: "ops" as const, label: "Live", icon: "clock" as const },
     { value: "alerts" as const, label: "Alerts", icon: "alert" as const, badge: (unread ?? 0) + alertCount || null },
+    ...(perms.approve ? [{ value: "approvals" as const, label: "Approvals", icon: "check" as const, badge: data?.approvals?.pendingPurchaseOrders || null, badgeLabel: "waiting for approval" }] : []),
     ...(perms.staff ? [{ value: "staff" as const, label: "Staff", icon: "users" as const }] : []),
   ];
   const body = error && !data ? <ErrorState error={error} onRetry={() => void poller.current?.refresh()} /> : !data ? <LoadingState label="Loading today…" /> : null;
@@ -86,6 +88,8 @@ export function ManagerApp({ outletId, outletName, perms }: { outletId: string; 
     <MobileShell title="Manager" subtitle={data ? `${outletName} · ${data.businessDate}` : outletName} online={online} tab={tab} onTab={setTab} tabs={tabs}>
       {tab === "staff" ? (
         <StaffPanel outletId={outletId} />
+      ) : tab === "approvals" && data ? (
+        <ApprovalsPanel d={data} onChanged={() => void poller.current?.refresh()} />
       ) : tab === "alerts" && !data ? (
         body
       ) : body ? (
@@ -97,7 +101,7 @@ export function ManagerApp({ outletId, outletName, perms }: { outletId: string; 
       ) : (
         <AlertsPanel d={data!} />
       )}
-      {data && tab !== "staff" && <p className="mt-4 text-center text-xs text-ink-400">Updated {formatDateTime(data.generatedAt, data.timezone)} · refreshes every minute</p>}
+      {data && tab !== "staff" && <p className="mt-4 text-center text-xs text-ink-500">Updated {formatDateTime(data.generatedAt, data.timezone)} · refreshes every minute</p>}
     </MobileShell>
   );
 }
@@ -212,6 +216,50 @@ function AlertsPanel({ d }: { d: Summary }) {
         <AlertCenter timeZone={d.timezone} />
       </section>
     </div>
+  );
+}
+
+/** Purchase orders raised by purchasing and waiting for the owner (audit MB-05). The server re-checks purchase.approve and the outlet. */
+function ApprovalsPanel({ d, onChanged }: { d: Summary; onChanged: () => void }) {
+  const { can } = useShell();
+  const a = d.approvals;
+  if (!a) return <EmptyState title="Approvals are not available for your role" icon="check" />;
+  return (
+    <section aria-label="Purchase orders to approve" className="space-y-3">
+      <p className="text-xs text-ink-500">{a.pendingPurchaseOrders === 0 ? "Nothing is waiting for you." : `${a.pendingPurchaseOrders} purchase order${a.pendingPurchaseOrders === 1 ? "" : "s"} waiting for approval, oldest first.`}</p>
+      <ul className="space-y-2" aria-label="Purchase orders waiting">
+        {a.purchaseOrders.map((p) => (
+          <li key={p.id} className="rounded-xl border border-ink-200 bg-paper p-3 shadow-card" data-testid={`approval-${p.number}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{p.number} · {p.vendor}</p>
+                <p className="text-xs text-ink-500">{p.lines} item{p.lines === 1 ? "" : "s"} · raised {formatDateTime(p.raisedAt, d.timezone)}{p.expectedDate ? ` · wanted by ${formatDateTime(p.expectedDate, d.timezone)}` : ""}</p>
+                {p.notes && <p className="mt-1 text-xs italic text-ink-700">“{p.notes}”</p>}
+              </div>
+              <p className="shrink-0 text-base font-semibold tabular-nums">{formatMoney(p.total)}</p>
+            </div>
+            {p.approval?.needed === 2 && (
+              <p className="mt-2 rounded-md bg-warn-50 px-2 py-1 text-xs text-warn-700" data-testid={`approval-steps-${p.number}`}>
+                A large order: two different approvers. {p.approval.done === 0 ? "None yet." : p.approval.youApprovedFirst ? "You gave the first; a second approver has to give the other." : `${p.approval.firstApprovedBy ?? "Someone"} gave the first; yours completes it.`}
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {!p.approval?.youApprovedFirst && (
+                <ActionButton size="sm" variant="success" action={() => api(`/api/procurement/purchase-orders/${p.id}/transition`, { method: "POST", body: { to: "APPROVED" } })}
+                  confirm={{ title: `Approve ${p.number}?`, message: p.approval?.needed === 2 ? `${formatMoney(p.total)} to ${p.vendor}. This is approval ${p.approval.done + 1} of 2.` : `${formatMoney(p.total)} to ${p.vendor}. Purchasing can then send it to the vendor.`, confirmLabel: "Approve" }}
+                  success={p.approval?.needed === 2 && p.approval.done === 0 ? "First approval recorded" : "Approved"} onDone={onChanged}>{p.approval?.needed === 2 ? `Approve (${p.approval.done + 1} of 2)` : "Approve"}</ActionButton>
+              )}
+              {can("purchase.create") && (
+                <ActionButton size="sm" variant="danger" action={() => api(`/api/procurement/purchase-orders/${p.id}/transition`, { method: "POST", body: { to: "CANCELLED" } })}
+                  confirm={{ title: `Reject ${p.number}?`, message: "The purchase order is cancelled. Purchasing can raise a new one.", danger: true, confirmLabel: "Reject" }}
+                  success="Rejected" onDone={onChanged}>Reject</ActionButton>
+              )}
+              <Link href={`/procurement/purchase-orders/${p.id}`} aria-label={`Open ${p.number}`} className="text-xs text-brand-600 hover:underline">Open</Link>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

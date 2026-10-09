@@ -47,10 +47,12 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/inventory/wastage", label: "Wastage", icon: "trash", permission: "inventory.view", section: "Inventory", description: "Wastage documents" },
   { href: "/inventory/worksheet", label: "Dish production", icon: "kitchen", permission: "inventory.view", section: "Inventory", description: "Prepared, sold and wasted per dish per day" },
   { href: "/inventory/production", label: "Production", icon: "factory", permission: "inventory.view", section: "Inventory", description: "Sub-recipe batches" },
+  { href: "/inventory/expiry", label: "Expiry", icon: "clock", permission: "inventory.view", section: "Inventory", description: "Batches that expire soon: the earliest to use first, with batch and FSSAI lot" },
   { href: "/inventory/variance", label: "Variance", icon: "scale", permission: "reports.view", section: "Inventory", description: "Expected vs actual usage, and food cost leakage" },
   { href: "/inventory/labels", label: "Stock labels", icon: "qr", permission: "inventory.view", section: "Inventory", description: "Print QR shelf labels and scan them to see stock" },
 
   { href: "/procurement/reorder", label: "Reorder", icon: "refresh", permission: "purchase.view", section: "Purchasing", description: "What to buy: items below their reorder point" },
+  { href: "/procurement/queue", label: "Procurement queue", icon: "inbox", anyOf: ["purchase.view", "indent.create"], section: "Purchasing", description: "Purchase orders and indents in one list, with what needs approval first" },
   { href: "/procurement/prices", label: "Supplier prices", icon: "tag", permission: "purchase.view", section: "Purchasing", description: "Every vendor's price per base unit, and purchase price history" },
   { href: "/procurement/indents", label: "Indents", icon: "note", anyOf: ["purchase.view", "indent.create"], section: "Purchasing", description: "Purchase requests and kitchen indents" },
   { href: "/procurement/purchase-orders", label: "Purchase orders", icon: "cart", permission: "purchase.view", section: "Purchasing", description: "Orders to vendors" },
@@ -64,12 +66,18 @@ export const NAV_ITEMS: NavItem[] = [
 
   { href: "/customers", label: "Customers", icon: "users", permission: "customer.view", section: "Customers", description: "Guests, history and loyalty" },
   { href: "/customers/segments", label: "Segments", icon: "chart", permission: "customer.view", section: "Customers", description: "Rule-based guest segments" },
-  { href: "/customers/feedback", label: "Feedback", icon: "star", permission: "customer.view", section: "Customers", description: "Guest feedback" },
+  { href: "/customers/feedback", label: "Feedback", icon: "star", permission: "customer.view", section: "Customers", description: "What guests say, who followed up, what keeps going wrong" },
+  { href: "/customers/loyalty", label: "Loyalty & referrals", icon: "wallet", permission: "customer.view", section: "Customers", description: "Tiers from 365-day spend, and referral rewards" },
+  { href: "/customers/coupons", label: "Coupons", icon: "tag", permission: "growth.view", section: "Customers", description: "Codes for guests and the counter, priced by the server" },
+  { href: "/customers/campaigns", label: "Campaigns", icon: "send", permission: "growth.view", section: "Customers", description: "Offers to guests who agreed to hear from you" },
+  { href: "/customers/growth-settings", label: "Growth settings", icon: "sliders", permission: "growth.view", section: "Customers", description: "Automatic offers, quiet hours, feedback and the morning summary" },
 
   { href: "/staff", label: "Staff", icon: "user", permission: "staff.manage", section: "People", description: "Users, roles and outlet access" },
+  { href: "/staff/roster", label: "Roster", icon: "calendar", section: "People", description: "Who works which shift, and my shifts" },
   { href: "/staff/attendance", label: "Attendance", icon: "clock", section: "People", description: "Check-in / check-out" },
   { href: "/staff/leave", label: "Leave", icon: "calendar", section: "People", description: "Leave requests" },
-  { href: "/staff/tasks", label: "Tasks", icon: "check", permission: "task.view", section: "People", description: "Checklists and tasks" },
+  { href: "/staff/tasks", label: "Tasks", icon: "check", permission: "task.view", section: "People", description: "Tasks and follow-ups" },
+  { href: "/staff/checklists", label: "Checklists", icon: "list", permission: "task.view", section: "People", description: "Opening, closing and training duty lists" },
 
   { href: "/finance/money-desk", label: "Money desk", icon: "scale", permission: "finance.view", section: "Finance", description: "Close the day: POS vs declared vs bank, deposits, discrepancies" },
   { href: "/finance/aggregators", label: "Aggregators", icon: "truck", permission: "finance.view", section: "Finance", description: "Zomato and Swiggy payouts against orders, charges and net margin" },
@@ -82,6 +90,7 @@ export const NAV_ITEMS: NavItem[] = [
 
   { href: "/analytics", label: "Analytics", icon: "chart", anyOf: ["reports.view", "finance.view", "inventory.view", "purchase.view"], section: "Insights", description: "Sales, menu, stock and finance analytics with rule-based insights" },
   { href: "/analytics/menu-engineering", label: "Menu engineering", icon: "star", permission: "reports.view", section: "Insights", description: "Stars, plow-horses, puzzles and dogs from real sales and costs" },
+  { href: "/analytics/prep-times", label: "Dish prep times", icon: "clock", permission: "kot.view", section: "Insights", description: "How long dishes really take, measured from the KDS" },
   { href: "/analytics/departments", label: "Department costing", icon: "factory", permission: "reports.view", section: "Insights", description: "Department P&L and daily costing" },
   { href: "/reports", label: "Reports", icon: "chart", anyOf: ["reports.view", "inventory.view", "purchase.view", "finance.view", "customer.view"], section: "Insights", description: "Report center" },
   { href: "/exports", label: "Exports", icon: "download", permission: "export.run", section: "Insights", description: "Background CSV exports" },
@@ -90,6 +99,7 @@ export const NAV_ITEMS: NavItem[] = [
 
   { href: "/settings/organization", label: "Organization", icon: "building", anyOf: ["org.manage", "outlet.manage"], section: "Admin", description: "Organization profile" },
   { href: "/settings/outlets", label: "Outlets", icon: "store", anyOf: ["org.manage", "outlet.manage"], section: "Admin", description: "Outlets" },
+  { href: "/settings/purchasing", label: "Purchasing rules", icon: "sliders", permission: "org.manage", section: "Admin", description: "Who approves a purchase order, by its size: automatic below one amount, two approvers above another" },
   { href: "/settings/integrations", label: "Integrations", icon: "swap", permission: "integration.manage", section: "Admin", description: "Payment gateway, ordering platforms, messaging, accounting export" },
   { href: "/settings/printers", label: "Printers & drawer", icon: "receipt", anyOf: ["outlet.manage", "payment.take"], section: "Admin", description: "Receipt / kitchen printers and the cash drawer" },
   { href: "/settings/departments", label: "Departments", icon: "grid", permission: "master.view", section: "Admin", description: "Outlet departments" },

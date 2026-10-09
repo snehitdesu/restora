@@ -47,6 +47,7 @@ export default defineConfig({
     // disposable e2e deployment.
     // ALLOW_MOCK_PROVIDERS: this disposable, non-public deployment uses the
     // development payment gateway (guest QR online payments, e2e/qr-transaction.spec.ts).
-    env: { DATABASE_URL: E2E_DB_URL, NODE_ENV: "production", AUTH_SECRET: "e2e-test-auth-secret-not-a-real-production-value-0123456789", ALLOW_MOCK_PROVIDERS: "true" },
+    // PUBLIC_BASE_URL: campaigns refuse to send without the address behind every unsubscribe link (e2e/growth.spec.ts).
+    env: { DATABASE_URL: E2E_DB_URL, NODE_ENV: "production", AUTH_SECRET: "e2e-test-auth-secret-not-a-real-production-value-0123456789", ALLOW_MOCK_PROVIDERS: "true", PUBLIC_BASE_URL: `http://localhost:${PORT}` },
   },
 });

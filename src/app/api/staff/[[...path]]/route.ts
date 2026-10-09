@@ -8,6 +8,8 @@ import {
   listTasks, createTask, transitionTask, cancelTask,
 } from "@/server/services/staff";
 import { roleMatrix, listAttendance, listLeave } from "@/server/services/adminQueries";
+import { assignShift, unassignShift, roster, myShifts, createChecklistTemplate, updateChecklistTemplate, listChecklistTemplates, startChecklist } from "@/server/services/staffOps";
+import { emailPasswordLink, sendStaffInvite } from "@/server/services/staffInvite";
 
 export const runtime = "nodejs";
 
@@ -15,19 +17,39 @@ const page = z.object({ take: z.coerce.number().int().positive().max(200).option
 
 export const { GET, POST, PATCH, DELETE } = createRouter([
   { method: "GET", path: "", handler: ({ ctx, query }) => listStaff(prisma, ctx, page.extend({ outletId: z.string().optional() }).parse(query)) },
-  { method: "POST", path: "", reauth: "staff.manage", handler: ({ ctx, body }) => createStaff(ctx, body as never) },
+  {
+    method: "POST", path: "", reauth: "staff.manage",
+    handler: async ({ ctx, body }) => {
+      const { emailInvite, ...rest } = z.object({ emailInvite: z.boolean().optional() }).passthrough().parse(body);
+      const created = await createStaff(ctx, rest as never);
+      if (!emailInvite) return created;
+      // The link the creator is shown is the one that is e-mailed; a failure to send never loses it.
+      return { ...created, invite: await emailPasswordLink(ctx, { userId: created.id, email: created.email, name: created.name, ...created.setup }) };
+    },
+  },
   { method: "GET", path: "roles", handler: async ({ ctx }) => roleMatrix(ctx) },
   { method: "GET", path: "attendance", handler: ({ ctx, query }) => listAttendance(prisma, ctx, query) },
   { method: "GET", path: "leave", handler: ({ ctx, query }) => listLeave(prisma, ctx, query) },
   { method: "POST", path: "memberships", reauth: "staff.manage", handler: ({ ctx, body }) => assignMembership(ctx, body as never) },
   { method: "DELETE", path: "memberships/:id", reauth: "staff.manage", handler: ({ ctx, params }) => revokeMembership(ctx, params.id) },
   { method: "POST", path: "users/:id/active", reauth: "staff.manage", handler: ({ ctx, params, body }) => setUserActive(ctx, params.id, z.object({ active: z.boolean() }).parse(body).active) },
+  { method: "POST", path: "users/:id/invite", reauth: "staff.manage", handler: ({ ctx, params }) => sendStaffInvite(ctx, params.id) },
   { method: "POST", path: "users/:id/password-link", reauth: "staff.manage", handler: ({ ctx, params }) => issuePasswordLink(ctx, params.id) },
   { method: "POST", path: "attendance/check-in", handler: ({ ctx, body }) => checkIn(ctx, body as never) },
   { method: "POST", path: "attendance/:id/check-out", handler: ({ ctx, params }) => checkOut(ctx, params.id) },
   { method: "PATCH", path: "attendance/:id", handler: ({ ctx, params, body }) => correctAttendance(ctx, params.id, body as never) },
   { method: "GET", path: "shifts", handler: ({ ctx, query }) => listShifts(prisma, ctx, outletQuery.parse(query).outletId) },
   { method: "POST", path: "shifts", handler: ({ ctx, body }) => createShift(ctx, body as never) },
+  // Roster: who works which shift on which day.
+  { method: "GET", path: "roster", handler: ({ ctx, query }) => roster(prisma, ctx, query as never) },
+  { method: "GET", path: "my-shifts", handler: ({ ctx, query }) => myShifts(prisma, ctx, query as never) },
+  { method: "POST", path: "roster", handler: ({ ctx, body }) => assignShift(ctx, body as never) },
+  { method: "DELETE", path: "roster/:id", handler: ({ ctx, params }) => unassignShift(ctx, params.id) },
+  // Checklist templates: opening / closing / training duty lists that become the day's tasks.
+  { method: "GET", path: "checklists", handler: ({ ctx, query }) => listChecklistTemplates(prisma, ctx, query as never) },
+  { method: "POST", path: "checklists", handler: ({ ctx, body }) => createChecklistTemplate(ctx, body as never) },
+  { method: "PATCH", path: "checklists/:id", handler: ({ ctx, params, body }) => updateChecklistTemplate(ctx, params.id, body as never) },
+  { method: "POST", path: "checklists/:id/start", handler: ({ ctx, params, body }) => startChecklist(ctx, params.id, body as never) },
   { method: "POST", path: "leave", handler: ({ ctx, body }) => requestLeave(ctx, body as never) },
   { method: "POST", path: "leave/:id/approve", handler: ({ ctx, params }) => approveLeave(ctx, params.id) },
   { method: "POST", path: "leave/:id/reject", handler: ({ ctx, params }) => rejectLeave(ctx, params.id) },

@@ -1,15 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { request, describeError, ApiError } from "@/lib/api/client";
 import { formatMoney } from "@/lib/format";
 import { cartFingerprint, toOrderItems } from "@/features/pos/cart";
 import { createSubmitGuard } from "@/features/pos/submitGuard";
-import { clearSubmission, orderUrl, rememberOrder, saveCart, submissionKey } from "@/features/guest/session";
+import { clearSubmission, loadReferral, orderUrl, rememberOrder, saveCart, saveCoupon, saveNotice, saveReferral, submissionKey } from "@/features/guest/session";
 import { useServerQuote, useStorefront } from "@/features/guest/storefront";
 import { OfflineBanner, TopBar } from "@/features/guest/components/Chrome";
 import { Totals } from "@/features/guest/components/GuestCartScreen";
+import { CouponBox, ReferralAndOffers } from "@/features/guest/components/GuestOffers";
 import { Alert, Spinner } from "@/features/guest/components/Bits";
 import { SfIcon } from "@/features/guest/components/SfIcon";
 
@@ -30,12 +31,16 @@ export const phoneValid = (raw: string) => !raw.trim() || /^\+?\d{10,15}$/.test(
  * where the payment gateway is allowed to run.
  */
 export function GuestCheckoutScreen({ navigate = (url: string) => window.location.assign(url) }: { navigate?: (url: string) => void }) {
-  const { token, cart, cartReady, data, base, estimate, dispatch, refreshMenu } = useStorefront();
-  const { quote, loading, unavailable, recheck } = useServerQuote();
+  const { token, cart, cartReady, data, base, estimate, dispatch, refreshMenu, couponCode, setCouponCode } = useStorefront();
   const online = data.payment.online;
   const [method, setMethod] = useState<PayMethod>("CASH");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [referral, setReferral] = useState("");
+  const [optIn, setOptIn] = useState(false);
+  // A friend's invite link (/r/CODE) leaves the code on this device until it is used.
+  useEffect(() => setReferral(loadReferral() ?? ""), []);
+  const { quote, loading, unavailable, recheck } = useServerQuote({ phone: phoneValid(phone) && phone.trim() ? normalizePhone(phone) : undefined });
   const [touched, setTouched] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,13 +57,21 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     setError(null);
     setPlacing(true);
     const customer = name.trim() || phone.trim() ? { ...(name.trim() ? { name: name.trim().slice(0, 60) } : {}), ...(phone.trim() ? { phone: normalizePhone(phone) } : {}) } : undefined;
-    const fp = cartFingerprint(cart, JSON.stringify([customer ?? null, payMethod]));
+    const withPhone = Boolean(phone.trim());
+    // Only a code the server just accepted rides with the order; the server prices it again when the order is placed.
+    const coupon = quote?.coupon?.ok ? quote.coupon.code : undefined;
+    const referralCode = withPhone && referral.length >= 4 ? referral : undefined;
+    const marketingOptIn = withPhone && optIn ? true : undefined;
+    const fp = cartFingerprint(cart, JSON.stringify([customer ?? null, payMethod, coupon ?? null, referralCode ?? null, marketingOptIn ?? null]));
     // The key survives a refresh (sessionStorage): resubmitting the same order replays it.
     const result = await guard.current.run(fp, () =>
-      request<{ orderId: string; ref: string; accessKey: string }>(`/api/qr/t/${encodeURIComponent(token)}/orders`, {
+      request<{ orderId: string; ref: string; accessKey: string; coupon?: { applied: boolean; message?: string }; referral?: { attached: boolean; message?: string } }>(`/api/qr/t/${encodeURIComponent(token)}/orders`, {
         method: "POST",
         idempotencyKey: submissionKey(token, fp),
-        body: { items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod },
+        body: {
+          items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod,
+          ...(coupon ? { couponCode: coupon } : {}), ...(referralCode ? { referralCode } : {}), ...(marketingOptIn ? { marketingOptIn } : {}),
+        },
       })
     );
     if (result.status === "busy") return;
@@ -75,6 +88,12 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     const placed = result.value;
     rememberOrder({ orderId: placed.orderId, key: placed.accessKey, token, ref: placed.ref, at: new Date().toISOString() });
     clearSubmission(token);
+    // The order never fails because of a code; if one was not used, the order page says why.
+    const notices = [placed.coupon && !placed.coupon.applied ? `Coupon not applied: ${placed.coupon.message ?? "this code can't be used here."}` : null, placed.referral && !placed.referral.attached ? `Referral not used: ${placed.referral.message ?? "this code can't be used."}` : null].filter(Boolean);
+    if (notices.length) saveNotice(placed.orderId, notices.join(" "));
+    if (referralCode) saveReferral(null);
+    saveCoupon(token, null);
+    setCouponCode(null);
     saveCart(token, { ...cart, lines: [], notes: "" });
     dispatch({ type: "clear" });
     // A full page load: the order page is where the payment gateway's script is allowed (CSP).
@@ -154,6 +173,8 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
           )}
         </section>
 
+        <CouponBox quote={quote} loading={loading} />
+
         <section className="sf-card" aria-labelledby="co-you">
           <h2 id="co-you" className="sf-card-title">About you</h2>
           <label className="sf-field" style={{ marginTop: 8 }}>
@@ -184,6 +205,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
               {touched && !phoneOk ? "Enter a valid mobile number, or leave it empty." : "Only used by the café for this order and your visits."}
             </p>
           </label>
+          <ReferralAndOffers phoneGiven={Boolean(phone.trim()) && phoneOk} referral={referral} onReferral={setReferral} optIn={optIn} onOptIn={setOptIn} />
         </section>
 
         <section className="sf-card" aria-labelledby="co-pay">

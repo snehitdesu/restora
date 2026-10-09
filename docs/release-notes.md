@@ -1,3 +1,35 @@
+# RESTORA release notes
+
+## Unreleased: everything since 1.0.0-rc.1 (Groups 1-9), 2026-10-09
+
+Not tagged yet: it ships when the release checklist (`docs/release-checklist.md`) is done on the release candidate, in particular the external items
+(hosting, providers, signing). Feature-by-feature state: `docs/master-feature-audit.md`; evidence: `docs/stabilization-report.md` §8.
+
+**Added.** Inventory and purchasing: reorder engine with POs and indents from it, vendor approval gate, department-to-department issues, purchase-order approval
+rules (small orders approve themselves, large ones need two people) and line review, one queue for POs and indents, expiry list, CSV import, brand / vendor
+contacts / cuisine tags. Kitchen and money: production batches and worksheet, manual sales, consumption variance, money desk and day close, menu
+engineering, department P&L, daily costing, stock matrix, QR labels. Integrations: Tally / Zoho / Google Sheets sync, aggregator finance and on / off, nightly
+POS re-pull, control room. Growth: consent-gated messaging and e-mail (Resend), loyalty tiers, coupons, referrals, feedback loop, campaigns, lifecycle
+automations, 9 AM summary, guest offers and rating pages. Floor and mobile: held bills, move / merge / split a bill, booking notes on tickets, "table ready"
+message, measured dish prep times and late-ticket alerts, upsell hints, universal search, owner approvals on the phone. Staff: roster, checklists, hours and
+sales-per-staff reports, invitation e-mail. Guests: order the same again and split the bill between phones. Alerts: purchase approval, reservation, low stock
+and overdue vendor bills. Reports: sales by cuisine tag.
+
+**Changed.** `AuditLog` and `InventoryLedger` are now refused by the database itself (triggers). Rate limits can be shared between instances. Password forms keep
+what was typed before the page finished loading. Graceful shutdown keeps answering 503 briefly after the drain instead of resetting unread connections. Vendor-due
+alerts go to people who can pay vendors (`vendor.pay`), not to everyone with `finance.view`. The browser E2E suites on SQLite and PostgreSQL are CI release gates.
+
+**Upgrade notes.** Five new migrations in both histories (`growth_crm`, `floor_ops`, `purchasing_rules_expiry`, `staff_ops`, `append_only_rate_limit`): apply
+with `npm run db:pg:deploy` (never `db push`). The last one adds triggers, so the migrating role must own the tables, and a disposable-database wipe (demo seed,
+test fixtures) must go through `withAppendOnlyGuardsOff`; never run the demo seed on a real database. New environment variables: `RATE_LIMIT_STORE`
+(`database` recommended with more than one instance), `SHUTDOWN_REFUSE_GRACE_MS` (default 300). Provider connections (messaging, e-mail, accounting, Sheets,
+aggregators) are per-organization settings in Integrations; nothing is sent until one is connected, and `PUBLIC_BASE_URL` must be set for links in messages.
+
+**Known limitations.** Only mocks and emulators have run for every external provider (`docs/stabilization-report.md` §8.4). Row-level security is not applied.
+The desktop apps are unsigned. 20 audit rows are not built (native apps, offline captain, e-invoice, own ordering website, optional modules).
+
+---
+
 # RESTORA 1.0.0-rc.1 — release notes
 
 _Release candidate, 2026-10-05. "The Operating System for Restaurants."_

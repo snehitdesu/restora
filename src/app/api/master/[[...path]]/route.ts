@@ -13,13 +13,15 @@ import {
   listFloors, updateFloor, listUnitConversions, listMaterialCategories,
 } from "@/server/services/adminQueries";
 import { listIntegrations, upsertIntegration } from "@/server/services/integrations";
+import { importMasterData } from "@/server/services/bulkImport";
+import { addVendorContact, updateVendorContact, removeVendorContact, listVendorContacts } from "@/server/services/vendorContacts";
 
 export const runtime = "nodejs";
 
 const bool = z.enum(["true", "false"]).optional().transform((v) => (v === undefined ? undefined : v === "true"));
 const pageQ = z.object({ take: z.coerce.number().int().positive().max(200).optional(), cursor: z.string().optional(), search: z.string().max(100).optional(), active: bool, status: z.string().max(20).optional() });
 
-export const { GET, POST, PATCH } = createRouter([
+export const { GET, POST, PATCH, DELETE } = createRouter([
   // organization
   { method: "GET", path: "organization", handler: ({ ctx }) => getOrganization(prisma, ctx) },
   { method: "PATCH", path: "organization", reauth: "settings.manage", handler: ({ ctx, body }) => updateOrganization(ctx, body as never) },
@@ -41,6 +43,13 @@ export const { GET, POST, PATCH } = createRouter([
   { method: "GET", path: "materials/:id", handler: ({ ctx, params }) => getMaterial(prisma, ctx, params.id) },
   { method: "PATCH", path: "materials/:id", handler: ({ ctx, params, body }) => updateMaterial(ctx, params.id, body as never) },
   // vendors
+  // bulk import from a CSV (audit MD-21): a dry run by default; `commit: true` writes, all or nothing
+  { method: "POST", path: "import/:kind", handler: ({ ctx, params, body }) => importMasterData(ctx, z.enum(["materials", "vendors"]).parse(params.kind), body as never) },
+  // vendor contacts: several people to call per vendor (audit MD-15)
+  { method: "GET", path: "vendors/:id/contacts", handler: ({ ctx, params }) => listVendorContacts(prisma, ctx, params.id) },
+  { method: "POST", path: "vendors/:id/contacts", handler: ({ ctx, params, body }) => addVendorContact(ctx, params.id, body as never) },
+  { method: "PATCH", path: "vendor-contacts/:contactId", handler: ({ ctx, params, body }) => updateVendorContact(ctx, params.contactId, body as never) },
+  { method: "DELETE", path: "vendor-contacts/:contactId", handler: ({ ctx, params }) => removeVendorContact(ctx, params.contactId) },
   { method: "GET", path: "vendors", handler: ({ ctx, query }) => listVendors(prisma, ctx, pageQ.parse(query)) },
   { method: "POST", path: "vendors", handler: ({ ctx, body }) => createVendor(ctx, body as never) },
   { method: "GET", path: "vendors/:id", handler: ({ ctx, params }) => getVendor(prisma, ctx, params.id) },

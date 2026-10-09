@@ -12,6 +12,8 @@ import { assertCan, can, type Permission } from "@/server/auth/rbac";
 import { authorizedOutletIds } from "@/server/services/analytics";
 import { canSeeStockValue, withoutLineCosts } from "@/server/services/costVisibility";
 import { D, money, num, qty as roundQty } from "@/domain/money";
+import { approvalStateOf, getProcurementRules, userNames } from "@/server/services/procurementRules";
+import { indentFulfilment } from "@/server/services/indentFulfilment";
 
 const listFilter = z.object({
   outletId: z.string().optional(),
@@ -61,9 +63,11 @@ export async function listIndents(db: PrismaClient, ctx: AccessContext, input: D
   return paged(rows, f.take);
 }
 
+/** The indent with what the store has dispatched against it (issues that name it), in base units. */
 export async function getIndent(db: PrismaClient, ctx: AccessContext, id: string) {
   const row = await db.purchaseIndent.findUnique({ where: { id }, include: { lines: true } });
-  return readable(ctx, row, "Indent", indentReadPermission(ctx, row?.outletId));
+  const indent = readable(ctx, row, "Indent", indentReadPermission(ctx, row?.outletId));
+  return { ...indent, fulfilment: await indentFulfilment(db, ctx, id) };
 }
 
 export async function listPurchaseOrders(db: PrismaClient, ctx: AccessContext, input: DocumentListFilter = {}) {
@@ -75,8 +79,11 @@ export async function listPurchaseOrders(db: PrismaClient, ctx: AccessContext, i
   return paged(rows, f.take);
 }
 
+/** The order with where it stands under the organization's approval rules (one or two approvers, who gave the first). */
 export async function getPurchaseOrder(db: PrismaClient, ctx: AccessContext, id: string) {
-  return readable(ctx, await db.purchaseOrder.findUnique({ where: { id }, include: { lines: true, receipts: { select: { id: true, number: true, status: true, receivedAt: true } } } }), "Purchase order", "purchase.view");
+  const po = readable(ctx, await db.purchaseOrder.findUnique({ where: { id }, include: { lines: true, receipts: { select: { id: true, number: true, status: true, receivedAt: true } } } }), "Purchase order", "purchase.view");
+  const [rules, names] = await Promise.all([getProcurementRules(db, ctx.organizationId), userNames(db, ctx.organizationId, [po.firstApprovedById, po.approvedById])]);
+  return { ...po, approval: { ...approvalStateOf(po, rules, (uid) => names.get(uid) ?? null), approvedBy: po.approvedById ? names.get(po.approvedById) ?? null : null, youApprovedFirst: Boolean(po.firstApprovedById) && po.firstApprovedById === ctx.userId } };
 }
 
 export async function listGRNs(db: PrismaClient, ctx: AccessContext, input: DocumentListFilter = {}) {

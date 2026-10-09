@@ -1,5 +1,7 @@
 # Group 4 implementation map: menu engineering, advanced inventory, costing
 
+> Design record written before the group was built. Where it says something "does not exist" or is a "draft", it describes that moment, not the repository today: current state is in `docs/master-feature-audit.md` and `docs/stabilization-report.md`.
+
 Written 2026-10-08 after Group 3, from a read of `svc/menuEngineering.ts`,
 `svc/departmentCosting.ts` (both drafts from the 10-07 pass), `svc/recipe.ts`,
 `svc/orderConsumption.ts`, `svc/analytics.ts` and the proposal (pp. 4, 6, 8,

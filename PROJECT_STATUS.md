@@ -1,10 +1,41 @@
 # RESTORA (working name Aharos) — Project Status
 
-_Last updated: 2026-10-05 — V1 release work (Phases 9–14). The sections from
-"Stack" downward are the historical record up to Phase 5B; current, verified
-status is in the phase reports listed here._
+_Last updated: 2026-10-09 — end of the master program (Groups 1-9). Current, verified status is in
+`docs/stabilization-report.md` §8 (evidence), `docs/master-feature-audit.md` (feature by feature, the source of
+truth) and `docs/group-delivery-map.md` (where each group lives). The sections below "Earlier status" are the
+historical record up to Phase 5B and are kept as written._
 
-## Current status
+## Current status (2026-10-09)
+Groups 1-9 of the master program are implemented on branch `claude/serene-ramanujan-rmvdss` (PR #1 into `main`).
+Of the 187 audited rows: **130 IMPLEMENTED + VERIFIED, 25 IMPLEMENTED + NOT EXTERNALLY VERIFIED (mock / emulator only),
+9 PARTIAL, 20 NOT BUILT, 3 INTENTIONALLY DEFERRED** (multi-outlet / multi-restaurant). Nothing is claimed live
+that has not run against its provider.
+
+| Group | Contents | State |
+|---|---|---|
+| 1 Integrity | vendor approval gate, issue-to-department stock moves, idempotency and locking | IMPLEMENTED + VERIFIED |
+| 2 Reorder | reorder engine, POs and indents from it | IMPLEMENTED + VERIFIED |
+| 3 Kitchen production + money desk | production, wastage, worksheet, manual sales, variance, money desk, day lock | IMPLEMENTED + VERIFIED |
+| 4 Menu engineering + costing | menu engineering, department P&L, daily costing, stock matrix, supplier prices, labels, overhead % | IMPLEMENTED + VERIFIED |
+| 5 Integrations | Tally / Zoho sync, Sheets sync, aggregator finance, nightly POS re-pull, control room | IMPLEMENTED + NOT EXTERNALLY VERIFIED (emulators and mocks only) |
+| 6 Growth / CRM | consent-gated messaging, e-mail (Resend), loyalty tiers, coupons, referrals, feedback loop, campaigns, lifecycle automations, 9 AM summary, guest offers | IMPLEMENTED + VERIFIED against the mock provider; real delivery NOT EXTERNALLY VERIFIED |
+| 7 / 8 Floor, mobile, kitchen | held bills, move / merge / split bills, booking notes on tickets, "table ready" message, measured dish prep times, late alerts, upsell, universal search, owner approvals on the phone | IMPLEMENTED + VERIFIED (native apps, offline captain, e-invoice IRN are NOT BUILT) |
+| Purchasing, expiry, master data, staff ops | approval rules, line review, one queue, indent fulfilment, expiry list, CSV import, brand / vendor contacts, aggregator on / off, roster, checklists, hours, invitations | IMPLEMENTED + VERIFIED (aggregator on / off and invitation e-mail: NOT EXTERNALLY VERIFIED) |
+| 9 Hardening | database-enforced append-only history, shared rate limits, observability, load, accessibility, responsive | IMPLEMENTED + VERIFIED; row-level security remains PARTIAL by design |
+| QR-08, notifications | order again / split the bill from the phones; purchase-approval, reservation, low-stock and vendor-dues notifications | IMPLEMENTED + VERIFIED |
+
+**Verified at the final commit** (details and dates: `docs/stabilization-report.md` §8): typecheck and lint clean on both Prisma clients;
+Vitest 160 files, 1605 passed, 8 skipped, 0 failed on SQLite and 160 files (157 run, 3 skipped), 1582 passed, 31 skipped, 0 failed on PostgreSQL 16; both migration histories apply to an empty database with no drift; browser E2E
+133/133 on SQLite and on PostgreSQL 16 in CI; investor flow 3/3; desktop build, E2E, packaging and DMG on Windows and both macOS architectures in CI; backup / restore
+drill 10/10 and an end-to-end load run with zero correctness violations on the current schema; axe (WCAG 2.1 A / AA) and ten-viewport
+sweeps clean. The browser suites are CI release gates.
+
+**Not verified (external):** hosting and HTTPS, scheduled backups / WAL archiving on real infrastructure, a hosted PostgreSQL instance,
+code-signing certificates, and every real provider (Razorpay keys, Petpooja, Zomato / Swiggy, WhatsApp / SMS, Resend mailbox, Tally,
+Zoho Books, Google Sheets, printers). PostgreSQL row-level security is designed but not applied (`docs/postgres-rls.md`).
+Full list with what each needs: `docs/stabilization-report.md` §8.4.
+
+## Earlier status (Phases 2-14, 2026-10-05) — historical
 | Phase | Report | Status |
 |---|---|---|
 | 2 Transactions · 3 Inventory/procurement · 4 Finance · 5 Analytics · 6 Staff/mobile · 7 Integrations | `docs/phase2…7-*.md` | complete (per reports) |
@@ -15,11 +46,9 @@ status is in the phase reports listed here._
 | 14 Production launch | `docs/phase14-production-launch.md` | PASS WITH DOCUMENTED LIMITATIONS — deployment **pending external infrastructure** |
 | V1 summary | `docs/RESTORA-V1-FINAL-REPORT.md` | **V1 READY WITH DOCUMENTED LIMITATIONS** (release candidate 1.0.0-rc.1) |
 
-Latest full verification (Phase 14, 2026-10-05, 1.0.0-rc.1): Vitest 887 passed on
-SQLite and 865 passed on PostgreSQL 16 (0 failed), browser E2E 77/77 on both
-databases (one intermittent SQLite failure in a first run, see the Phase 14 report),
-desktop E2E 7/7, packaged-desktop security 23/23, no migration drift; DR drill 11/11,
-PITR 7/7, staging deployment rehearsal smoke 18/18.
+Phase 14 verification (2026-10-05, 1.0.0-rc.1, before Groups 1-5): Vitest 887 passed on SQLite and 865 on PostgreSQL 16,
+browser E2E 77/77 on both databases, desktop E2E 7/7, packaged-desktop security 23/23, no migration drift; DR drill 11/11, PITR 7/7,
+staging deployment rehearsal smoke 18/18.
 
 ## 2026-10-06 — production completion pass (real menu, Razorpay, QR)
 Report: `docs/production-completion-report.md`.
@@ -48,7 +77,7 @@ guest-ordering services (no second order / payment / kitchen engine).
 Next.js 15.5.27 (App Router) · React 19.0.8 · TypeScript (strict) · Prisma 6 · SQLite (dev/test) / PostgreSQL 16 (target, **executed**) ·
 Zod · bcryptjs · Vitest.
 
-## Verification gate
+## Verification gate (historical: Phase 5B, 2026-10-02; superseded by the current status above)
 | Gate | Status |
 |------|--------|
 | `prisma format` / `validate` / `generate` | ✅ |

@@ -1,17 +1,41 @@
 # RESTORA (Aharos) — Testing
 
-## Current totals (2026-10-05, Phase 9 validation)
+## Current totals (2026-10-09, end of the master program)
 | Suite | Command | Result |
 |---|---|---|
-| Unit + DB integration, SQLite | `npm test` | 884 passed, 6 skipped (PostgreSQL-only) |
-| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 862 passed, 28 skipped (SQLite/desktop-only) |
-| Browser E2E (production build) | `npm run e2e` · PostgreSQL: `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 77/77 on both |
-| Desktop E2E | `npm run desktop:build && npm run desktop:e2e` | 7/7 |
-| Packaged desktop security | `npx electron-builder --dir && npm run desktop:verify` | 23/23 |
-| Runtime (shutdown / crash recovery) | `VERIFY_DATABASE_URL=postgresql://…/<fresh db> node scripts/ops/verify-runtime.mjs` | 18/18 |
-| Contention benchmark | `scripts/ops/contention-bench.mjs` (header) | `docs/production-infrastructure.md` §7 |
-| DR drills | `scripts/ops/backup-drill.mjs`, `scripts/ops/pitr-drill.mjs` | 11/11, 7/7 |
-| Post-deploy smoke | `SMOKE_BASE=… SMOKE_EMAIL=… SMOKE_PASSWORD=… node scripts/ops/smoke-test.mjs [--write]` | 18/18 on a restored copy |
+| Unit + DB integration, SQLite | `npm test` | 160 files, 1605 passed, 8 skipped, 0 failed |
+| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 160 files (157 run, 3 skipped), 1582 passed, 31 skipped, 0 failed |
+| Browser E2E (production build), SQLite | `npm run e2e` | 133/133 (5 sign-in setups + 128 specs), CI |
+| Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) |
+| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3, CI |
+| Desktop E2E + packaged-app verification | `npm run desktop:build && npm run desktop:e2e`; `npx electron-builder --dir && npm run desktop:verify` | Windows, macOS arm64 and macOS x64 in CI: build, E2E, packaging (fuses, asar integrity, upgrade from the previous release, launch attacks), DMG |
+| Backup / restore drill, load test | `node scripts/ops/backup-drill.mjs`, `node scripts/ops/load-test.mjs` | 2026-10-09 on the current schema: drill 10/10; load run 0 correctness violations (`docs/production-infrastructure.md` §7.1, §8.0). PITR drill and post-deploy smoke last run 2026-10-05 |
+
+**All of the above except the drills run in CI on every change** (`.github/workflows/ci.yml`: SQLite, PostgreSQL 16, web E2E on both,
+investor flow, desktop on Windows and both macOS architectures). The 160 Vitest files: `tests/domain` 74, `tests/ui` 32, `tests/api` 22,
+`tests/db` 9, `tests/integrations` 6, `tests/auth` 5, `tests/desktop` 4, `tests/config` 3, and one each in `tests/docs` (audit totals),
+`tests/e2e` (guest journey in the service layer), `tests/ops`, `tests/qa`, `tests/site`. Browser specs: `e2e/*.spec.ts` (33 files) plus
+`e2e/investor/`; desktop: `desktop/e2e/`.
+
+Where to find the tests of a group: `docs/group-delivery-map.md`. Quality gates that are tests, not documents: `e2e/quality-sweep.spec.ts`
+(ten viewports from 320 to 1920 px plus a phone held sideways: no console error, no error status, no sideways scrolling; axe WCAG 2.1 A / AA
+at a phone and a desktop width, serious or critical findings fail), `tests/db/append-only.test.ts` (the database refuses to change history),
+`tests/docs/audit-totals.test.ts` (the audit's totals match its rows).
+
+Notes for running locally:
+- The SQLite and PostgreSQL suites share one generated Prisma client: run `npx prisma generate` (SQLite) or
+  `npx prisma generate --schema prisma/postgres/schema.prisma` before switching, and never run both at once. `npm run build`
+  regenerates the SQLite client; build with `npx next build` after generating the PostgreSQL client.
+- Playwright pins a Chromium build; if the image has another one, point a throwaway config at it with
+  `use.launchOptions.executablePath` instead of changing the repository config.
+- `tests/desktop/shell-policy.test.ts` has a Windows-path test (runs on Windows only) and a POSIX twin: `sqliteUrl`
+  resolves with the host's path rules by design.
+- E2E and the demo seed use the outlet's business day (Asia/Kolkata), not the host's calendar day; the Money Desk spec
+  depends on yesterday being untouched. The demo outlets are open 11:00-23:30; `e2e/prepare-db.ts` (and the load script) open them all day so
+  guest ordering does not depend on the time the suite runs, and the storefront spec sets its own hours to test the closed state.
+- With `RATE_LIMIT_STORE=database` the counters live in `RateLimitWindow` and survive a server restart: clear that table between load runs
+  on a disposable database.
+- Tests that fill a form before the page has hydrated hold back the scripts on purpose (`LOGIN-002b`, `PWD-007`); other specs wait for hydration.
 
 PostgreSQL databases for tests must be **fresh** (create one per run): nothing in
 the test harnesses resets or force-pushes a database. The section below is the

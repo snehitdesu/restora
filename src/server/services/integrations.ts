@@ -24,7 +24,7 @@ import { decryptSecret, encryptSecret } from "@/server/integrations/secrets";
 import { getPaymentProvider } from "@/integrations/payment";
 import { getAggregatorProvider } from "@/integrations/aggregator";
 import { getPOSProvider } from "@/integrations/pos";
-import { twilioCredentialsSchema, TwilioMessagingProvider, MockMessagingProvider, type MessagingProvider } from "@/integrations/messaging";
+import { twilioCredentialsSchema, TwilioMessagingProvider, resendCredentialsSchema, ResendEmailProvider, MockMessagingProvider, type MessageChannel, type MessagingProvider } from "@/integrations/messaging";
 import { safeMessage } from "@/integrations/http";
 import { mockProvidersAllowed } from "@/integrations/policy";
 import { ACCOUNTING_FILE_PROVIDERS, ACCOUNTING_SYNC_PROVIDERS, isSyncProvider, validateSyncConnection } from "@/server/integrations/accountingConfig";
@@ -41,6 +41,7 @@ export const MOCK_PROVIDERS = new Set(["mock"]);
 
 /** Per-template opt-in for customer messages (default: nothing is sent). */
 export const messagingConfigSchema = z.object({
+  /** Channel of order messages (confirmed / ready / paid); other messages name their own channel. */
   channel: z.enum(["SMS", "WHATSAPP"]).default("SMS"),
   templates: z.object({ ORDER_CONFIRMED: z.boolean().default(false), ORDER_READY: z.boolean().default(false), PAYMENT_RECEIVED: z.boolean().default(false) }).default({}),
 }).strict();
@@ -76,13 +77,12 @@ const view = (c: ConnectionRow) => ({
   config: c.config ? (JSON.parse(c.config) as Record<string, unknown>) : null,
   lastCheckedAt: c.lastCheckedAt, lastSuccessAt: c.lastSuccessAt, lastFailureAt: c.lastFailureAt, lastError: c.lastError, updatedAt: c.updatedAt,
 });
-export type IntegrationView = ReturnType<typeof view>;
 
 function validateFor(d: z.output<typeof upsertSchema>) {
   if (WEBHOOK_KINDS.has(d.kind) && !d.externalRef) throw new ValidationError("This integration needs the provider's account / store id", { fieldErrors: { externalRef: ["Required"] } });
   if (d.kind !== "PAYMENT" && WEBHOOK_KINDS.has(d.kind) && !d.outletId) throw new ValidationError("POS and aggregator connections must be bound to an outlet", { fieldErrors: { outletId: ["Choose the outlet these orders belong to"] } });
   if ((d.kind === "MESSAGING" || d.kind === "ACCOUNTING" || d.kind === "SHEETS") && d.outletId) throw new ValidationError("Messaging, accounting and spreadsheet connections are organization-wide");
-  if (d.kind === "MESSAGING" && !["mock", "twilio"].includes(d.provider)) throw new ValidationError(`Unsupported messaging provider "${d.provider}" (mock, twilio)`);
+  if (d.kind === "MESSAGING" && !["mock", "twilio", "resend"].includes(d.provider)) throw new ValidationError(`Unsupported messaging provider "${d.provider}" (mock, twilio for SMS / WhatsApp, resend for e-mail)`);
   if (d.kind === "ACCOUNTING" && ![...ACCOUNTING_FILE_PROVIDERS, ...ACCOUNTING_SYNC_PROVIDERS].includes(d.provider as never)) throw new ValidationError(`Unsupported accounting provider "${d.provider}" (${[...ACCOUNTING_FILE_PROVIDERS, ...ACCOUNTING_SYNC_PROVIDERS].join(", ")})`);
   if (d.kind === "ACCOUNTING" && isSyncProvider(d.provider)) validateSyncConnection(d.provider, d.config, d.credentials);
   if (d.kind === "SHEETS") {
@@ -93,6 +93,10 @@ function validateFor(d: z.output<typeof upsertSchema>) {
   if (d.credentials && d.kind === "MESSAGING" && d.provider === "twilio") {
     const r = twilioCredentialsSchema.safeParse(d.credentials);
     if (!r.success) throw new ValidationError("Invalid Twilio credentials", { fieldErrors: Object.fromEntries(Object.entries(r.error.flatten().fieldErrors)) });
+  }
+  if (d.credentials && d.kind === "MESSAGING" && d.provider === "resend") {
+    const r = resendCredentialsSchema.safeParse(d.credentials);
+    if (!r.success) throw new ValidationError("Invalid Resend credentials", { fieldErrors: Object.fromEntries(Object.entries(r.error.flatten().fieldErrors)) });
   }
   if (d.kind === "MESSAGING" && d.config) messagingConfigSchema.parse(d.config);
 }
@@ -179,10 +183,10 @@ export function connectionCredentials(c: { credentialsEnc: string | null }): Rec
   return JSON.parse(decryptSecret(c.credentialsEnc)) as Record<string, string>;
 }
 
-/** The organization's messaging connection + adapter, or null when not connected. */
-export async function messagingFor(db: PrismaClient, organizationId: string): Promise<{ connection: ConnectionRow; provider: MessagingProvider; config: MessagingConfig } | null> {
-  const c = await db.integrationConnection.findFirst({ where: { organizationId, kind: "MESSAGING", outletId: null, status: "CONNECTED" }, orderBy: { updatedAt: "desc" } });
-  if (!c) return null;
+export type MessagingHandle = { connection: ConnectionRow; provider: MessagingProvider; config: MessagingConfig };
+
+/** The adapter for one MESSAGING connection, or null when it cannot be built (no credentials, mocks refused in production, unknown provider). */
+export function messagingProviderFor(c: ConnectionRow): MessagingHandle | null {
   const config = messagingConfigSchema.parse(c.config ? JSON.parse(c.config) : {});
   if (c.provider === "mock") {
     if (!mockProvidersAllowed()) return null;
@@ -192,6 +196,26 @@ export async function messagingFor(db: PrismaClient, organizationId: string): Pr
     const creds = connectionCredentials(c);
     if (!creds) return null;
     return { connection: c, provider: new TwilioMessagingProvider(twilioCredentialsSchema.parse(creds), effectiveMode(c)), config };
+  }
+  if (c.provider === "resend") {
+    const creds = connectionCredentials(c);
+    if (!creds) return null;
+    return { connection: c, provider: new ResendEmailProvider(resendCredentialsSchema.parse(creds), effectiveMode(c)), config };
+  }
+  return null;
+}
+
+/**
+ * The organization's messaging connection + adapter that can carry `channel`, or null when none is connected.
+ * Order messages use the default (SMS / WhatsApp, whichever the connection's `channel` says); e-mail needs its own
+ * provider connection. The most recently updated connection wins when several qualify.
+ */
+export async function messagingFor(db: PrismaClient, organizationId: string, channel?: MessageChannel): Promise<MessagingHandle | null> {
+  const rows = await db.integrationConnection.findMany({ where: { organizationId, kind: "MESSAGING", outletId: null, status: "CONNECTED" }, orderBy: { updatedAt: "desc" } });
+  for (const c of rows) {
+    const h = messagingProviderFor(c);
+    if (!h) continue;
+    if (channel ? h.provider.supports(channel) : h.provider.supports(h.config.channel)) return h;
   }
   return null;
 }
@@ -207,7 +231,7 @@ export async function testConnection(ctx: AccessContext, id: string, db: PrismaC
     else if (c.kind === "AGGREGATOR") ok = await getAggregatorProvider(c.provider).healthCheck();
     else if (c.kind === "POS") ok = await getPOSProvider(c.provider).healthCheck();
     else if (c.kind === "MESSAGING") {
-      const m = await messagingFor(db, ctx.organizationId);
+      const m = messagingProviderFor(c);
       ok = m ? await m.provider.healthCheck() : false;
       if (!m) error = "Messaging is not connected or has no credentials";
     } else if (c.kind === "ACCOUNTING" && isSyncProvider(c.provider)) {

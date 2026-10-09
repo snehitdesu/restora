@@ -51,7 +51,7 @@ beforeAll(async () => {
   org2 = systemContext((await prisma.organization.create({ data: { name: `Report Org2 ${RUN}` } })).id, []);
 
   const cat = await createMenuCategory(ctx, { name: `Tiffin ${RUN}` });
-  await createMenuItem(ctx, { name: `Dosa ${RUN}`, price: 100, categoryId: cat.id, posCode: `DOSA-${RUN}`, taxPct: 5 });
+  await createMenuItem(ctx, { name: `Dosa ${RUN}`, price: 100, categoryId: cat.id, posCode: `DOSA-${RUN}`, taxPct: 5, cuisineTags: ["south-indian", "breakfast"] });
   customerId = (await createCustomer(ctx, { name: "Meera, \"VIP\"", phone: "9000012345" })).id;
 
   // Jan 10 10:00Z: 2 dosa @100, 5% tax, ₹20 discount -> sub 200, disc 20, taxable 180, tax 9, total 189
@@ -122,7 +122,7 @@ describe("report registry", () => {
       // Phase 5 analytics
       "MATERIAL_CONSUMPTION", "MODIFIER_SALES", "OUTLET_COMPARISON", "PURCHASE_TREND", "SALES_TREND", "STOCK_AGEING", "VARIANT_SALES", "VENDOR_PURCHASING",
       // Groups 3 / 4 (one outlet each)
-      "CONSUMPTION_VARIANCE", "MENU_ENGINEERING", "DEPARTMENT_PNL", "DAILY_COSTING", "STOCK_BY_DEPARTMENT", "SUPPLIER_PRICES", "PURCHASE_PRICE_HISTORY", "COUNT_VARIANCE_TREND"].sort());
+      "CONSUMPTION_VARIANCE", "MENU_ENGINEERING", "DEPARTMENT_PNL", "DAILY_COSTING", "STOCK_BY_DEPARTMENT", "SUPPLIER_PRICES", "PURCHASE_PRICE_HISTORY", "COUNT_VARIANCE_TREND", "STAFF_HOURS", "SALES_BY_STAFF", "CUISINE_SALES"].sort());
   });
 
   it("consumption variance: expected (sales) vs actual per material for one outlet, as rows and CSV", async () => {
@@ -150,6 +150,20 @@ describe("report registry", () => {
     const cats = await getReport(prisma, mgrA, "CATEGORY_SALES", { outletId: outletA, ...JAN_RANGE });
     expect(cats.rows.find((c) => c.category === `Tiffin ${RUN}`)).toMatchObject({ grossRevenue: 200, discount: 20, revenue: 180 });
     expect(cats.rows.find((c) => c.category === "Unmapped")).toMatchObject({ revenue: 250 });
+  });
+
+  it("XC-06 sales by cuisine tag: a dish counts under each of its tags; untagged and unmapped lines are named, not dropped", async () => {
+    const cuisine = await getReport(prisma, mgrA, "CUISINE_SALES", { outletId: outletA, ...JAN_RANGE });
+    expect(cuisine.columns.map((c) => c.key)).toEqual(["cuisine", "dishes", "qty", "grossRevenue", "discount", "refundedRevenue", "revenue", "contributionPct"]);
+    // The Dosa (2 sold, 180 net) is tagged twice, so it appears under both tags.
+    expect(cuisine.rows.find((c) => c.cuisine === "south-indian")).toMatchObject({ dishes: 1, qty: 2, grossRevenue: 200, discount: 20, revenue: 180 });
+    expect(cuisine.rows.find((c) => c.cuisine === "breakfast")).toMatchObject({ dishes: 1, qty: 2, revenue: 180 });
+    expect(cuisine.rows.find((c) => c.cuisine === "(unmapped)")).toMatchObject({ revenue: 250 });
+    expect(cuisine.rows.map((c) => c.revenue)).toEqual([...cuisine.rows.map((c) => c.revenue)].sort((a, b) => Number(b) - Number(a))); // best first
+    const csv = await exportReportCSV(mgrA, "CUISINE_SALES", { outletId: outletA, ...JAN_RANGE });
+    expect(csv.csv.split("\r\n")[0]).toBe("Cuisine tag,Dishes,Qty,Gross revenue,Discount,Refunded revenue,Net revenue,Share %");
+    await expect(getReport(prisma, mgrB, "CUISINE_SALES", { outletId: outletA, ...JAN_RANGE })).rejects.toBeInstanceOf(ForbiddenError);
+    expect((await getReport(prisma, org2, "CUISINE_SALES", { ...JAN_RANGE })).rows).toEqual([]);
   });
 
   it("inventory, stock movement, purchases and wastage come from the ledger/documents", async () => {

@@ -43,7 +43,6 @@ const MAX_BODY = 1_000_000;
 
 // ---------------- shared input schemas ----------------
 
-export const zId = z.string().min(1).max(64);
 export const listQuery = z.object({
   outletId: z.string().optional(),
   take: z.coerce.number().int().positive().max(200).optional(),
@@ -52,7 +51,6 @@ export const listQuery = z.object({
   to: z.coerce.date().optional(),
 });
 export const outletQuery = z.object({ outletId: z.string().min(1) });
-export const dateOf = (v: unknown) => z.coerce.date().parse(v);
 
 function match(segs: string[], pattern: string[]): Record<string, string> | null {
   if (segs.length !== pattern.length) return null;

@@ -48,6 +48,15 @@ describe("production environment validation", () => {
     expect(() => validateProductionEnv(prod({ SESSION_TTL_SECONDS: "abc" }))).toThrow(/SESSION_TTL_SECONDS/);
   });
 
+  it("fails when a shutdown timing is not a whole number of milliseconds in range", () => {
+    for (const name of ["SHUTDOWN_DELAY_MS", "SHUTDOWN_REFUSE_GRACE_MS"]) {
+      expect(() => validateProductionEnv(prod({ [name]: "-1" }))).toThrow(new RegExp(name));
+      expect(() => validateProductionEnv(prod({ [name]: "soon" }))).toThrow(new RegExp(name));
+      expect(() => validateProductionEnv(prod({ [name]: "0" }))).not.toThrow();
+    }
+    expect(() => validateProductionEnv(prod({ SHUTDOWN_REFUSE_GRACE_MS: "600000" }))).toThrow(/SHUTDOWN_REFUSE_GRACE_MS/);
+  });
+
   it("is a no-op in development and test, even with unsafe values", () => {
     expect(() => validateProductionEnv({ NODE_ENV: "development", AUTH_SECRET: DEV_AUTH_SECRET_PLACEHOLDER })).not.toThrow();
     expect(() => validateProductionEnv({ NODE_ENV: "test" })).not.toThrow();

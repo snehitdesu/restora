@@ -69,7 +69,7 @@ function initialEdits(rows: ReorderRow[]): Record<string, Edit> {
 }
 
 function IncomingCell({ r }: { r: ReorderRow }) {
-  if (!r.incomingDocs.length) return <span className="text-ink-400">—</span>;
+  if (!r.incomingDocs.length) return <span className="text-ink-500">—</span>;
   return (
     <div className="text-right">
       <span className="font-medium">{formatQty(r.incoming)} {r.baseUnit}</span>
@@ -250,7 +250,7 @@ export function ReorderScreen() {
                       <div className="ml-auto w-28"><Input className="text-right" type="number" inputMode="decimal" min="0" step="any" aria-label={`Rate for ${r.name}`} placeholder="Rate" value={edits[r.materialId]?.rate ?? ""} onChange={(e) => set(r.materialId, { rate: e.target.value })} /></div>
                     ) : r.poRate !== null ? formatMoney(r.poRate) : "—",
                   },
-                  { key: "val", header: "Est. value", numeric: true, cell: (r) => (r.estimatedValue !== null ? formatMoney(r.estimatedValue) : <span className="text-ink-400">no cost</span>) },
+                  { key: "val", header: "Est. value", numeric: true, cell: (r) => (r.estimatedValue !== null ? formatMoney(r.estimatedValue) : <span className="text-ink-500">no cost</span>) },
                   { key: "oh", header: "On hand", numeric: true, cell: (r) => <span className={r.onHand <= 0 ? "font-semibold text-bad-600" : ""}>{formatQty(r.onHand)} {r.baseUnit}</span> },
                   { key: "in", header: "Incoming", numeric: true, cell: (r) => <IncomingCell r={r} /> },
                   { key: "use", header: "Use / day · cover", numeric: true, cell: (r) => <span>{r.avgDailyUse ? formatQty(r.avgDailyUse) : "—"}<br /><span className="text-xs text-ink-500">{r.daysOfCover !== null ? `${r.daysOfCover} days` : "no usage"}</span></span> },

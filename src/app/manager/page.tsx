@@ -27,7 +27,7 @@ export default async function ManagerPage() {
               <ForbiddenPage title="Manager app not available" reason="Your role doesn't include management views at this outlet." />
             ) : (
               <ManagerApp key={outlet.id} outletId={outlet.id} outletName={outlet.name}
-                perms={{ staff: has.has("staff.manage"), captain: has.has("order.create"), pos: has.has("order.create"), kitchen: has.has("kot.view") }} />
+                perms={{ staff: has.has("staff.manage"), captain: has.has("order.create"), pos: has.has("order.create"), kitchen: has.has("kot.view"), approve: has.has("purchase.approve") }} />
             )}
           </div>
         </ReauthProvider>

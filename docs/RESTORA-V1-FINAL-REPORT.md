@@ -4,6 +4,21 @@ _2026-10-05 · release candidate **1.0.0-rc.1** · phases 9–14 executed
 autonomously. Every result below was produced by a command run in this work;
 the detailed evidence is in the per-phase reports linked in each section._
 
+> **Update 2026-10-08.** This report is the record of release candidate 1.0.0-rc.1 (2026-10-05) and its
+> numbers are left as they were. Since then Groups 1-5 of the master program were added; the current
+> verification (SQLite 1176 / PostgreSQL 1154 tests, browser E2E 90/90 on SQLite) and the open issues are in
+> `docs/stabilization-report.md`. In particular the "Deferred" list below is out of date: Tally / Zoho sync and
+> Google Sheets sync now exist (tested against emulators only, never against a real company or spreadsheet), the nightly
+> POS re-pull is scheduled in the worker, and aggregator statement import / charges / margin are built. The
+> intermittent `RECIPE-001` navigation failure listed here was reproduced and fixed (the route-level `loading.tsx` was removed).
+
+> **Update 2026-10-09.** Groups 6-9 are now implemented (growth / CRM, floor / mobile / kitchen operations, purchasing, expiry and staff
+> operations, hardening). Current evidence, the external-dependency list and what remains are in `docs/stabilization-report.md` §8; the
+> row-by-row state is `docs/master-feature-audit.md`. In the "Deferred" list below, the **shared rate-limit store now exists**
+> (`RATE_LIMIT_STORE=database`); RLS, MFA, a nonce-based CSP, object storage and the customer-erasure workflow are still open. The "append-only audit
+> and ledger" the report calls READY is now also enforced by the database itself (triggers), not only by role grants. The browser suites are
+> CI release gates and the desktop app is built, tested and packaged on macOS as well as Windows in CI.
+
 ## Phase 9 — Production infrastructure
 **Status:** PASS WITH DOCUMENTED LIMITATIONS (`docs/phase9-final-report.md`)
 
@@ -208,7 +223,7 @@ non-minified repro.
 
 ## Deferred
 - **Multi-Outlet / Multi-Restaurant** (Phase 8; cross-restaurant / multi-tenant operation).
-- Zomato / Swiggy partner APIs (mock adapters only), Petpooja pull API, live accounting sync (Tally / Zoho / QuickBooks), Google Sheets sync, email notifications and reset-link delivery.
+- Zomato / Swiggy partner APIs (mock adapters only), Petpooja pull API, QuickBooks sync, email notifications and reset-link delivery. _(Tally / Zoho sync and Google Sheets sync were deferred here and were built afterwards in Group 5, emulator-tested only.)_
 - e-Invoicing / GSTR / debit notes / ITC / TDS.
 - RLS, MFA, nonce-based CSP, shared rate-limit store and object storage (multi-instance), customer-erasure workflow, dark mode.
 

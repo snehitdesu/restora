@@ -251,7 +251,9 @@ describe("notifications", () => {
     const seen = async (c: AccessContext) => (await listNotifications(prisma, c, { take: 200 })).map((x) => x.id);
     expect(await seen(kitchen)).not.toContain(vendor.notification.id); // finance alert, not for the kitchen
     expect(await seen(kitchen)).toContain(ready.notification.id);
-    expect(await seen(cashier)).toContain(vendor.notification.id); // cashier holds finance.view
+    expect(await seen(cashier)).not.toContain(vendor.notification.id); // vendor payables are for the people who pay vendors, not the till
+    expect(await seen(manager)).toContain(vendor.notification.id);
+    expect(await seen(accountant)).toContain(vendor.notification.id);
     expect(await seen(captainB)).not.toContain(ready.notification.id); // other outlet
     await expect(markNotificationRead(kitchen, vendor.notification.id)).rejects.toBeInstanceOf(ForbiddenError);
     await expect(markNotificationRead(foreign, ready.notification.id)).rejects.toBeInstanceOf(NotFoundError);

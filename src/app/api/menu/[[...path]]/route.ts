@@ -7,6 +7,7 @@ import {
 } from "@/server/services/menu";
 import { listModifierGroups } from "@/server/services/adminQueries";
 import { importCodersCafeStarter } from "@/server/services/starterMenu";
+import { upsellSuggestions } from "@/server/services/upsell";
 
 export const runtime = "nodejs";
 
@@ -14,6 +15,11 @@ const menuQuery = z.object({ activeOnly: z.enum(["true", "false"]).optional().tr
 
 export const { GET, POST, PATCH, DELETE } = createRouter([
   { method: "GET", path: "", handler: ({ ctx, query }) => listMenu(prisma, ctx, menuQuery.parse(query)) },
+  // Hints for the person taking the order: dishes guests pair with what is on it, and the ones worth recommending (reason in words, no margins).
+  { method: "GET", path: "upsell", handler: ({ ctx, query }) => {
+    const q = z.object({ outletId: z.string().min(1), items: z.string().max(2000).optional(), limit: z.coerce.number().int().min(1).max(5).optional() }).parse(query);
+    return upsellSuggestions(prisma, ctx, { outletId: q.outletId, menuItemIds: (q.items ?? "").split(",").filter(Boolean), limit: q.limit });
+  } },
   { method: "GET", path: "categories", handler: ({ ctx }) => listMenuCategories(prisma, ctx) },
   { method: "POST", path: "categories", handler: ({ ctx, body }) => createMenuCategory(ctx, body as never) },
   { method: "PATCH", path: "categories/:id", handler: ({ ctx, params, body }) => updateMenuCategory(ctx, params.id, body as never) },

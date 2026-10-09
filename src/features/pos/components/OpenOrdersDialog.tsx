@@ -8,10 +8,16 @@ import { Dialog } from "@/components/ui/Dialog";
 import { Badge } from "@/components/ui/Badge";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/States";
 
-export type OpenOrder = { id: string; channel: string; source: string; status: string; total: string | number; createdAt: string; tableId: string | null; table?: { code: string } | null; customer?: { name: string } | null; kots?: Array<{ status: string }> };
+export type OpenOrder = { id: string; channel: string; source: string; status: string; total: string | number; createdAt: string; tableId: string | null; table?: { code: string } | null; customer?: { name: string } | null; kots?: Array<{ status: string }>; holdLabel?: string | null; heldAt?: string | null };
 
 /** A guest's QR order that no one at the outlet has accepted yet. */
 export const isIncomingQr = (o: Pick<OpenOrder, "source" | "status">) => o.source === "QR" && o.status === "OPEN";
+
+/** A bill saved at the counter and not sent to the kitchen (the hold list). */
+export const isHeld = (o: Pick<OpenOrder, "status" | "heldAt">) => o.status === "OPEN" && Boolean(o.heldAt);
+/** A held bill nobody came back for this long is flagged: the guest has probably left. */
+export const STALE_HOLD_MINUTES = 120;
+const heldMinutes = (o: Pick<OpenOrder, "heldAt">, now = Date.now()) => (o.heldAt ? Math.max(0, Math.floor((now - new Date(o.heldAt).getTime()) / 60000)) : 0);
 
 const where = (o: OpenOrder, tableCode: (id: string | null) => string | null) => {
   const table = o.table?.code ?? tableCode(o.tableId);
@@ -21,18 +27,19 @@ const where = (o: OpenOrder, tableCode: (id: string | null) => string | null) =>
 
 /**
  * Orders at the outlet. "Open" = not yet paid or cancelled (GET /api/orders?active=true):
- * reopen to accept a QR order, add items or take payment. "Recent" = the latest
- * orders in any state, to reopen a bill / reprint a receipt.
+ * reopen to accept a QR order, add items or take payment. "Held" = bills saved at the
+ * counter and not sent (GET /api/orders?held=true), oldest first, with the name they were
+ * saved under. "Recent" = the latest orders in any state, to reopen a bill / reprint a receipt.
  */
 export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { outletId: string; tableCode: (id: string | null) => string | null; onOpen: (orderId: string) => void; onClose: () => void }) {
-  const [tab, setTab] = useState<"open" | "recent">("open");
+  const [tab, setTab] = useState<"open" | "held" | "recent">("open");
   const [orders, setOrders] = useState<OpenOrder[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const load = useCallback(async () => {
     setError(null);
     setOrders(null);
     try {
-      setOrders((await api<{ items: OpenOrder[] }>("/api/orders", { query: { outletId, active: tab === "open" ? "true" : undefined, take: tab === "open" ? 100 : 30 } })).items);
+      setOrders((await api<{ items: OpenOrder[] }>("/api/orders", { query: { outletId, active: tab === "open" ? "true" : undefined, held: tab === "held" ? "true" : undefined, take: tab === "recent" ? 30 : 100 } })).items);
     } catch (e) {
       setError(e);
     }
@@ -43,11 +50,11 @@ export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { out
   const sorted = orders && tab === "open" ? [...orders.filter(isIncomingQr).reverse(), ...orders.filter((o) => !isIncomingQr(o))] : orders;
 
   return (
-    <Dialog open onClose={onClose} title="Open orders" description={tab === "open" ? "Orders not yet paid or cancelled" : "Latest orders — open a bill or reprint a receipt"} size="lg">
+    <Dialog open onClose={onClose} title="Open orders" description={tab === "open" ? "Orders not yet paid or cancelled" : tab === "held" ? "Bills saved without sending them to the kitchen — pick one up where you left it" : "Latest orders — open a bill or reprint a receipt"} size="lg">
       <div role="tablist" aria-label="Order lists" className="mb-3 flex gap-2">
-        {(["open", "recent"] as const).map((t) => (
+        {(["open", "held", "recent"] as const).map((t) => (
           <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`h-9 rounded-md border px-3 text-sm font-medium ${tab === t ? "border-brand-600 bg-brand-50" : "border-ink-300 hover:bg-ink-100"}`}>
-            {t === "open" ? "Open" : "Recent"}
+            {t === "open" ? "Open" : t === "held" ? "Held" : "Recent"}
           </button>
         ))}
       </div>
@@ -56,7 +63,7 @@ export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { out
       ) : !sorted ? (
         <LoadingState />
       ) : sorted.length === 0 ? (
-        <EmptyState title={tab === "open" ? "No open orders" : "No orders yet"} />
+        <EmptyState title={tab === "open" ? "No open orders" : tab === "held" ? "No held bills" : "No orders yet"} hint={tab === "held" ? "Save a bill from the till and it waits here." : undefined} />
       ) : (
         <ul className="divide-y divide-ink-100">
           {sorted.map((o) => {
@@ -68,6 +75,7 @@ export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { out
                   <span className="font-mono text-ink-500">#{o.id.slice(-6).toUpperCase()}</span>
                   <span className="font-medium">{where(o, tableCode)}{o.customer?.name ? ` · ${o.customer.name}` : ""}</span>
                   {isIncomingQr(o) ? <Badge tone="warn">New QR order</Badge> : o.source === "QR" ? <Badge tone="neutral">QR</Badge> : null}
+                  {isHeld(o) && <Badge tone={heldMinutes(o) >= STALE_HOLD_MINUTES ? "warn" : "neutral"}>Held{o.holdLabel ? ` · ${o.holdLabel}` : ""}{heldMinutes(o) >= STALE_HOLD_MINUTES ? " · old" : ""}</Badge>}
                   <Badge tone={o.status === "PAID" ? "ok" : o.status === "CANCELLED" ? "bad" : "info"}>{o.status}</Badge>
                   {stage && stage !== "AWAITING_ACCEPTANCE" && <span className="text-xs text-ink-600">{FULFILMENT_LABEL[stage]}</span>}
                   <span className="text-ink-500">{formatElapsed(o.createdAt)} ago</span>

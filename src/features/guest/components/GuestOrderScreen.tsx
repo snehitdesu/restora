@@ -4,7 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { request, describeError } from "@/lib/api/client";
 import { createPoller, type Poller } from "@/lib/polling";
 import { newIdempotencyKey } from "@/lib/idempotency";
-import { orderKeyFor, rememberedOrders } from "@/features/guest/session";
+import { loadCart, orderKeyFor, rememberedOrders, saveCart, takeNotice } from "@/features/guest/session";
+import { cartReducer, lineKey } from "@/features/pos/cart";
+import { GUEST_MAX_LINES } from "@/features/guest/storefront";
+import { splitShare } from "@/domain/billSplit";
 import { BillView } from "@/features/billing/BillView";
 import type { GuestOrderView } from "@/server/services/guestOrdering";
 import { GUEST_TRACKER_STEPS } from "@/domain/orderProgress";
@@ -13,9 +16,10 @@ import { openRazorpayCheckout, type RazorpaySuccess } from "@/features/guest/raz
 import { brandFor } from "@/features/guest/brand";
 import { LogoMark } from "@/features/guest/components/Chrome";
 import { Alert, Spinner } from "@/features/guest/components/Bits";
+import { RateTheMeal } from "@/features/guest/components/GuestOffers";
 import { SfIcon, type SfIconName } from "@/features/guest/components/SfIcon";
 
-type Checkout = { paymentId: string; amount: string; testMode: boolean };
+type Checkout = { paymentId: string; amount: string; testMode: boolean; share?: { parts: number; remainingParts: number; last: boolean } };
 type StartedPayment = Checkout & { provider: string; mode?: string; checkout?: Record<string, string | number> };
 type Confirmed = GuestOrderView & { paymentStatus: string; pending?: boolean };
 type Message = { tone: "ok" | "bad" | "info"; text: string };
@@ -54,14 +58,20 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
   const [payIntent, setPayIntent] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [menuToken, setMenuToken] = useState<string | undefined>(undefined);
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [parts, setParts] = useState(2);
   const attempt = useRef<string | null>(null);
+  // One key per (people, balance, parts already paid): a retry of the same ask is the same payment, a different ask is a new one.
+  const shareAttempt = useRef<{ sig: string; key: string } | null>(null);
   const poller = useRef<Poller | null>(null);
   const autoPay = useRef(false);
 
   useEffect(() => {
     setKey(orderKeyFor(orderId, window.location.hash));
     setMenuToken(rememberedOrders().find((o) => o.orderId === orderId)?.token);
+    setNotice(takeNotice(orderId));
     const flags = hashFlags();
     autoPay.current = flags.pay;
     setPayIntent(flags.pay);
@@ -92,12 +102,15 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
     setCheckout(null);
     if (res.paymentStatus === "SUCCESS") {
       attempt.current = null;
-      setMessage({ tone: "ok", text: "Payment successful. Thank you!" });
+      shareAttempt.current = null;
+      const left = Number(res.bill.balanceDue);
+      setMessage({ tone: "ok", text: left > 0 ? `Your part is paid. ${formatMoney(left)} is still due on this bill.` : "Payment successful. Thank you!" });
     } else if (res.paymentStatus === "PENDING") {
       // Undecided: keep the same attempt (and its gateway order) so "Resume payment" reopens it.
       setMessage(declined ? { tone: "bad", text: `${declined} You can try again.` } : { tone: "info", text: closedWindow ? "Payment not completed. If money left your account it will be confirmed here automatically; otherwise you can pay again." : "Waiting for the bank to confirm your payment. This page updates by itself." });
     } else {
       attempt.current = null; // the next attempt is a new payment
+      shareAttempt.current = null;
       setMessage(declined ? { tone: "bad", text: `${declined} You can try again.` } : closedWindow ? { tone: "info", text: "Payment not completed. You can try again." } : { tone: "bad", text: "The payment was declined. You can try again." });
     }
   }
@@ -131,17 +144,26 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
     else await confirm(started.paymentId, undefined, true, declined);
   }
 
-  async function startPayment(current: GuestOrderView | null = view) {
+  /** `shareOf`: pay an equal part of what is due between that many people; the server works out the amount. */
+  async function startPayment(current: GuestOrderView | null = view, shareOf?: number) {
     setBusy(true);
     setMessage(null);
     try {
       // Resuming with a real gateway: ask first whether the open attempt already went through.
-      if (current?.pendingPaymentId && !current.payment.testMode) {
+      if (!shareOf && current?.pendingPaymentId && !current.payment.testMode) {
         const res = await confirm(current.pendingPaymentId);
         if (res.paymentStatus === "SUCCESS") return;
       }
-      attempt.current ??= newIdempotencyKey("qrpay");
-      const res = await request<StartedPayment>(`/api/qr/orders/${encodeURIComponent(orderId)}/payments`, { method: "POST", headers: headers(), idempotencyKey: attempt.current });
+      let idempotencyKey: string;
+      if (shareOf) {
+        const sig = `${shareOf}:${current?.bill.balanceDue}:${current?.split.sharesPaid}`;
+        if (shareAttempt.current?.sig !== sig) shareAttempt.current = { sig, key: newIdempotencyKey("qrshare") };
+        idempotencyKey = shareAttempt.current.key;
+      } else {
+        attempt.current ??= newIdempotencyKey("qrpay");
+        idempotencyKey = attempt.current;
+      }
+      const res = await request<StartedPayment>(`/api/qr/orders/${encodeURIComponent(orderId)}/payments`, { method: "POST", headers: headers(), idempotencyKey, ...(shareOf ? { body: { parts: shareOf } } : {}) });
       if (res.provider === "razorpay") {
         setBusy(false);
         setMessage(null);
@@ -176,6 +198,18 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Put the same dishes in the cart and let the cart screen price them: today's prices, availability and offers apply. */
+  function orderAgain() {
+    if (!menuToken || !view) return;
+    let cart = loadCart(menuToken);
+    for (const l of view.reorder) {
+      if (cart.lines.length >= GUEST_MAX_LINES && !cart.lines.some((x) => x.key === lineKey(l))) break;
+      cart = cartReducer(cart, { type: "add", line: { menuItemId: l.menuItemId, name: l.name, variantId: l.variantId, modifierOptionIds: l.modifierOptionIds, modifierLabels: l.modifierLabels, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct, qty: l.qty, notes: l.notes } });
+    }
+    saveCart(menuToken, cart);
+    window.location.assign(`/t/${encodeURIComponent(menuToken)}/cart`);
   }
 
   if (key === undefined || (key && !view && !loadError)) return <OrderSkeleton />;
@@ -271,6 +305,8 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
           </section>
         )}
 
+        {notice && <div style={{ marginTop: 12 }}><Alert tone="info" role="status">{notice}</Alert></div>}
+
         <section className="sf-card sf-pay-card" aria-label="Payment">
           <h2 className="sf-card-title">Payment</h2>
           <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
@@ -282,6 +318,7 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
             {checkout ? (
               <div role="region" aria-label="Test payment gateway" style={{ border: "2px dashed var(--sf-accent)", borderRadius: 14, padding: 14 }}>
                 <p style={{ margin: 0, fontWeight: 700 }}>{checkout.testMode ? "Test payment gateway" : "Payment"}</p>
+                {checkout.share && <p className="sf-hint" data-testid="share-note" style={{ margin: "4px 0 0" }}>{checkout.share.last ? "Your part: everything that is left on the bill" : `Your part of the bill, split ${checkout.share.parts} ways`}</p>}
                 <p style={{ margin: "4px 0 0", fontSize: 26, fontWeight: 800 }} className="sf-num">{formatMoney(checkout.amount)}</p>
                 {checkout.testMode && <p className="sf-hint">Development gateway — no real money is charged. The server verifies the result with the gateway.</p>}
                 <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -307,6 +344,9 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
                 <p className="sf-alert sf-alert-info" data-testid="pay-at-counter" style={{ margin: 0 }}>
                   Prefer cash? Pay at the counter and show order #{view.ref}.
                 </p>
+                {due > 0 && (
+                  <SplitBill open={splitOpen} onOpen={() => setSplitOpen(true)} onClose={() => setSplitOpen(false)} parts={parts} onParts={setParts} due={due} view={view} busy={busy} onPay={(n) => void startPayment(view, n)} />
+                )}
               </>
             ) : due > 0 && !["CANCELLED", "REFUNDED"].includes(bill.paymentStatus) ? (
               <p className="sf-alert sf-alert-info" data-testid="pay-at-counter" style={{ margin: 0 }}>
@@ -318,11 +358,18 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
           </div>
         </section>
 
+        {paid && key && <RateTheMeal orderId={orderId} orderKey={key} />}
+
         <section className="sf-receipt" aria-label={bill.kind === "RECEIPT" ? "Receipt" : "Bill"}>
           <BillView bill={bill} />
         </section>
 
         <div className="sf-actions">
+          {menuToken && view.reorder.length > 0 && (
+            <button type="button" className="sf-btn sf-btn-primary sf-actions-wide" onClick={orderAgain}>
+              <SfIcon name="cart" /> Order the same again
+            </button>
+          )}
           {menuToken ? (
             <a href={`/t/${encodeURIComponent(menuToken)}`} className="sf-btn sf-btn-accent">
               <SfIcon name="plus" /> Order more
@@ -335,6 +382,48 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
           </button>
         </div>
       </main>
+    </div>
+  );
+}
+
+/** Splitting the bill between the people at the table: everyone pays their part from their own phone. */
+function SplitBill({ open, onOpen, onClose, parts, onParts, due, view, busy, onPay }: { open: boolean; onOpen: () => void; onClose: () => void; parts: number; onParts: (n: number) => void; due: number; view: GuestOrderView; busy: boolean; onPay: (parts: number) => void }) {
+  const { minParts, maxParts, sharesPaid } = view.split;
+  if (!open) {
+    return (
+      <button type="button" className="sf-btn sf-btn-block" onClick={onOpen}>
+        <SfIcon name="receipt" /> Split the bill
+      </button>
+    );
+  }
+  const share = splitShare(due, parts, sharesPaid);
+  const stillToPay = Math.max(0, share.remainingParts - 1);
+  return (
+    <div className="sf-split" role="group" aria-label="Split the bill">
+      <div className="sf-split-row">
+        <span id="split-people-label">People splitting the bill</span>
+        <div className="sf-stepper sf-stepper-light" role="group" aria-labelledby="split-people-label">
+          <button type="button" aria-label="Fewer people" disabled={parts <= minParts} onClick={() => onParts(Math.max(minParts, parts - 1))}>
+            <SfIcon name="minus" />
+          </button>
+          <output aria-live="polite" data-testid="split-parts">{parts}</output>
+          <button type="button" aria-label="More people" disabled={parts >= maxParts} onClick={() => onParts(Math.min(maxParts, parts + 1))}>
+            <SfIcon name="plus" />
+          </button>
+        </div>
+      </div>
+      <p className="sf-hint" data-testid="split-share" style={{ margin: 0 }}>
+        {share.last ? `You pay everything that is left: ${formatMoney(share.amount)}.` : `Your part: ${formatMoney(share.amount)}. ${stillToPay === 1 ? "One more person pays the rest" : `${stillToPay} more people pay the rest`}, each from their own phone.`}
+        {sharesPaid > 0 ? ` ${sharesPaid === 1 ? "One part is" : `${sharesPaid} parts are`} already paid.` : ""}
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" className="sf-btn sf-btn-primary" style={{ flex: 1 }} disabled={busy} onClick={() => onPay(parts)}>
+          {busy ? <Spinner /> : <SfIcon name="card" />} Pay your part {formatMoney(share.amount)}
+        </button>
+        <button type="button" className="sf-btn" disabled={busy} onClick={onClose}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }

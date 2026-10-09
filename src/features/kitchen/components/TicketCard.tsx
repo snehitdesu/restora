@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { KdsTicket } from "@/features/kitchen/kds";
-import { canCancel, primaryAction, ticketLabel, urgency } from "@/features/kitchen/kds";
+import { NO_EXPECTATIONS, canCancel, primaryAction, ticketLabel, ticketLateness, type PrepExpectations } from "@/features/kitchen/kds";
 import type { KOTStatus } from "@/constants/enums";
 import { formatElapsed, formatQty, shortRef } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
@@ -15,9 +15,9 @@ const URGENCY: Record<"normal" | "warn" | "late", string> = {
 };
 
 /** One kitchen ticket: large type for monitors; actions follow the backend lifecycle. */
-export function TicketCard({ ticket, now, pending, canUpdate, onAction }: { ticket: KdsTicket; now: number; pending: boolean; canUpdate: boolean; onAction: (to: KOTStatus) => void }) {
+export function TicketCard({ ticket, now, pending, canUpdate, onAction, expectations = NO_EXPECTATIONS }: { ticket: KdsTicket; now: number; pending: boolean; canUpdate: boolean; onAction: (to: KOTStatus) => void; expectations?: PrepExpectations }) {
   const action = primaryAction(ticket.status);
-  const level = urgency(ticket.createdAt, now);
+  const { level, expected } = ticketLateness(ticket, now, expectations);
   const [confirmVoid, setConfirmVoid] = useState(false);
   return (
     <article aria-label={`KOT ${ticket.number}, ${ticketLabel(ticket)}`} className={`flex flex-col rounded-xl border-2 bg-paper shadow-xs ${URGENCY[level]}`}>
@@ -32,6 +32,8 @@ export function TicketCard({ ticket, now, pending, canUpdate, onAction }: { tick
           <span className={`rounded-md px-2 py-1 text-sm font-bold tabular-nums ${level === "late" ? "bg-bad-500 text-white" : level === "warn" ? "bg-warn-50 text-warn-700" : "bg-ink-100 text-ink-700"}`} aria-label={`Waiting ${formatElapsed(ticket.createdAt, now)}`}>
             {formatElapsed(ticket.createdAt, now)}
           </span>
+          {level === "late" && <span className="text-[11px] font-bold uppercase tracking-wide text-bad-600">Running late</span>}
+          {expected !== null && ticket.status !== "READY" && <span className="text-[11px] text-ink-500" data-testid="kds-usual">usually ~{Math.round(expected)} min</span>}
         </div>
       </header>
       <ul className="flex-1 space-y-1.5 px-3 py-2">

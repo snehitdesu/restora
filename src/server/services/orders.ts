@@ -21,12 +21,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { type AccessContext, assertOutletAccess, ValidationError, NotFoundError, ConflictError } from "@/server/db/scope";
 import { assertOutletInOrg } from "@/server/db/outletGuard";
 import { assertCan } from "@/server/auth/rbac";
+import { repriceAppliedCoupon } from "@/server/services/couponPricing";
 import { writeAudit } from "@/server/audit/log";
 import { D, dMul, dDiv, money, moneyAmount } from "@/domain/money";
 import { priceMenuSelection } from "@/server/services/menu";
 import { createKOTsForOrder } from "@/server/services/kot";
 import { idempotentCreate, requestHashOf as roundHashOf } from "@/server/services/idempotency";
 import { createNotificationTx } from "@/server/services/notifications";
+import { WALKIN_NOTE_PREFIX } from "@/server/services/reservations";
 
 type Tx = Prisma.TransactionClient;
 type Client = PrismaClient | Tx;
@@ -144,7 +146,7 @@ async function heldTx(tx: Tx, orderId: string) {
 }
 
 /** A repricing (discount, quantity) may never take the total below what the guest already paid. */
-async function assertTotalCoversPaymentsTx(tx: Tx, orderId: string, total: Prisma.Decimal) {
+export async function assertTotalCoversPaymentsTx(tx: Tx, orderId: string, total: Prisma.Decimal) {
   const { gross } = await heldTx(tx, orderId);
   if (D(total).lt(gross)) throw new ValidationError(`The new total ${money(total).toString()} is below the ${money(gross).toString()} already paid; refund first`);
 }
@@ -160,7 +162,15 @@ export async function recomputeTotals(tx: Tx, orderId: string) {
     taxPct: it.taxPct,
     modifiersPerUnit: it.modifiers.reduce((a, m) => a.plus(D(m.priceDelta)), D(0)),
   }));
-  const totals = calculateOrderTotals(items, order.discount);
+  // An applied coupon follows the lines: a percentage coupon is worth more after items are added, and one whose
+  // minimum is no longer met is released. The manual share of the discount is untouched.
+  let orderDiscount: Prisma.Decimal | number | string = order.discount;
+  const repriced = await repriceAppliedCoupon(tx, order, calculateOrderTotals(items, 0).subtotal);
+  if (repriced) {
+    orderDiscount = repriced.discount;
+    if (!D(order.discount).eq(repriced.discount)) await tx.order.update({ where: { id: orderId }, data: { discount: repriced.discount } });
+  }
+  const totals = calculateOrderTotals(items, orderDiscount);
   // keep persisted lineTotal in sync (only lines whose value changed are written:
   // rewriting every line of a long-running order on each round cost a write per
   // line and widened the conflict surface of concurrent rounds)
@@ -188,6 +198,9 @@ const createOrderSchema = z.object({
   externalRef: z.string().optional(),
   covers: z.number().int().positive().default(1),
   notes: z.string().optional(),
+  /** Save the bill at the counter without sending it to the kitchen (the POS's hold list); `holdLabel` names it. */
+  hold: z.boolean().optional(),
+  holdLabel: z.string().trim().max(60).optional(),
   /** Idempotency-Key: a retry with the same key + request returns the original order. */
   idempotencyKey: z.string().trim().min(8).max(100).regex(/^[\w.:-]+$/, "Invalid idempotency key").optional(),
 });
@@ -277,6 +290,14 @@ function createOrderTx(ctx: AccessContext, data: z.infer<typeof createOrderSchem
       const customer = await tx.customer.findUnique({ where: { id: data.customerId }, select: { organizationId: true } });
       if (!customer || customer.organizationId !== ctx.organizationId) throw new NotFoundError("Customer not found");
     }
+    // A party seated from a booking: its special-occasion / allergy note travels with the order, so it is printed on the
+    // kitchen ticket ("Order note: ...") and the captain does not have to pass it on by word of mouth.
+    let notes = data.notes;
+    if (data.tableId) {
+      const seated = await tx.reservation.findFirst({ where: { organizationId: ctx.organizationId, outletId: data.outletId, tableId: data.tableId, status: "SEATED", notes: { not: null } }, orderBy: { reservedAt: "desc" }, select: { notes: true } });
+      const note = seated?.notes?.trim();
+      if (note && !note.startsWith(WALKIN_NOTE_PREFIX)) notes = [data.notes, `Booking note: ${note}`].filter(Boolean).join(" · ");
+    }
     const order = await tx.order.create({
       data: {
         organizationId: ctx.organizationId,
@@ -287,7 +308,9 @@ function createOrderTx(ctx: AccessContext, data: z.infer<typeof createOrderSchem
         customerId: data.customerId,
         externalRef: data.externalRef,
         covers: data.covers,
-        notes: data.notes,
+        notes,
+        holdLabel: data.holdLabel || null,
+        heldAt: data.hold || data.holdLabel ? new Date() : null,
         idempotencyKey: data.idempotencyKey,
         requestHash: hash,
         status: "OPEN",
@@ -415,6 +438,13 @@ export function applyDiscount(ctx: AccessContext, orderId: string, amount: numbe
     assertCan(ctx, "order.discount", order.outletId);
     if (CLOSED_STATUSES.includes(order.status)) throw new ValidationError(`Cannot discount a ${order.status} order`);
     moneyAmount(z.number().nonnegative("Discount cannot be negative")).parse(amount);
+    // `amount` is the order's TOTAL discount. With a coupon on the order it must keep covering the coupon's share, and
+    // a coupon that does not stack refuses any other discount (take the coupon off first).
+    const coupon = await tx.couponRedemption.findFirst({ where: { orderId, status: "APPLIED" }, include: { coupon: { select: { stackable: true, code: true } } } });
+    if (coupon) {
+      if (!coupon.coupon.stackable && D(amount).gt(D(coupon.amount))) throw new ValidationError(`Coupon ${coupon.coupon.code} does not combine with another discount; remove the coupon first`);
+      if (D(amount).lt(D(coupon.amount))) throw new ValidationError(`The discount cannot be lower than coupon ${coupon.coupon.code}'s ${money(coupon.amount).toString()}; remove the coupon to take it off`);
+    }
     await tx.order.update({ where: { id: orderId }, data: { discount: money(amount) } });
     const updated = await recomputeTotals(tx, orderId);
     await assertTotalCoversPaymentsTx(tx, orderId, D(updated.total));
@@ -594,6 +624,7 @@ export function cancelOrder(ctx: AccessContext, orderId: string, reason: string,
     const held = await heldTx(tx, orderId);
     if (held.net.gt(0)) throw new ValidationError(`This order holds ${money(held.net).toString()} in payments; refund them before cancelling`);
     const updated = await tx.order.update({ where: { id: orderId }, data: { status: "CANCELLED", notes: reason } });
+    await tx.couponRedemption.updateMany({ where: { orderId, status: "APPLIED" }, data: { status: "REVERSED", reversedAt: new Date(), reverseReason: "Order cancelled" } });
     // Stop the kitchen: tickets not yet READY are cancelled (READY food already exists; KOT_TRANSITIONS lets it be served/cleared).
     const live = await tx.kot.findMany({ where: { orderId, status: { in: ["NEW", "ACCEPTED", "PREPARING"] } }, select: { id: true, number: true } });
     if (live.length) {
@@ -629,6 +660,8 @@ const listSchema = z.object({
   /** Only orders still running (not PAID / CANCELLED / REFUNDED). */
   active: z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]).optional(),
   tableId: z.string().optional(),
+  /** Only bills held at the counter and not yet sent (the POS's hold list), oldest first. */
+  held: z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
   take: z.coerce.number().int().positive().max(200).default(50),
@@ -645,8 +678,9 @@ export async function listOrders(db: PrismaClient, ctx: AccessContext, input: z.
     where: {
       organizationId: ctx.organizationId, outletId: f.outletId, ...(f.status ? { status: f.status } : {}), ...(f.tableId ? { tableId: f.tableId } : {}), ...(createdAt ? { createdAt } : {}),
       ...(f.active ? { status: { notIn: ["PAID", "CANCELLED", "REFUNDED"] } } : {}),
+      ...(f.held ? { status: "OPEN", heldAt: { not: null } } : {}),
     },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    orderBy: f.held ? [{ heldAt: "asc" }, { id: "asc" }] : [{ createdAt: "desc" }, { id: "desc" }],
     take: f.take + 1,
     include: { customer: customerSelect, table: { select: { code: true } }, items: { select: { id: true, name: true, qty: true, lineTotal: true } }, kots: { select: { status: true } } },
     ...(f.cursor ? { cursor: { id: f.cursor }, skip: 1 } : {}),
@@ -694,6 +728,7 @@ export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db:
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "order.create", data.outletId);
   const { items, submit, ...orderInput } = data;
+  if (submit && (data.hold || data.holdLabel)) throw new ValidationError("A held bill is not sent to the kitchen; resume it first");
   const hash = data.idempotencyKey ? requestHashOf(data as never) : null;
   const replay = async () => {
     const prior = await db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: data.idempotencyKey! } }, include: placedInclude });

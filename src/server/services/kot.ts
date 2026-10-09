@@ -29,7 +29,7 @@ const onPostgres = () => /^postgres(ql)?:/.test(process.env.DATABASE_URL ?? "");
  * predicate lock, no extra connection; a rolled-back order may leave a gap.
  * SQLite serializes writers, so max + 1 is safe and stays gap-free there.
  */
-async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
+export async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
   if (onPostgres()) {
     const [row] = await tx.$queryRaw<{ n: number }[]>`SELECT nextval('"kot_number_seq"')::int AS n`;
     return Number(row.n);
@@ -148,7 +148,7 @@ export async function listKOTs(db: PrismaClient, ctx: AccessContext, filter: { o
     include: {
       station: { select: { id: true, name: true } },
       order: { select: { id: true, channel: true, source: true, covers: true, notes: true, createdAt: true, table: { select: { code: true } } } },
-      items: { include: { orderItem: { select: { notes: true, modifiers: { select: { name: true } } } } } },
+      items: { include: { orderItem: { select: { menuItemId: true, notes: true, modifiers: { select: { name: true } } } } } },
     },
   });
   return rows.reverse(); // the board reads oldest first
@@ -159,9 +159,6 @@ export async function listStations(db: PrismaClient, ctx: AccessContext, outletI
   assertCan(ctx, "kot.view", outletId);
   return db.kitchenStation.findMany({ where: { organizationId: ctx.organizationId, outletId, active: true }, orderBy: { name: "asc" }, select: { id: true, name: true, kind: true } });
 }
-
-/** KDS is the kitchen's view of the same lifecycle. */
-export const updateKDSStatus = updateKOTStatus;
 
 export async function routeKOTToStation(ctx: AccessContext, kotId: string, stationId: string, db: Client = prisma) {
   const kot = await db.kot.findUnique({ where: { id: kotId } });
