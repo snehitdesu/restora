@@ -31,6 +31,7 @@ import { idempotentCreate, requestHashOf } from "@/server/services/idempotency";
 import { authorizedOutletIds } from "@/server/services/analytics";
 import { D, dMul, dDiv, money, moneyAmount, num, qty as roundQty, type Decimalish } from "@/domain/money";
 import { type Client, type Tx, runInTx, assertTransition, nextNumber } from "@/server/services/_workflow";
+import { approvalPlan, getProcurementRules } from "@/server/services/procurementRules";
 
 // ============================================================
 // Purchase Indent
@@ -179,7 +180,16 @@ export async function createPurchaseOrderInTx(tx: Tx, ctx: AccessContext, data: 
  */
 const MANUAL_PO_TARGETS: ReadonlySet<PurchaseOrderStatus> = new Set(["SUBMITTED", "APPROVED", "ORDERED", "CLOSED", "CANCELLED"]);
 
-/** Manual PO transitions (submit / approve / order / close / cancel). Receiving and billing states are derived. */
+/** A line an approver has not taken off the order. */
+export const isActiveLine = (l: { lineStatus?: string | null }) => (l.lineStatus ?? "ACTIVE") === "ACTIVE";
+
+/**
+ * Manual PO transitions (submit / approve / order / close / cancel). Receiving and billing states are derived.
+ *
+ * Approval rules (procurementRules.ts): an order at or below the organization's small-order limit is approved the moment it
+ * is submitted; at or above its large-order limit it needs two different approvers: the first approval is recorded and the
+ * order stays SUBMITTED, the second (by someone else) approves it. A line review that changes the total is judged afresh.
+ */
 export function transitionPurchaseOrder(ctx: AccessContext, poId: string, to: PurchaseOrderStatus, db: Client = prisma) {
   return runInTx(db, async (tx) => {
     const po = await tx.purchaseOrder.findUnique({ where: { id: poId }, include: { lines: true } });
@@ -195,12 +205,91 @@ export function transitionPurchaseOrder(ctx: AccessContext, poId: string, to: Pu
     }
     // A vendor dropped after the PO was raised cannot be bought from.
     if (to === "SUBMITTED" || to === "APPROVED" || to === "ORDERED") await ensureVendor(tx, ctx, po.vendorId, "buy");
+    const rules = to === "APPROVED" || to === "SUBMITTED" ? await getProcurementRules(tx, ctx.organizationId) : null;
+
+    if (to === "APPROVED" && rules && approvalPlan(po.total, { autoApproveBelow: rules.autoApproveBelow, dualApprovalAtOrAbove: rules.dualApprovalAtOrAbove }) === "DUAL") {
+      // Two different people: the first approval waits, the second one completes it.
+      if (!po.firstApprovedById) {
+        const first = await tx.purchaseOrder.update({ where: { id: poId }, data: { firstApprovedById: ctx.userId, firstApprovedAt: new Date() } });
+        await writeAudit(tx, ctx, { action: "APPROVE", entityType: "PurchaseOrder", entityId: poId, outletId: po.outletId, before: { status: po.status }, after: { status: po.status, approval: "1 of 2", limit: rules.dualApprovalAtOrAbove } });
+        return first;
+      }
+      if (po.firstApprovedById === ctx.userId) throw new ValidationError("This order needs a second, different approver: you gave the first approval");
+    }
+
     const updated = await tx.purchaseOrder.update({
       where: { id: poId },
       data: { status: to, approvedById: to === "APPROVED" ? actor(ctx) : undefined, approvedAt: to === "APPROVED" ? new Date() : undefined },
     });
-    await writeAudit(tx, ctx, { action: to === "APPROVED" ? "APPROVE" : to === "CANCELLED" ? "VOID" : "UPDATE", entityType: "PurchaseOrder", entityId: poId, outletId: po.outletId, before: { status: po.status }, after: { status: to } });
+    await writeAudit(tx, ctx, { action: to === "APPROVED" ? "APPROVE" : to === "CANCELLED" ? "VOID" : "UPDATE", entityType: "PurchaseOrder", entityId: poId, outletId: po.outletId, before: { status: po.status }, after: { status: to, ...(to === "APPROVED" && po.firstApprovedById ? { approval: "2 of 2", firstApprovedById: po.firstApprovedById } : {}) } });
+
+    // Small order: nobody has to approve it by hand.
+    if (to === "SUBMITTED" && rules && approvalPlan(po.total, { autoApproveBelow: rules.autoApproveBelow, dualApprovalAtOrAbove: rules.dualApprovalAtOrAbove }) === "AUTO") {
+      const auto = await tx.purchaseOrder.update({ where: { id: poId }, data: { status: "APPROVED", approvedAt: new Date(), autoApproved: true } });
+      await writeAudit(tx, ctx, { action: "APPROVE", entityType: "PurchaseOrder", entityId: poId, outletId: po.outletId, before: { status: "SUBMITTED" }, after: { status: "APPROVED", auto: true, limit: rules.autoApproveBelow } });
+      return auto;
+    }
     return updated;
+  });
+}
+
+// ------------------------------------------------------------
+// Line-level review before approval (audit PP-06)
+// ------------------------------------------------------------
+
+const reviewSchema = z.object({
+  lines: z.array(z.object({
+    lineId: z.string().min(1),
+    /** REJECT takes the line off the order; KEEP leaves it on (or puts a rejected line back), with an optional new quantity. */
+    action: z.enum(["KEEP", "REJECT"]),
+    qty: qtyNum.optional(),
+  }).strict()).min(1).max(200),
+  note: z.string().trim().max(300).optional(),
+}).strict();
+
+/**
+ * The approver goes through a submitted order line by line: change a quantity, take a line off, put one back. The order's
+ * totals are recomputed from the lines that stay; the quantity as raised is kept on the line. At least one line must stay. A
+ * review after the first of two approvals clears that approval (the order is not the one that was approved). This does not
+ * approve anything by itself: approving is the ordinary transition afterwards.
+ */
+export async function reviewPurchaseOrder(ctx: AccessContext, poId: string, input: z.input<typeof reviewSchema>, db: Client = prisma) {
+  const data = reviewSchema.parse(input);
+  return runInTx(db, async (tx) => {
+    const po = await tx.purchaseOrder.findUnique({ where: { id: poId }, include: { lines: true } });
+    if (!po || po.organizationId !== ctx.organizationId) throw new NotFoundError("PO not found");
+    assertOutletAccess(ctx, po.outletId);
+    assertCan(ctx, "purchase.approve", po.outletId);
+    if (po.status !== "SUBMITTED") throw new ValidationError(`Only a submitted order can be reviewed (this one is ${po.status.toLowerCase()})`);
+    const byId = new Map(po.lines.map((l) => [l.id, l]));
+    const seen = new Set<string>();
+    const changes: Array<Record<string, unknown>> = [];
+    for (const c of data.lines) {
+      const line = byId.get(c.lineId);
+      if (!line) throw new ValidationError("A line to review is not on this purchase order");
+      if (seen.has(c.lineId)) throw new ValidationError("A line is listed twice");
+      seen.add(c.lineId);
+      if (c.action === "REJECT" && c.qty !== undefined) throw new ValidationError("A rejected line has no quantity");
+      const patch: { lineStatus?: string; qty?: Prisma.Decimal; requestedQty?: Prisma.Decimal } = {};
+      if (c.action === "REJECT" && isActiveLine(line)) patch.lineStatus = "REJECTED";
+      if (c.action === "KEEP" && !isActiveLine(line)) patch.lineStatus = "ACTIVE";
+      if (c.action === "KEEP" && c.qty !== undefined && !D(c.qty).eq(D(line.qty))) {
+        patch.qty = D(c.qty);
+        if (!line.requestedQty) patch.requestedQty = D(line.qty);
+      }
+      if (!Object.keys(patch).length) continue;
+      await tx.purchaseOrderLine.update({ where: { id: line.id }, data: patch });
+      changes.push({ lineId: line.id, materialId: line.materialId, ...(patch.lineStatus ? { status: patch.lineStatus } : {}), ...(patch.qty ? { qty: { from: D(line.qty).toString(), to: patch.qty.toString() } } : {}) });
+    }
+    if (!changes.length) throw new ValidationError("Nothing to change");
+    const lines = await tx.purchaseOrderLine.findMany({ where: { poId } });
+    const active = lines.filter(isActiveLine);
+    if (!active.length) throw new ValidationError("At least one line has to stay on the order; to turn it down altogether, cancel it");
+    const totals = poTotals(active.map((l) => ({ qty: Number(l.qty), rate: Number(l.rate), taxPct: Number(l.taxPct) })));
+    const clearedFirst = Boolean(po.firstApprovedById);
+    const updated = await tx.purchaseOrder.update({ where: { id: poId }, data: { subtotal: totals.subtotal, tax: totals.tax, total: totals.total, firstApprovedById: null, firstApprovedAt: null } });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "PurchaseOrder", entityId: poId, outletId: po.outletId, before: { total: money(po.total).toFixed(2) }, after: { review: changes, total: money(updated.total).toFixed(2), note: data.note, ...(clearedFirst ? { firstApprovalCleared: true } : {}) } });
+    return tx.purchaseOrder.findUniqueOrThrow({ where: { id: poId }, include: { lines: true } });
   });
 }
 
@@ -217,7 +306,7 @@ const grnSchema = z.object({
   lines: z.array(z.object({
     materialId: z.string(), qty: qtyNum, rate: rateNum,
     /** Rejected at the door (damaged / not acceptable): never enters stock, never billable. */
-    damagedQty: z.number().nonnegative().max(1_000_000_000).default(0), batchNo: z.string().max(100).optional(), expiryDate: z.coerce.date().optional(), unitId: z.string().optional(),
+    damagedQty: z.number().nonnegative().max(1_000_000_000).default(0), batchNo: z.string().max(100).optional(), expiryDate: z.coerce.date().optional(), fssaiLot: z.string().trim().max(40).regex(/^[A-Za-z0-9][\w./ -]*$/, "Lot code: letters, digits and . / - _ only").optional(), unitId: z.string().optional(),
   })).min(1).max(200),
 });
 
@@ -228,9 +317,9 @@ const RECEIVABLE_PO: ReadonlySet<string> = new Set(["APPROVED", "ORDERED", "PART
  * Accepted (good) base quantity per material still open on a PO:
  * Σ over its lines of (ordered − received) × line unit factor.
  */
-async function poOutstandingBase(tx: Tx, ctx: AccessContext, po: { lines: Array<{ materialId: string; qty: Decimalish; receivedQty: Decimalish; unitId: string | null }> }) {
+async function poOutstandingBase(tx: Tx, ctx: AccessContext, po: { lines: Array<{ materialId: string; qty: Decimalish; receivedQty: Decimalish; unitId: string | null; lineStatus?: string | null }> }) {
   const open = new Map<string, Prisma.Decimal>();
-  for (const l of po.lines) {
+  for (const l of po.lines.filter(isActiveLine)) {
     const { factor } = await resolveUnit(tx, ctx, l.materialId, l.unitId);
     const rest = D(l.qty).minus(D(l.receivedQty));
     open.set(l.materialId, (open.get(l.materialId) ?? D(0)).plus(rest.gt(0) ? rest.times(factor) : D(0)));
@@ -259,7 +348,7 @@ async function assertReceivableAgainstPo(tx: Tx, ctx: AccessContext, poId: strin
   if (!RECEIVABLE_PO.has(po.status)) throw new ValidationError(`Goods cannot be received against a ${po.status} purchase order`);
   const open = await poOutstandingBase(tx, ctx, po);
   for (const [materialId, good] of goodByMaterial) {
-    if (!po.lines.some((l) => l.materialId === materialId)) throw new ValidationError(`Material ${materialId} is not on purchase order ${po.number}`);
+    if (!po.lines.some((l) => isActiveLine(l) && l.materialId === materialId)) throw new ValidationError(`Material ${materialId} is not on purchase order ${po.number}`);
     const left = open.get(materialId) ?? D(0);
     if (good.gt(left)) throw new ValidationError(`Receiving ${roundQty(good).toString()} of material ${materialId} exceeds the ${roundQty(left).toString()} still open on ${po.number} (base units)`);
   }
@@ -284,7 +373,7 @@ export async function createGRN(ctx: AccessContext, input: z.input<typeof grnSch
       const grn = await tx.goodsReceipt.create({
         data: {
           organizationId: ctx.organizationId, outletId: data.outletId, number, poId: data.poId, vendorId: data.vendorId, status: "DRAFT", notes: data.notes, createdById: actor(ctx), idempotencyKey: key, requestHash: hash,
-          lines: { create: data.lines.map((l) => ({ organizationId: ctx.organizationId, materialId: l.materialId, qty: l.qty, rate: l.rate, damagedQty: l.damagedQty ?? 0, batchNo: l.batchNo, expiryDate: l.expiryDate, unitId: l.unitId })) },
+          lines: { create: data.lines.map((l) => ({ organizationId: ctx.organizationId, materialId: l.materialId, qty: l.qty, rate: l.rate, damagedQty: l.damagedQty ?? 0, batchNo: l.batchNo, expiryDate: l.expiryDate, fssaiLot: l.fssaiLot, unitId: l.unitId })) },
         },
       });
       await writeAudit(tx, ctx, { action: "CREATE", entityType: "GoodsReceipt", entityId: grn.id, outletId: data.outletId });
@@ -319,7 +408,7 @@ export function postGRN(ctx: AccessContext, grnId: string, db: Client = prisma) 
       if (good.lte(0)) continue; // fully rejected line: nothing enters stock
       await appendLedger(tx, ctx, {
         outletId: grn.outletId, materialId: line.materialId, unitId: base.baseUnitId, magnitude: base.qty, rate: base.rate,
-        batchNo: (line as { batchNo?: string | null }).batchNo ?? undefined, expiryDate: (line as { expiryDate?: Date | null }).expiryDate ?? undefined,
+        batchNo: (line as { batchNo?: string | null }).batchNo ?? undefined, expiryDate: (line as { expiryDate?: Date | null }).expiryDate ?? undefined, fssaiLot: (line as { fssaiLot?: string | null }).fssaiLot ?? undefined,
         txnType: "PURCHASE_RECEIPT", sourceType: "GRN", sourceId: grn.id, sourceRef: `grn:${grn.id}:${line.id}`, note: `GRN ${grn.number}`,
       });
     }
@@ -344,7 +433,7 @@ async function updatePoOnReceipt(tx: Tx, ctx: AccessContext, poId: string, recei
   if (!po || po.organizationId !== ctx.organizationId) return;
   for (const [materialId, goodBase] of received) {
     let left = goodBase;
-    for (const line of po.lines.filter((l) => l.materialId === materialId)) {
+    for (const line of po.lines.filter((l) => isActiveLine(l) && l.materialId === materialId)) {
       if (left.lte(0)) break;
       const { factor } = await resolveUnit(tx, ctx, line.materialId, line.unitId);
       const openBase = D(line.qty).minus(D(line.receivedQty)).times(factor);
@@ -355,8 +444,9 @@ async function updatePoOnReceipt(tx: Tx, ctx: AccessContext, poId: string, recei
     }
   }
   const fresh = await tx.purchaseOrder.findUniqueOrThrow({ where: { id: poId }, include: { lines: true } });
-  const allReceived = fresh.lines.every((l) => D(l.receivedQty).gte(D(l.qty)));
-  const anyReceived = fresh.lines.some((l) => D(l.receivedQty).gt(0));
+  const live = fresh.lines.filter(isActiveLine);
+  const allReceived = live.every((l) => D(l.receivedQty).gte(D(l.qty)));
+  const anyReceived = live.some((l) => D(l.receivedQty).gt(0));
   const next = allReceived ? "RECEIVED" : anyReceived ? "PARTIAL" : fresh.status;
   if (next !== fresh.status) {
     await tx.purchaseOrder.update({ where: { id: poId }, data: { status: next } });

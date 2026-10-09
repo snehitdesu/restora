@@ -18,6 +18,7 @@ import {
   createStockCount, startStockCount, enterStockCounts, submitStockCountForReview, approveStockCount, cancelStockCount,
 } from "@/server/services/stockOps";
 import { listLedger } from "@/server/services/adminQueries";
+import { expiringStock } from "@/server/services/expiry";
 import { canSeeStockValue } from "@/server/services/costVisibility";
 import { num } from "@/domain/money";
 import { listTransfers, getTransfer, listIssues, getIssue, listStockCounts, getStockCount, getWastage, getProductionBatch } from "@/server/services/documentQueries";
@@ -40,6 +41,8 @@ function canViewInventory(ctx: Parameters<typeof assertCan>[0], outletId: string
 
 export const { GET, POST } = createRouter([
   // ---- stock ----
+  // Batches that expire soon (or have), with the one to use first (audit IN-14).
+  { method: "GET", path: "expiring", handler: ({ ctx, query }) => expiringStock(prisma, ctx, query as never) },
   {
     method: "GET", path: "stock",
     handler: async ({ ctx, query }) => {

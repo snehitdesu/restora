@@ -20,6 +20,7 @@ import { analyticsInternals as A } from "@/server/services/analytics";
 import { lowStock, negativeStock } from "@/server/services/inventory";
 import { vendorAging } from "@/server/services/vendorFinance";
 import { businessInsights } from "@/server/services/insights";
+import { approvalStateOf, getProcurementRules, userNames } from "@/server/services/procurementRules";
 
 const CLOSED = ["PAID", "CANCELLED", "REFUNDED"];
 const LIVE_KOT = ["NEW", "ACCEPTED", "PREPARING"];
@@ -218,13 +219,18 @@ export async function managerSummary(db: PrismaClient, ctx: AccessContext, outle
         const where = { ...scope, status: "SUBMITTED" };
         const [count, rows] = await Promise.all([
           db.purchaseOrder.count({ where }),
-          db.purchaseOrder.findMany({ where, orderBy: { createdAt: "asc" }, take: 20, select: { id: true, number: true, vendorId: true, total: true, createdAt: true, expectedDate: true, notes: true, _count: { select: { lines: true } } } }),
+          db.purchaseOrder.findMany({ where, orderBy: { createdAt: "asc" }, take: 20, select: { id: true, number: true, vendorId: true, total: true, status: true, createdAt: true, expectedDate: true, notes: true, firstApprovedById: true, autoApproved: true, _count: { select: { lines: true } } } }),
         ]);
         const vendors = await db.vendor.findMany({ where: { organizationId: ctx.organizationId, id: { in: [...new Set(rows.map((p) => p.vendorId))] } }, select: { id: true, name: true } });
         const vendorName = new Map(vendors.map((v) => [v.id, v.name]));
+        const [rules, approverNames] = await Promise.all([getProcurementRules(db, ctx.organizationId), userNames(db, ctx.organizationId, rows.map((p) => p.firstApprovedById))]);
         return {
           pendingPurchaseOrders: count,
-          purchaseOrders: rows.map((p) => ({ id: p.id, number: p.number, vendor: vendorName.get(p.vendorId) ?? "Unknown vendor", total: m2(p.total), lines: p._count.lines, raisedAt: p.createdAt.toISOString(), expectedDate: p.expectedDate?.toISOString() ?? null, notes: p.notes })),
+          purchaseOrders: rows.map((p) => ({
+            id: p.id, number: p.number, vendor: vendorName.get(p.vendorId) ?? "Unknown vendor", total: m2(p.total), lines: p._count.lines, raisedAt: p.createdAt.toISOString(), expectedDate: p.expectedDate?.toISOString() ?? null, notes: p.notes,
+            // One approver or two (the organization's rules), who gave the first, and whether it was this person (they cannot give the second).
+            approval: { ...approvalStateOf(p, rules, (uid) => approverNames.get(uid) ?? null), youApprovedFirst: Boolean(p.firstApprovedById) && p.firstApprovedById === ctx.userId },
+          })),
         };
       })()
     : null;

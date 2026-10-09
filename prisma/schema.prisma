@@ -243,6 +243,8 @@ model Material {
   organizationId    String
   sku               String
   name              String
+  // The maker's brand ("Amul", "Tata Salt"): what the store looks for on the shelf and the vendor quotes against.
+  brand             String?
   categoryId        String?
   category          MaterialCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   baseUnitId        String
@@ -308,6 +310,9 @@ model Vendor {
   creditLimit    Decimal  @default(0)
   // UPI id for vendor payments (shown masked like bank details).
   upiId          String?
+  // What kind of vendor (Dairy, Produce, Packaging ...) and the GST nature of supply: GOODS | SERVICES | BOTH.
+  category       String?
+  natureOfSupply String?
   // Mirrors status == ACTIVE (kept for existing filters); status is authoritative.
   active         Boolean  @default(true)
   // PENDING | ACTIVE | INACTIVE | BLACKLISTED (VENDOR_STATUS_TRANSITIONS). New
@@ -322,10 +327,28 @@ model Vendor {
   updatedAt      DateTime @updatedAt
 
   materials VendorMaterial[]
+  contacts  VendorContact[]
 
   @@unique([organizationId, name])
   @@index([organizationId, active])
   @@index([organizationId, status])
+}
+
+/// A person to call at a vendor (the account manager, the delivery desk, accounts): a vendor has several.
+model VendorContact {
+  id             String   @id @default(cuid())
+  organizationId String
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name           String
+  role           String?
+  phone          String?
+  email          String?
+  isPrimary      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([vendorId])
+  @@index([organizationId])
 }
 
 model VendorMaterial {
@@ -377,6 +400,8 @@ model MenuItem {
   posCode        String? // external POS item code for mapping
   // HSN / SAC code for tax invoices (restaurant service: SAC 996331).
   hsnSac         String?
+  // Comma-separated lower-case tags: "south-indian,breakfast". Cuisine / meal-type labels for filtering the menu.
+  cuisineTags    String?
   isVeg          Boolean       @default(true)
   active         Boolean       @default(true)
   soldOut        Boolean       @default(false)
@@ -1057,6 +1082,11 @@ model PurchaseOrder {
   createdById    String?
   approvedById   String?
   approvedAt     DateTime?
+  // Two-person approval (ProcurementSettings.dualApprovalAtOrAbove): the first approver, kept until a different second one approves.
+  firstApprovedById String?
+  firstApprovedAt   DateTime?
+  // Approved by the small-order rule at submission (nobody approved it by hand).
+  autoApproved   Boolean   @default(false)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -1081,6 +1111,11 @@ model PurchaseOrderLine {
   taxPct         Decimal       @default(0)
   receivedQty    Decimal       @default(0)
   unitId         String?
+  // ACTIVE | REJECTED: an approver can take a line off the order without rejecting the rest. A rejected line is not billed
+  // in the order's total, cannot be received and is not counted as on order.
+  lineStatus     String        @default("ACTIVE")
+  // The quantity as raised, kept when an approver changed it.
+  requestedQty   Decimal?
 
   @@index([poId])
   @@index([materialId])
@@ -1126,6 +1161,8 @@ model GoodsReceiptLine {
   damagedQty     Decimal      @default(0)
   batchNo        String?
   expiryDate     DateTime?
+  // FSSAI lot code printed on the pack (traceability for a recall).
+  fssaiLot       String?
   unitId         String?
 
   @@index([grnId])
@@ -1237,6 +1274,7 @@ model InventoryLedger {
   sourceRef      String?           @unique
   batchNo        String?
   expiryDate     DateTime?
+  fssaiLot       String?
   note           String?
   // Correction chain (append-only): a mistake is fixed with a new row.
   correctionOfId String?
@@ -1307,6 +1345,8 @@ model InventoryIssue {
   toDepartmentId   String?
   status           String    @default("DRAFT") // DRAFT | ISSUED | CANCELLED
   notes            String?
+  // The approved indent this issue fulfils (the kitchen asked, the store dispatched).
+  indentId         String?
   // Client Idempotency-Key for creation: a retry with the same key + request
   // returns the original document; reuse for a different request is refused.
   idempotencyKey   String?
@@ -1320,6 +1360,7 @@ model InventoryIssue {
   @@unique([organizationId, idempotencyKey])
   @@unique([outletId, number])
   @@index([organizationId, outletId, status])
+  @@index([indentId])
 }
 
 model InventoryIssueLine {
@@ -2518,4 +2559,17 @@ model CampaignRecipient {
 
   @@unique([campaignId, customerId])
   @@index([organizationId, customerId])
+}
+
+/// Approval rules for purchase orders, per organization (audit PP-07). Both limits are optional; with neither set every
+/// order waits for one approver, as before.
+model ProcurementSettings {
+  id                    String   @id @default(cuid())
+  organizationId        String   @unique
+  /// A purchase order at or below this total is approved when it is submitted.
+  autoApproveBelow      Decimal?
+  /// A purchase order at or above this total needs two different approvers.
+  dualApprovalAtOrAbove Decimal?
+  updatedById           String?
+  updatedAt             DateTime @updatedAt
 }

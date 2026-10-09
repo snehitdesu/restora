@@ -47,6 +47,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/inventory/wastage", label: "Wastage", icon: "trash", permission: "inventory.view", section: "Inventory", description: "Wastage documents" },
   { href: "/inventory/worksheet", label: "Dish production", icon: "kitchen", permission: "inventory.view", section: "Inventory", description: "Prepared, sold and wasted per dish per day" },
   { href: "/inventory/production", label: "Production", icon: "factory", permission: "inventory.view", section: "Inventory", description: "Sub-recipe batches" },
+  { href: "/inventory/expiry", label: "Expiry", icon: "clock", permission: "inventory.view", section: "Inventory", description: "Batches that expire soon: the earliest to use first, with batch and FSSAI lot" },
   { href: "/inventory/variance", label: "Variance", icon: "scale", permission: "reports.view", section: "Inventory", description: "Expected vs actual usage, and food cost leakage" },
   { href: "/inventory/labels", label: "Stock labels", icon: "qr", permission: "inventory.view", section: "Inventory", description: "Print QR shelf labels and scan them to see stock" },
 
@@ -96,6 +97,7 @@ export const NAV_ITEMS: NavItem[] = [
 
   { href: "/settings/organization", label: "Organization", icon: "building", anyOf: ["org.manage", "outlet.manage"], section: "Admin", description: "Organization profile" },
   { href: "/settings/outlets", label: "Outlets", icon: "store", anyOf: ["org.manage", "outlet.manage"], section: "Admin", description: "Outlets" },
+  { href: "/settings/purchasing", label: "Purchasing rules", icon: "sliders", permission: "org.manage", section: "Admin", description: "Who approves a purchase order, by its size: automatic below one amount, two approvers above another" },
   { href: "/settings/integrations", label: "Integrations", icon: "swap", permission: "integration.manage", section: "Admin", description: "Payment gateway, ordering platforms, messaging, accounting export" },
   { href: "/settings/printers", label: "Printers & drawer", icon: "receipt", anyOf: ["outlet.manage", "payment.take"], section: "Admin", description: "Receipt / kitchen printers and the cash drawer" },
   { href: "/settings/departments", label: "Departments", icon: "grid", permission: "master.view", section: "Admin", description: "Outlet departments" },

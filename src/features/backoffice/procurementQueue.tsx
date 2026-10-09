@@ -56,7 +56,12 @@ export function ProcurementQueueScreen() {
         columns={[
           { key: "kind", header: "Type", cell: (r) => <Badge tone={r.kind === "PURCHASE_ORDER" ? "info" : "neutral"}>{KIND_LABEL[r.kind]}</Badge> },
           { key: "number", header: "Number", cell: (r) => <span><Link href={r.href} className="font-medium text-brand-700 hover:underline">{r.number}</Link>{r.source === "REORDER" && <Badge tone="neutral" className="ml-2">Reorder</Badge>}</span> },
-          { key: "status", header: "Status", cell: (r) => <StatusBadge status={r.status} /> },
+          { key: "status", header: "Status", cell: (r) => (
+            <span><StatusBadge status={r.status} />
+              {r.status === "SUBMITTED" && r.approval?.needed === 2 && <span className="mt-0.5 block text-xs text-warn-700" data-testid={`steps-${r.number}`}>{r.approval.done} of 2 approvals</span>}
+              {r.approval?.autoApproved && <span className="mt-0.5 block text-xs text-ink-500">approved automatically</span>}
+            </span>
+          ) },
           { key: "vendor", header: "Vendor", cell: (r) => (r.vendorId ? vendorLabel(vendors.byId, r.vendorId) : "—") },
           { key: "lines", header: "Lines", numeric: true, cell: (r) => r.lines },
           { key: "total", header: "Total", numeric: true, cell: (r) => (r.total === null ? "—" : formatMoney(r.total)) },
@@ -66,8 +71,8 @@ export function ProcurementQueueScreen() {
               <div className="flex justify-end gap-1">
                 {r.status === "SUBMITTED" && can("purchase.approve") && (
                   <ActionButton size="sm" variant="success" action={approve(r)} onDone={q.reload} success="Approved"
-                    confirm={{ title: `Approve ${r.number}?`, message: r.total === null ? "The store can then act on it." : `${formatMoney(r.total)} — purchasing can then send it to the vendor.`, confirmLabel: "Approve" }}>
-                    Approve
+                    confirm={{ title: `Approve ${r.number}?`, message: r.total === null ? "The store can then act on it." : r.approval?.needed === 2 ? `${formatMoney(r.total)} — approval ${r.approval.done + 1} of 2.` : `${formatMoney(r.total)} — purchasing can then send it to the vendor.`, confirmLabel: "Approve" }}>
+                    {r.approval?.needed === 2 ? `Approve (${r.approval.done + 1} of 2)` : "Approve"}
                   </ActionButton>
                 )}
                 <Link href={r.href} className="inline-flex h-8 items-center rounded-md border border-ink-300 px-2.5 text-sm font-medium hover:bg-ink-100" aria-label={`Open ${r.number}`}>Open</Link>

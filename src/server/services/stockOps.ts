@@ -23,6 +23,7 @@ import { assertOutletInOrg } from "@/server/db/outletGuard";
 import { idempotentCreate, requestHashOf } from "@/server/services/idempotency";
 import { D, dMul, money } from "@/domain/money";
 import { type Client, type Tx, runInTx, assertTransition, nextNumber } from "@/server/services/_workflow";
+import { indentFulfilment } from "@/server/services/indentFulfilment";
 
 function actor(ctx: AccessContext): string | null {
   return ctx.userId === "system" ? null : ctx.userId;
@@ -183,8 +184,29 @@ const issueSchema = z.object({
   fromDepartmentId: z.string().optional(),
   toDepartmentId: z.string().optional(),
   notes: z.string().max(1000).optional(),
+  /** The approved indent this issue fulfils (the kitchen asked, the store dispatches). */
+  indentId: z.string().optional(),
   lines: z.array(z.object({ materialId: z.string(), qty: qtyNum, unitId: z.string().optional() })).min(1).max(200),
 });
+
+/**
+ * An issue that names an indent: same outlet, the indent is APPROVED (open for dispatch), every line is something the indent
+ * asked for, and together with what was already issued it does not go past what was asked.
+ */
+async function assertIssueMatchesIndent(tx: Tx, ctx: AccessContext, outletId: string, indentId: string, lines: Array<{ materialId: string; qty: Prisma.Decimal | number | string; unitId?: string | null }>) {
+  const indent = await tx.purchaseIndent.findUnique({ where: { id: indentId } });
+  if (!indent || indent.organizationId !== ctx.organizationId) throw new NotFoundError("Indent not found");
+  if (indent.outletId !== outletId) throw new ValidationError("The indent belongs to a different outlet");
+  if (indent.status !== "APPROVED") throw new ValidationError(`Only an approved indent can be issued against (this one is ${indent.status.toLowerCase()})`);
+  const f = await indentFulfilment(tx, ctx, indentId, lines);
+  const asked = new Map(f.lines.map((l) => [l.materialId, l]));
+  for (const l of lines) if (!asked.has(l.materialId)) throw new ValidationError(`Material ${l.materialId} is not on indent ${indent.number}`);
+  for (const l of f.lines) {
+    const over = l.issued - (l.requested);
+    if (over > 1e-9) throw new ValidationError(`Issuing this would move ${over} more than indent ${indent.number} asked for (${l.requested} in all, base units)`);
+  }
+  return indent;
+}
 
 export async function createIssue(ctx: AccessContext, input: z.input<typeof issueSchema>, db: Client = prisma, idempotencyKey?: string) {
   const data = issueSchema.parse(input);
@@ -206,14 +228,15 @@ export async function createIssue(ctx: AccessContext, input: z.input<typeof issu
       // 03: it nets to zero), so it needs somewhere to go.
       if (!data.toDepartmentId) throw new ValidationError("Choose the department receiving the stock");
       if (data.toDepartmentId === data.fromDepartmentId) throw new ValidationError("The receiving department must differ from the issuing one");
+      if (data.indentId) await assertIssueMatchesIndent(tx, ctx, data.outletId, data.indentId, data.lines);
       const number = data.number ?? (await nextNumber(tx, tx.inventoryIssue, { outletId: data.outletId }, "ISS"));
       const issue = await tx.inventoryIssue.create({
         data: {
-          organizationId: ctx.organizationId, outletId: data.outletId, number, fromDepartmentId: data.fromDepartmentId, toDepartmentId: data.toDepartmentId, status: "DRAFT", notes: data.notes, createdById: actor(ctx), idempotencyKey: key, requestHash: hash,
+          organizationId: ctx.organizationId, outletId: data.outletId, number, fromDepartmentId: data.fromDepartmentId, toDepartmentId: data.toDepartmentId, status: "DRAFT", notes: data.notes, indentId: data.indentId, createdById: actor(ctx), idempotencyKey: key, requestHash: hash,
           lines: { create: data.lines.map((l) => ({ organizationId: ctx.organizationId, materialId: l.materialId, qty: l.qty, unitId: l.unitId })) },
         },
       });
-      await writeAudit(tx, ctx, { action: "CREATE", entityType: "InventoryIssue", entityId: issue.id, outletId: data.outletId });
+      await writeAudit(tx, ctx, { action: "CREATE", entityType: "InventoryIssue", entityId: issue.id, outletId: data.outletId, after: data.indentId ? { indentId: data.indentId } : undefined });
       return issue;
     }),
   });
@@ -234,6 +257,8 @@ export function postIssue(ctx: AccessContext, issueId: string, db: Client = pris
     assertCan(ctx, "inventory.issue", issue.outletId);
     if (issue.status === "ISSUED") return issue; // idempotent
     assertTransition(ISSUE_TRANSITIONS, issue.status as IssueStatus, "ISSUED", "issue");
+    // Drafts do not count against the indent, so the check is made again now: another issue may have moved the stock since.
+    if (issue.indentId) await assertIssueMatchesIndent(tx, ctx, issue.outletId, issue.indentId, issue.lines);
     const plan = [];
     const need = new Map<string, Prisma.Decimal>();
     for (const line of issue.lines) {
@@ -264,6 +289,15 @@ export function postIssue(ctx: AccessContext, issueId: string, db: Client = pris
     }
     const updated = await tx.inventoryIssue.update({ where: { id: issueId }, data: { status: "ISSUED", issuedAt: new Date() } });
     await writeAudit(tx, ctx, { action: "INVENTORY_MOVEMENT", entityType: "InventoryIssue", entityId: issueId, outletId: issue.outletId, after: { status: "ISSUED" } });
+    // The indent this fulfils is closed when everything it asked for has been dispatched.
+    if (issue.indentId) {
+      const f = await indentFulfilment(tx, ctx, issue.indentId);
+      const indent = await tx.purchaseIndent.findUnique({ where: { id: issue.indentId } });
+      if (f.complete && indent?.status === "APPROVED") {
+        await tx.purchaseIndent.update({ where: { id: issue.indentId }, data: { status: "CLOSED" } });
+        await writeAudit(tx, ctx, { action: "UPDATE", entityType: "PurchaseIndent", entityId: issue.indentId, outletId: issue.outletId, before: { status: "APPROVED" }, after: { status: "CLOSED", fulfilledByIssue: issue.number } });
+      }
+    }
     return updated;
   });
 }

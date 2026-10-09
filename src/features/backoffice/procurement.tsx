@@ -25,8 +25,10 @@ import { Card, Details, PageHeader, StatusBadge, Stat, SubNav } from "@/componen
 import { LoadingState, ErrorState } from "@/components/ui/States";
 import { FilterBar, SelectFilter } from "@/components/ui/Filters";
 import { DocumentList, TransitionBar, cancelConfirm, type Doc } from "@/features/backoffice/documents";
+import type { Fulfilment } from "@/server/services/indentFulfilment";
+import { CreateIssueDialog } from "@/features/backoffice/inventory";
 import { LineEditor, emptyLine, toApiLines, type LineDraft, type LineField } from "@/features/backoffice/LineEditor";
-import { VendorSelect, materialLabel, unitOf, useDepartments, useMaterials, useVendors, vendorLabel } from "@/features/backoffice/lookups";
+import { type MaterialRow, VendorSelect, materialLabel, unitOf, useDepartments, useMaterials, useVendors, vendorLabel } from "@/features/backoffice/lookups";
 
 export function ProcureNav() {
   const { can } = useShell();
@@ -47,10 +49,11 @@ export function ProcureNav() {
 }
 
 type IndentLine = { id: string; materialId: string; qty: string; unitId: string | null };
-type Indent = Doc & { departmentId: string | null; notes: string | null; outletId: string; source?: string | null; lines?: IndentLine[]; _count?: { lines: number } };
-type POLine = { id: string; materialId: string; qty: string; rate: string; taxPct: string; receivedQty: string };
-type PO = Doc & { vendorId: string; outletId: string; source?: string | null; expectedDate: string | null; subtotal: string; tax: string; total: string; notes: string | null; approvedAt: string | null; lines?: POLine[]; receipts?: Array<{ id: string; number: string; status: string; receivedAt: string }>; _count?: { lines: number; receipts: number } };
-type GRNLine = { id: string; materialId: string; qty: string; rate: string; damagedQty: string; batchNo: string | null; expiryDate: string | null };
+type Indent = Doc & { departmentId: string | null; notes: string | null; outletId: string; source?: string | null; lines?: IndentLine[]; fulfilment?: Fulfilment; _count?: { lines: number } };
+type POLine = { id: string; materialId: string; qty: string; rate: string; taxPct: string; receivedQty: string; lineStatus?: string; requestedQty?: string | null };
+type POApproval = { plan: "AUTO" | "SINGLE" | "DUAL"; needed: 0 | 1 | 2; done: 0 | 1 | 2; firstApprovedBy: string | null; approvedBy: string | null; autoApproved: boolean; youApprovedFirst: boolean };
+type PO = Doc & { vendorId: string; outletId: string; source?: string | null; expectedDate: string | null; subtotal: string; tax: string; total: string; notes: string | null; approvedAt: string | null; approval?: POApproval; lines?: POLine[]; receipts?: Array<{ id: string; number: string; status: string; receivedAt: string }>; _count?: { lines: number; receipts: number } };
+type GRNLine = { id: string; materialId: string; qty: string; rate: string; damagedQty: string; batchNo: string | null; expiryDate: string | null; fssaiLot?: string | null };
 type GRN = Doc & { vendorId: string; poId: string | null; outletId: string; receivedAt: string; postedAt: string | null; notes: string | null; lines?: GRNLine[]; bills?: Array<{ id: string; number: string; status: string }>; _count?: { lines: number } };
 type BillLine = { id: string; materialId: string; qty: string; rate: string; taxPct: string };
 type VendorPayment = { id: string; vendorId: string; billId: string | null; amount: string; method: string; reference: string | null; paidAt: string; createdAt: string };
@@ -122,6 +125,8 @@ export function IndentDetail({ id }: { id: string }) {
   const q = useDoc<Indent>(`/api/procurement/indents/${id}`);
   const materials = useMaterials();
   const [poOpen, setPoOpen] = useState(false);
+  const [issueOpen, setIssueOpen] = useState(false);
+  const router = useRouter();
   const t = (to: string) => () => api(`/api/procurement/indents/${id}/transition`, { method: "POST", body: { to } });
   return (
     <DocShell q={q}>
@@ -136,12 +141,38 @@ export function IndentDetail({ id }: { id: string }) {
                   CLOSED: { label: "Close", permission: "purchase.create", action: t("CLOSED"), variant: "secondary", confirm: { title: "Close indent?", message: "Closing marks the indent fulfilled." } },
                   CANCELLED: { label: "Cancel", permission: d.status === "APPROVED" ? "purchase.create" : "indent.create", action: t("CANCELLED"), confirm: cancelConfirm("indent") },
                 }}
-                extra={d.status === "APPROVED" && can("purchase.create") && <Button onClick={() => setPoOpen(true)}><Icon name="cart" /> Create PO</Button>}
+                extra={<>
+                  {d.status === "APPROVED" && can("inventory.issue") && d.fulfilment?.lines.some((l) => l.outstanding > 0) && <Button onClick={() => setIssueOpen(true)}><Icon name="box" /> Issue stock</Button>}
+                  {d.status === "APPROVED" && can("purchase.create") && <Button onClick={() => setPoOpen(true)}><Icon name="cart" /> Create PO</Button>}
+                </>}
               />
             } />
           <Card className="mb-4"><Details items={[["Created", formatDateTime(d.createdAt, outlet?.timezone)], ["Lines", d.lines?.length ?? 0], ["Notes", d.notes]]} /></Card>
           <DataTable label="Indent lines" rows={d.lines ?? []} rowKey={(l) => l.id}
             columns={[{ key: "m", header: "Material", cell: (l) => materialLabel(materials.byId, l.materialId) }, { key: "q", header: "Qty", numeric: true, cell: (l) => `${formatQty(l.qty)} ${unitOf(materials.byId, l.materialId)}` }]} />
+          {d.fulfilment && ["APPROVED", "CLOSED"].includes(d.status) && (d.fulfilment.issues.length > 0 || d.status === "APPROVED") && (
+            <Card title="Issued from stock" className="mt-4">
+              <DataTable label="Indent fulfilment" rows={d.fulfilment.lines} rowKey={(l) => l.materialId}
+                columns={[
+                  { key: "m", header: "Material", cell: (l) => materialLabel(materials.byId, l.materialId) },
+                  { key: "r", header: "Asked", numeric: true, cell: (l) => `${formatQty(l.requested)} ${unitOf(materials.byId, l.materialId)}` },
+                  { key: "i", header: "Issued", numeric: true, cell: (l) => formatQty(l.issued) },
+                  { key: "o", header: "Still needed", numeric: true, cell: (l) => (l.outstanding > 0 ? <span className="text-warn-600">{formatQty(l.outstanding)}</span> : <Badge tone="ok">Done</Badge>) },
+                ]} />
+              {d.fulfilment.issues.length > 0 && (
+                <ul className="mt-3 divide-y divide-ink-100 text-sm" aria-label="Issues against this indent">
+                  {d.fulfilment.issues.map((i) => (
+                    <li key={i.id} className="flex items-center justify-between py-1.5">
+                      <Link href={`/inventory/issues/${i.id}`} className="font-medium text-brand-600 hover:underline">{i.number}</Link>
+                      <span className="flex items-center gap-2"><StatusBadge status={i.status} />{i.issuedAt ? formatDateTime(i.issuedAt, outlet?.timezone) : "not posted yet"}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-2 text-xs text-ink-500">Quantities are in each material&apos;s base unit. The indent closes by itself when everything has been issued.</p>
+            </Card>
+          )}
+          {issueOpen && d.fulfilment && <CreateIssueDialog open onClose={() => setIssueOpen(false)} onDone={(issueId) => router.push(`/inventory/issues/${issueId}`)} indent={{ id: d.id, number: d.number, outstanding: d.fulfilment.lines.filter((l) => l.outstanding > 0).map((l) => ({ materialId: l.materialId, qty: l.outstanding })) }} />}
           <CreatePODialog open={poOpen} onClose={() => setPoOpen(false)} onDone={() => q.reload()} indentId={d.id} initialLines={(d.lines ?? []).map((l) => ({ materialId: l.materialId, qty: String(Number(l.qty)), rate: "", taxPct: "" }))} />
         </>
       )}
@@ -223,6 +254,7 @@ export function PurchaseOrderDetail({ id }: { id: string }) {
   const materials = useMaterials();
   const vendors = useVendors();
   const [grnOpen, setGrnOpen] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const t = (to: string) => () => api(`/api/procurement/purchase-orders/${id}/transition`, { method: "POST", body: { to } });
   return (
     <DocShell q={q}>
@@ -234,14 +266,23 @@ export function PurchaseOrderDetail({ id }: { id: string }) {
                 // PARTIAL / RECEIVED / BILLED are set by posting GRNs and bills, never by hand.
                 specs={{
                   SUBMITTED: { label: "Submit", permission: "purchase.create", action: t("SUBMITTED") },
-                  APPROVED: { label: "Approve", permission: "purchase.approve", action: t("APPROVED"), variant: "success" },
+                  APPROVED: {
+                    label: d.approval?.needed === 2 ? `Approve (${d.approval.done + 1} of 2)` : "Approve", permission: "purchase.approve", action: t("APPROVED"), variant: "success",
+                    // The second of two approvers must be somebody else.
+                    hidden: Boolean(d.approval?.youApprovedFirst),
+                    success: d.approval?.needed === 2 && d.approval.done === 0 ? "First approval recorded — a second approver is needed" : "Approved",
+                  },
                   ORDERED: { label: "Mark ordered", permission: "purchase.create", action: t("ORDERED") },
                   CLOSED: { label: "Close", permission: "purchase.create", action: t("CLOSED"), variant: "secondary", confirm: { title: "Close purchase order?", message: "No further receipts will be expected against this PO." } },
                   CANCELLED: { label: "Cancel", permission: "purchase.create", action: t("CANCELLED"), confirm: cancelConfirm("purchase order") },
                 }}
-                extra={["APPROVED", "ORDERED", "PARTIAL"].includes(d.status) && can("grn.create") && <Button onClick={() => setGrnOpen(true)}><Icon name="inbox" /> Receive (GRN)</Button>}
+                extra={<>
+                  {d.status === "SUBMITTED" && can("purchase.approve") && <Button onClick={() => setReviewing(true)}>Review lines</Button>}
+                  {["APPROVED", "ORDERED", "PARTIAL"].includes(d.status) && can("grn.create") && <Button onClick={() => setGrnOpen(true)}><Icon name="inbox" /> Receive (GRN)</Button>}
+                </>}
               />
             } />
+          {d.approval && <ApprovalNote status={d.status} a={d.approval} />}
           <Card className="mb-4">
             <Details cols={4} items={[
               ["Vendor", vendorLabel(vendors.byId, d.vendorId)], ["Expected", formatDate(d.expectedDate, outlet?.timezone)], ["Created", formatDateTime(d.createdAt, outlet?.timezone)], ["Approved", formatDateTime(d.approvedAt, outlet?.timezone)],
@@ -250,8 +291,8 @@ export function PurchaseOrderDetail({ id }: { id: string }) {
           </Card>
           <DataTable label="PO lines" rows={d.lines ?? []} rowKey={(l) => l.id}
             columns={[
-              { key: "m", header: "Material", cell: (l) => materialLabel(materials.byId, l.materialId) },
-              { key: "q", header: "Ordered", numeric: true, cell: (l) => `${formatQty(l.qty)} ${unitOf(materials.byId, l.materialId)}` },
+              { key: "m", header: "Material", cell: (l) => <span className={l.lineStatus === "REJECTED" ? "text-ink-400 line-through" : ""}>{materialLabel(materials.byId, l.materialId)}{l.lineStatus === "REJECTED" && <Badge tone="bad" className="ml-2 no-underline">Rejected</Badge>}</span> },
+              { key: "q", header: "Ordered", numeric: true, cell: (l) => <span className={l.lineStatus === "REJECTED" ? "text-ink-400 line-through" : ""}>{formatQty(l.qty)} {unitOf(materials.byId, l.materialId)}{l.requestedQty && Number(l.requestedQty) !== Number(l.qty) ? <span className="block text-xs text-ink-500 no-underline">was {formatQty(l.requestedQty)}</span> : null}</span> },
               { key: "r", header: "Received", numeric: true, cell: (l) => <span className={Number(l.receivedQty) >= Number(l.qty) ? "text-ok-500" : Number(l.receivedQty) > 0 ? "text-warn-500" : ""}>{formatQty(l.receivedQty)}</span> },
               { key: "rate", header: "Rate", numeric: true, cell: (l) => formatMoney(l.rate) },
               { key: "tax", header: "Tax %", numeric: true, cell: (l) => formatQty(l.taxPct) },
@@ -269,9 +310,76 @@ export function PurchaseOrderDetail({ id }: { id: string }) {
             </Card>
           )}
           <CreateGRNDialog open={grnOpen} onClose={() => setGrnOpen(false)} fromPo={d} onDone={(gid) => router.push(`/procurement/grns/${gid}`)} />
+          {reviewing && <ReviewLinesDialog po={d} materials={materials.byId} onClose={() => setReviewing(false)} onDone={() => { setReviewing(false); q.reload(); }} />}
         </>
       )}
     </DocShell>
+  );
+}
+
+/** Where the order stands under the organization's approval rules. */
+function ApprovalNote({ status, a }: { status: string; a: POApproval }) {
+  if (a.autoApproved) return <p className="mb-3 rounded-md border border-ok-200 bg-ok-50 px-3 py-2 text-sm text-ok-700" data-testid="approval-note">Approved automatically: a small order needs no approver.</p>;
+  if (status === "SUBMITTED") {
+    if (a.needed === 2) {
+      return <p className="mb-3 rounded-md border border-warn-200 bg-warn-50 px-3 py-2 text-sm text-warn-700" data-testid="approval-note">
+        A large order: it needs two different approvers. {a.done === 0 ? "No one has approved it yet." : `${a.firstApprovedBy ?? "Someone"} gave the first approval${a.youApprovedFirst ? " (you); a second approver has to give the other" : "; one more is needed"}.`}
+      </p>;
+    }
+    return null;
+  }
+  if (a.needed === 2 && a.approvedBy && ["APPROVED", "ORDERED", "PARTIAL", "RECEIVED", "BILLED", "CLOSED"].includes(status)) {
+    return <p className="mb-3 text-sm text-ink-600" data-testid="approval-note">Approved by {a.firstApprovedBy ?? "the first approver"} and {a.approvedBy}.</p>;
+  }
+  return null;
+}
+
+/**
+ * The approver goes through a submitted order line by line (audit PP-06): change a quantity, take a line off the order,
+ * put one back. Only what changed is sent; the server recomputes the totals and keeps the quantity as raised.
+ */
+export function ReviewLinesDialog({ po, materials, onClose, onDone }: { po: PO; materials: Map<string, MaterialRow>; onClose: () => void; onDone: () => void }) {
+  const lines = po.lines ?? [];
+  const [qty, setQty] = useState<Record<string, string>>(() => Object.fromEntries(lines.map((l) => [l.id, String(Number(l.qty))])));
+  const [rejected, setRejected] = useState<Record<string, boolean>>(() => Object.fromEntries(lines.map((l) => [l.id, l.lineStatus === "REJECTED"])));
+  const [note, setNote] = useState("");
+  const changes = lines.flatMap((l): Array<{ lineId: string; action: "REJECT" | "KEEP"; qty?: number }> => {
+    const wasRejected = l.lineStatus === "REJECTED";
+    const nowRejected = rejected[l.id];
+    const q = Number(qty[l.id]);
+    if (nowRejected && !wasRejected) return [{ lineId: l.id, action: "REJECT" as const }];
+    if (!nowRejected && (wasRejected || (Number.isFinite(q) && q > 0 && q !== Number(l.qty)))) return [{ lineId: l.id, action: "KEEP" as const, ...(q !== Number(l.qty) ? { qty: q } : {}) }];
+    return [];
+  });
+  const staying = lines.filter((l) => !rejected[l.id]).length;
+  const invalid = lines.some((l) => !rejected[l.id] && !(Number(qty[l.id]) > 0));
+  const money = (l: POLine) => (rejected[l.id] ? 0 : (Number(qty[l.id]) || 0) * Number(l.rate) * (1 + Number(l.taxPct) / 100));
+  return (
+    <FormDialog open onClose={onClose} title={`Review PO ${po.number}`} description="Change a quantity, take a line off, or put one back. This does not approve the order." submitLabel="Save review" size="lg"
+      onSubmit={async () => {
+        if (!changes.length) throw new Error("Nothing was changed");
+        if (staying === 0) throw new Error("At least one line has to stay on the order. To turn it down altogether, cancel it.");
+        if (invalid) throw new Error("Every line that stays needs a quantity above zero");
+        return api(`/api/procurement/purchase-orders/${po.id}/review`, { method: "POST", body: { lines: changes, note: note.trim() || undefined } });
+      }}
+      onDone={onDone}>
+      <ul className="divide-y divide-ink-100" aria-label="Lines to review">
+        {lines.map((l) => {
+          const m = materials.get(l.materialId);
+          const name = m?.name ?? "Material";
+          return (
+            <li key={l.id} className="flex flex-wrap items-center gap-2 py-2">
+              <span className={`min-w-0 flex-1 text-sm ${rejected[l.id] ? "text-ink-400 line-through" : ""}`}>{name}<span className="block text-xs text-ink-500">{formatMoney(l.rate)} each{Number(l.taxPct) ? ` + ${formatQty(l.taxPct)}% tax` : ""}</span></span>
+              <Input type="number" inputMode="decimal" min={0} step="any" aria-label={`Quantity of ${name}`} className="w-24" disabled={rejected[l.id]} value={qty[l.id]} onChange={(e) => setQty((x) => ({ ...x, [l.id]: e.target.value }))} />
+              <span className="w-24 text-right text-sm tabular-nums">{formatMoney(money(l))}</span>
+              <Button type="button" size="sm" variant={rejected[l.id] ? "secondary" : "danger"} aria-label={rejected[l.id] ? `Put ${name} back` : `Take ${name} off`} onClick={() => setRejected((x) => ({ ...x, [l.id]: !x[l.id] }))}>{rejected[l.id] ? "Put back" : "Take off"}</Button>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="mt-2 text-xs text-ink-500">{changes.length ? `${changes.length} change${changes.length === 1 ? "" : "s"}; ${staying} line${staying === 1 ? "" : "s"} stay${staying === 1 ? "s" : ""} on the order.` : "No changes yet."}</p>
+      <div className="mt-3"><Field label="Note (optional)" name="note"><Input value={note} onChange={(e) => setNote(e.target.value)} maxLength={300} /></Field></div>
+    </FormDialog>
   );
 }
 
@@ -285,6 +393,7 @@ const grnFields: LineField[] = [
   { key: "damagedQty", label: "Damaged", min: 0 },
   { key: "batchNo", label: "Batch", type: "text" },
   { key: "expiryDate", label: "Expiry", type: "date" },
+  { key: "fssaiLot", label: "FSSAI lot", type: "text" },
 ];
 
 function CreateGRNDialog({ open, onClose, onDone, fromPo }: { open: boolean; onClose: () => void; onDone: (id: string) => void; fromPo?: PO }) {
@@ -296,7 +405,7 @@ function CreateGRNDialog({ open, onClose, onDone, fromPo }: { open: boolean; onC
   const [notes, setNotes] = useState("");
   // Prefill with what is still outstanding on the PO (display convenience; the server validates).
   const initial = useMemo<LineDraft[]>(
-    () => (fromPo?.lines ?? []).map((l) => ({ ...emptyLine(grnFields), materialId: l.materialId, qty: String(Math.max(0, Number(l.qty) - Number(l.receivedQty))), rate: String(Number(l.rate)) })).filter((l) => Number(l.qty) > 0),
+    () => (fromPo?.lines ?? []).filter((l) => l.lineStatus !== "REJECTED").map((l) => ({ ...emptyLine(grnFields), materialId: l.materialId, qty: String(Math.max(0, Number(l.qty) - Number(l.receivedQty))), rate: String(Number(l.rate)) })).filter((l) => Number(l.qty) > 0),
     [fromPo]
   );
   const [lines, setLines] = useState<LineDraft[]>(initial.length ? initial : [emptyLine(grnFields)]);
@@ -363,6 +472,7 @@ export function GRNDetail({ id }: { id: string }) {
               { key: "d", header: "Damaged", numeric: true, cell: (l) => formatQty(l.damagedQty) },
               { key: "rate", header: "Rate", numeric: true, cell: (l) => formatMoney(l.rate) },
               { key: "b", header: "Batch", cell: (l) => l.batchNo ?? "—" },
+              { key: "lot", header: "FSSAI lot", cell: (l) => l.fssaiLot ?? "—" },
               { key: "e", header: "Expiry", cell: (l) => formatDate(l.expiryDate, outlet?.timezone) },
             ]} />
           <CreateBillDialog open={billOpen} onClose={() => setBillOpen(false)} fromGrn={d} onDone={(bid) => router.push(`/procurement/bills/${bid}`)} />

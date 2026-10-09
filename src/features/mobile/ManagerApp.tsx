@@ -35,7 +35,7 @@ type Summary = {
   ops: null | { openOrders: number; notSent: number; billsRequested: number; ordersWithReadyFood: number; outstanding: number; kitchenPending: number | null; kitchenReady: number | null; tables: { total: number; available: number; occupied: number; billRequested: number } };
   inventory: null | { lowStock: number; criticalStock: number; lowItems: Array<{ materialId: string; name: string; quantity: number; reorderLevel: number; critical: boolean }>; negativeStock: number; unmappedSales: number; wastageToday: number };
   finance: null | { drawerSessionsClosed: number; drawerVariance: number; reconciliationMismatches7d: number; vendorDue: number; vendorOverdue: number; expensesToday: number; expenseCount: number; refundsToday: number; refundCount: number };
-  approvals: null | { pendingPurchaseOrders: number; purchaseOrders: Array<{ id: string; number: string; vendor: string; total: number; lines: number; raisedAt: string; expectedDate: string | null; notes: string | null }> };
+  approvals: null | { pendingPurchaseOrders: number; purchaseOrders: Array<{ id: string; number: string; vendor: string; total: number; lines: number; raisedAt: string; expectedDate: string | null; notes: string | null; approval?: { needed: 0 | 1 | 2; done: 0 | 1 | 2; firstApprovedBy: string | null; youApprovedFirst: boolean } }> };
   insights: null | { window: { from: string; to: string }; items: Array<{ code: string; severity: "INFO" | "WARNING" | "CRITICAL"; category: string; title: string; detail: string; link: string }> };
 };
 export type ManagerPerms = { staff: boolean; captain: boolean; pos: boolean; kitchen: boolean; approve: boolean };
@@ -238,10 +238,17 @@ function ApprovalsPanel({ d, onChanged }: { d: Summary; onChanged: () => void })
               </div>
               <p className="shrink-0 text-base font-semibold tabular-nums">{formatMoney(p.total)}</p>
             </div>
+            {p.approval?.needed === 2 && (
+              <p className="mt-2 rounded-md bg-warn-50 px-2 py-1 text-xs text-warn-700" data-testid={`approval-steps-${p.number}`}>
+                A large order: two different approvers. {p.approval.done === 0 ? "None yet." : p.approval.youApprovedFirst ? "You gave the first; a second approver has to give the other." : `${p.approval.firstApprovedBy ?? "Someone"} gave the first; yours completes it.`}
+              </p>
+            )}
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <ActionButton size="sm" variant="success" action={() => api(`/api/procurement/purchase-orders/${p.id}/transition`, { method: "POST", body: { to: "APPROVED" } })}
-                confirm={{ title: `Approve ${p.number}?`, message: `${formatMoney(p.total)} to ${p.vendor}. Purchasing can then send it to the vendor.`, confirmLabel: "Approve" }}
-                success="Approved" onDone={onChanged}>Approve</ActionButton>
+              {!p.approval?.youApprovedFirst && (
+                <ActionButton size="sm" variant="success" action={() => api(`/api/procurement/purchase-orders/${p.id}/transition`, { method: "POST", body: { to: "APPROVED" } })}
+                  confirm={{ title: `Approve ${p.number}?`, message: p.approval?.needed === 2 ? `${formatMoney(p.total)} to ${p.vendor}. This is approval ${p.approval.done + 1} of 2.` : `${formatMoney(p.total)} to ${p.vendor}. Purchasing can then send it to the vendor.`, confirmLabel: "Approve" }}
+                  success={p.approval?.needed === 2 && p.approval.done === 0 ? "First approval recorded" : "Approved"} onDone={onChanged}>{p.approval?.needed === 2 ? `Approve (${p.approval.done + 1} of 2)` : "Approve"}</ActionButton>
+              )}
               {can("purchase.create") && (
                 <ActionButton size="sm" variant="danger" action={() => api(`/api/procurement/purchase-orders/${p.id}/transition`, { method: "POST", body: { to: "CANCELLED" } })}
                   confirm={{ title: `Reject ${p.number}?`, message: "The purchase order is cancelled. Purchasing can raise a new one.", danger: true, confirmLabel: "Reject" }}

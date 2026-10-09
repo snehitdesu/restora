@@ -81,6 +81,8 @@ export type TransitionSpec = {
   variant?: "primary" | "secondary" | "danger" | "success";
   confirm?: ConfirmSpec;
   success?: string;
+  /** Not offered right now (e.g. the second of two approvers must be somebody else). */
+  hidden?: boolean;
 };
 
 /** Buttons for every legal next status (per the shared transition table) the user may perform. */
@@ -102,7 +104,7 @@ export function TransitionBar<S extends string>({
 }) {
   const { can } = useShell();
   void outletId; // permissions in the shell are those held at the selected outlet
-  const next = (table[status] ?? []).filter((to) => specs[to] && can(specs[to]!.permission));
+  const next = (table[status] ?? []).filter((to) => specs[to] && !specs[to]!.hidden && can(specs[to]!.permission));
   if (!next.length && !extra) return null;
   return (
     <div className="flex flex-wrap items-center gap-2">

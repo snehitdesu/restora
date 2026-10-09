@@ -18,6 +18,7 @@ import { type AccessContext, ForbiddenError } from "@/server/db/scope";
 import { can } from "@/server/auth/rbac";
 import { authorizedOutletIds } from "@/server/services/analytics";
 import { money, num } from "@/domain/money";
+import { approvalStateOf, getProcurementRules, type ApprovalState } from "@/server/services/procurementRules";
 
 export const QUEUE_TABS = ["needs-approval", "in-progress", "done", "all"] as const;
 export type QueueTab = (typeof QUEUE_TABS)[number];
@@ -48,6 +49,8 @@ export type QueueItem = {
   /** Raised from the reorder screen ("REORDER") or made by hand. */
   source: string | null;
   href: string;
+  /** Purchase orders only: one approver or two under the organization's rules, and how many have approved. */
+  approval: Pick<ApprovalState, "needed" | "done" | "autoApproved"> | null;
 };
 export type QueueResult = { items: QueueItem[]; nextCursor: string | null; counts: Record<Exclude<QueueTab, "all">, number>; includesPurchaseOrders: boolean };
 
@@ -74,16 +77,21 @@ export async function procurementQueue(db: PrismaClient, ctx: AccessContext, inp
 
   const [orders, indents] = await Promise.all([
     wantOrders
-      ? db.purchaseOrder.findMany({ where: { ...org, ...statusIn(PO_STATES, f.tab), ...before(cursor) }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: f.take + 1, select: { id: true, number: true, status: true, outletId: true, createdAt: true, total: true, vendorId: true, source: true, _count: { select: { lines: true } } } })
+      ? db.purchaseOrder.findMany({ where: { ...org, ...statusIn(PO_STATES, f.tab), ...before(cursor) }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: f.take + 1, select: { id: true, number: true, status: true, outletId: true, createdAt: true, total: true, vendorId: true, source: true, firstApprovedById: true, autoApproved: true, _count: { select: { lines: true } } } })
       : Promise.resolve([]),
     wantIndents
       ? db.purchaseIndent.findMany({ where: { ...org, ...statusIn(INDENT_STATES, f.tab), ...before(cursor) }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: f.take + 1, select: { id: true, number: true, status: true, outletId: true, createdAt: true, source: true, _count: { select: { lines: true } } } })
       : Promise.resolve([]),
   ]);
 
+  const rules = wantOrders ? await getProcurementRules(db, ctx.organizationId) : null;
+  const approvalOf = (o: Parameters<typeof approvalStateOf>[0]) => {
+    const { needed, done, autoApproved } = approvalStateOf(o, rules!);
+    return { needed, done, autoApproved };
+  };
   const merged: Array<QueueItem & { at: Date }> = [
-    ...orders.map((o) => ({ kind: "PURCHASE_ORDER" as const, id: o.id, number: o.number, status: o.status, outletId: o.outletId, at: o.createdAt, createdAt: o.createdAt.toISOString(), lines: o._count.lines, total: num(money(o.total)), vendorId: o.vendorId, source: o.source, href: `/procurement/purchase-orders/${o.id}` })),
-    ...indents.map((i) => ({ kind: "INDENT" as const, id: i.id, number: i.number, status: i.status, outletId: i.outletId, at: i.createdAt, createdAt: i.createdAt.toISOString(), lines: i._count.lines, total: null, vendorId: null, source: i.source, href: `/procurement/indents/${i.id}` })),
+    ...orders.map((o) => ({ kind: "PURCHASE_ORDER" as const, id: o.id, number: o.number, status: o.status, outletId: o.outletId, at: o.createdAt, createdAt: o.createdAt.toISOString(), lines: o._count.lines, total: num(money(o.total)), vendorId: o.vendorId, source: o.source, href: `/procurement/purchase-orders/${o.id}`, approval: approvalOf(o) })),
+    ...indents.map((i) => ({ kind: "INDENT" as const, id: i.id, number: i.number, status: i.status, outletId: i.outletId, at: i.createdAt, createdAt: i.createdAt.toISOString(), lines: i._count.lines, total: null, vendorId: null, source: i.source, href: `/procurement/indents/${i.id}`, approval: null })),
   ].sort((a, b) => b.at.getTime() - a.at.getTime() || b.id.localeCompare(a.id));
   const page = merged.slice(0, f.take);
   const last = page.at(-1);

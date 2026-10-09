@@ -56,6 +56,8 @@ export type LedgerEntryInput = {
   /** Unique idempotency key for external/business events. */
   sourceRef?: string;
   batchNo?: string;
+  /** FSSAI lot code printed on the pack (traceability). */
+  fssaiLot?: string;
   expiryDate?: Date;
   note?: string;
   correctionOfId?: string;
@@ -104,6 +106,7 @@ export async function appendLedger(tx: Tx, ctx: AccessContext, input: LedgerEntr
       sourceId: input.sourceId ?? null,
       sourceRef: input.sourceRef ?? null,
       batchNo: input.batchNo ?? null,
+      fssaiLot: input.fssaiLot ?? null,
       expiryDate: input.expiryDate ?? null,
       note: input.note ?? null,
       correctionOfId: input.correctionOfId ?? null,

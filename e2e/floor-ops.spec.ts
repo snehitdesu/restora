@@ -53,9 +53,10 @@ test.describe("captain floor operations (phone)", () => {
     await page.getByTestId(`table-${t1.code}`).tap();
     await page.getByRole("button", { name: /Move/ }).tap();
     await page.getByRole("dialog", { name: "Move to another table" }).getByRole("button", { name: `Move to table ${t2.code}` }).tap();
-    await expect(page.getByRole("button", { name: `Table ${t2.code}` }).first()).toBeVisible();
+    // The panel follows the order to the new table (exact name: the dialog's "Move to table ..." button also contains it).
+    await expect(page.getByRole("button", { name: `Table ${t2.code}`, exact: true })).toBeVisible();
     await expect(page.getByRole("region", { name: "Table actions" })).toBeVisible();
-    expect((await orderOf(page.request, o1)).tableId).toBe(t2.id);
+    await expect.poll(async () => (await orderOf(page.request, o1)).tableId).toBe(t2.id);
     await page.getByRole("button", { name: /All tables/ }).tap();
     await expect(page.getByTestId(`table-${t1.code}`)).toContainText("Free");
 
