@@ -196,9 +196,21 @@ export function workerState() {
   return { running: Boolean(ws.timer) && !ws.stopped, lastTickAt: ws.lastTickAt, lastError: ws.lastError };
 }
 
-/** Start the periodic worker once per process (no-op when WORKER_DISABLED=true). */
+/** Keys startWorker reads. Index signature keeps `process.env` assignable. */
+export type WorkerProcessEnv = {
+  WORKER_DISABLED?: string;
+  VERCEL?: string;
+  [key: string]: string | undefined;
+};
+
+/** True when this process should run the setInterval worker. Vercel uses cron instead. */
+export function inProcessWorkerEnabled(env: WorkerProcessEnv = process.env): boolean {
+  return env.WORKER_DISABLED !== "true" && env.VERCEL !== "1";
+}
+
+/** Start the periodic worker once per process (no-op when WORKER_DISABLED=true or on Vercel). */
 export function startWorker(): void {
-  if (ws.timer || process.env.WORKER_DISABLED === "true") return;
+  if (ws.timer || !inProcessWorkerEnabled()) return;
   ws.stopped = false;
   const tick = () => {
     if (ws.running || ws.stopped) return;

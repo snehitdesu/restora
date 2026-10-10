@@ -22,9 +22,17 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const demo = process.env.DEMO_DEPLOYMENT === "true";
   return (
     <html lang="en" className={`${inter.variable} ${display.variable}`}>
-      <body className="bg-ink-50 text-ink-900 font-sans antialiased">{children}</body>
+      <body className="bg-ink-50 text-ink-900 font-sans antialiased">
+        {demo ? (
+          <p role="status" className="bg-ink-900 text-white text-center text-sm py-2 px-3">
+            Demonstration only — sample restaurant data and simulated payments. No live charges.
+          </p>
+        ) : null}
+        {children}
+      </body>
     </html>
   );
 }

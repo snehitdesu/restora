@@ -16,6 +16,8 @@ next-env.d.ts
 .env
 .env.local
 .env*.local
+.env.local-backup
+.env*.backup
 
 # database (local sqlite)
 /prisma/*.db
@@ -38,7 +40,9 @@ npm-debug.log*
 # Playwright
 /e2e/.auth/
 /e2e/.results/
+/e2e/.results-investor/
 /e2e/.report/
+/e2e/.report-investor/
 
 # stray local databases / TypeScript incremental build info
 /*.db
@@ -54,6 +58,9 @@ npm-debug.log*
 *.dump
 *.dump.enc
 *.dump.partial
+
+# Generated table-QR sheets (live tokens; local output is not customer print)
+/artifacts/table-qr/
 
 # Local agent tooling and generated promo renders (not application source)
 /.agents/

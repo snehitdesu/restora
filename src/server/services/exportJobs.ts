@@ -198,7 +198,8 @@ export function getBackgroundExportRunner(): BackgroundExportRunner {
 }
 
 export function getExportRunner(db: PrismaClient = prisma, storage?: ExportStorage): ExportRunner {
-  const kind = (process.env.EXPORT_RUNNER ?? "background").toLowerCase();
+  const fallback = process.env.VERCEL === "1" ? "inline" : "background";
+  const kind = (process.env.EXPORT_RUNNER ?? fallback).toLowerCase();
   if (kind === "inline") return new InlineExportRunner(db, storage);
   if (kind !== "background") throw new Error(`EXPORT_RUNNER=${kind} is not implemented; use "background" or "inline"`);
   return db === prisma && !storage ? getBackgroundExportRunner() : new BackgroundExportRunner({ db, storage });

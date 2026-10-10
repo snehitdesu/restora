@@ -127,5 +127,6 @@ describe("middleware", () => {
     expect(middleware(req("/api/auth/login")).status).toBe(200);
     expect(middleware(req("/api/webhooks/pos/mock")).status).toBe(200);
     expect(middleware(req("/api/health")).status).toBe(200); // probes carry no session
+    expect(middleware(req("/api/cron/worker")).status).toBe(200); // cron authenticates with CRON_SECRET in the route
   });
 });

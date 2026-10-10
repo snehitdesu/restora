@@ -67,7 +67,13 @@ function keyMatches(orderId: string, key: string | null | undefined): boolean {
 
 // ---------------- table resolution ----------------
 
-const TOKEN_RE = /^[A-Za-z0-9_-]{6,64}$/;
+/** URL-safe table token. The QR generator and resolveTable share this rule. */
+export const GUEST_TABLE_TOKEN_RE = /^[A-Za-z0-9_-]{6,64}$/;
+
+export function isGuestTableToken(token: unknown): token is string {
+  return typeof token === "string" && GUEST_TABLE_TOKEN_RE.test(token);
+}
+
 // One message for every failure: no oracle for which tables/outlets exist.
 const BAD_QR = "This table QR code is not valid. Please ask the staff for help.";
 
@@ -79,7 +85,7 @@ export type GuestTable = {
 };
 
 export async function resolveTable(token: string, db: PrismaClient = prisma): Promise<GuestTable> {
-  if (typeof token !== "string" || !TOKEN_RE.test(token)) throw new NotFoundError(BAD_QR);
+  if (!isGuestTableToken(token)) throw new NotFoundError(BAD_QR);
   const table = await db.restaurantTable.findUnique({ where: { qrToken: token }, select: { id: true, code: true, organizationId: true, outletId: true } });
   if (!table) throw new NotFoundError(BAD_QR);
   const outlet = await db.outlet.findUnique({

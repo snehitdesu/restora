@@ -95,8 +95,35 @@ export async function findCafe(db: PrismaClient) {
   return db.organization.findFirst({ where: { name: CAFE.orgName, outlets: { some: { code: CAFE.outletCode } } } });
 }
 
+/**
+ * Password used when the CLI seeds a disposable demo database.
+ * SQLite / local tests keep the well-known CAFE.password.
+ * PostgreSQL requires DEMO_DATABASE_CONFIRMED and a unique DEMO_STAFF_PASSWORD
+ * so a public demo is never deployed with the documented local password.
+ */
+export type DemoSeedEnv = {
+  DATABASE_URL?: string;
+  DEMO_STAFF_PASSWORD?: string;
+  DEMO_DATABASE_CONFIRMED?: string;
+  [key: string]: string | undefined;
+};
+
+export function demoStaffPasswordForCli(env: DemoSeedEnv = process.env): string {
+  const url = env.DATABASE_URL ?? "";
+  const fromEnv = env.DEMO_STAFF_PASSWORD?.trim() ?? "";
+  if (!/^postgres(ql)?:/i.test(url)) return fromEnv || CAFE.password;
+  if (env.DEMO_DATABASE_CONFIRMED !== "true") {
+    throw new Error("Refusing to seed PostgreSQL: set DEMO_DATABASE_CONFIRMED=true only after confirming this is a new isolated demo database.");
+  }
+  if (!fromEnv || fromEnv === CAFE.password) {
+    throw new Error("Refusing to seed PostgreSQL with the well-known local demo password. Set DEMO_STAFF_PASSWORD to a unique value of at least 12 characters.");
+  }
+  if (fromEnv.length < 12) throw new Error("DEMO_STAFF_PASSWORD must be at least 12 characters.");
+  return fromEnv;
+}
+
 /** Create the dataset. With `reset`, an existing Coders' Cafe organization is deleted first; without it, an existing one is an error. */
-export async function seedCodersCafe(db: PrismaClient, opts: { reset?: boolean } = {}): Promise<CafeSeedResult> {
+export async function seedCodersCafe(db: PrismaClient, opts: { reset?: boolean; password?: string } = {}): Promise<CafeSeedResult> {
   const existing = await findCafe(db);
   if (existing) {
     if (!opts.reset) throw new Error(`${CAFE.orgName} already exists (organization ${existing.id}); pass reset to rebuild it`);
@@ -111,7 +138,7 @@ export async function seedCodersCafe(db: PrismaClient, opts: { reset?: boolean }
   await db.department.create({ data: { organizationId: org.id, outletId: outlet.id, name: "Kitchen", kind: "KITCHEN" } });
   await db.kitchenStation.create({ data: { organizationId: org.id, outletId: outlet.id, name: "KITCHEN", kind: "KITCHEN" } });
 
-  const passwordHash = await hashPassword(CAFE.password);
+  const passwordHash = await hashPassword(opts.password ?? CAFE.password);
   for (const u of CAFE.users) {
     const user = await db.user.create({ data: { organizationId: org.id, email: u.email, name: u.name, passwordHash } });
     await db.membership.create({ data: { organizationId: org.id, userId: user.id, outletId: u.outlet ? outlet.id : null, role: u.role } });

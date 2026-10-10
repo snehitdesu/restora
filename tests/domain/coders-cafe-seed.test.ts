@@ -10,7 +10,7 @@ import { systemContext } from "@/server/auth/context";
 import { createMenuItem } from "@/server/services/menu";
 import { placeOrder, submitOrder } from "@/server/services/orders";
 import { createPayment, verifyPayment } from "@/server/services/payment";
-import { seedCodersCafe, findCafe, cafeTableToken, CAFE } from "../../prisma/coders-cafe/seed";
+import { seedCodersCafe, findCafe, cafeTableToken, CAFE, demoStaffPasswordForCli } from "../../prisma/coders-cafe/seed";
 import { menuItemCount, UNRESOLVED, CODERS_CAFE_MENU } from "../../prisma/coders-cafe/menu";
 
 const RUN = Date.now().toString(36);
@@ -61,5 +61,16 @@ describe("Coders' Cafe seed", () => {
     // The neighbour is untouched.
     expect(await prisma.order.findUnique({ where: { id: otherOrder.id } })).not.toBeNull();
     expect(await prisma.menuItem.count({ where: { organizationId: other.id } })).toBe(1);
+  });
+
+  it("PostgreSQL CLI seed requires a confirmed disposable database and a unique staff password", () => {
+    const sqlite = { DATABASE_URL: "file:./dev.db" };
+    expect(demoStaffPasswordForCli(sqlite)).toBe(CAFE.password);
+    expect(demoStaffPasswordForCli({ ...sqlite, DEMO_STAFF_PASSWORD: "local-override-password" })).toBe("local-override-password");
+    expect(() => demoStaffPasswordForCli({ DATABASE_URL: "postgresql://app@db/demo" })).toThrow(/DEMO_DATABASE_CONFIRMED/);
+    expect(() => demoStaffPasswordForCli({ DATABASE_URL: "postgresql://app@db/demo", DEMO_DATABASE_CONFIRMED: "true" })).toThrow(/well-known local demo password/);
+    expect(() => demoStaffPasswordForCli({ DATABASE_URL: "postgresql://app@db/demo", DEMO_DATABASE_CONFIRMED: "true", DEMO_STAFF_PASSWORD: CAFE.password })).toThrow(/well-known local demo password/);
+    expect(() => demoStaffPasswordForCli({ DATABASE_URL: "postgresql://app@db/demo", DEMO_DATABASE_CONFIRMED: "true", DEMO_STAFF_PASSWORD: "short" })).toThrow(/at least 12 characters/);
+    expect(demoStaffPasswordForCli({ DATABASE_URL: "postgresql://app@db/demo", DEMO_DATABASE_CONFIRMED: "true", DEMO_STAFF_PASSWORD: "investor-demo-unique-password" })).toBe("investor-demo-unique-password");
   });
 });

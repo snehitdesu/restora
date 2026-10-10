@@ -10,6 +10,7 @@ import type { GuestOrderView } from "@/server/services/guestOrdering";
 import { GUEST_TRACKER_STEPS } from "@/domain/orderProgress";
 import { formatMoney } from "@/lib/format";
 import { openRazorpayCheckout, type RazorpaySuccess } from "@/features/guest/razorpay";
+import { guestOnlinePaymentCopy } from "@/features/guest/paymentCopy";
 import { brandFor } from "@/features/guest/brand";
 import { LogoMark } from "@/features/guest/components/Chrome";
 import { Alert, Spinner } from "@/features/guest/components/Bits";
@@ -281,9 +282,9 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
             )}
             {checkout ? (
               <div role="region" aria-label="Test payment gateway" style={{ border: "2px dashed var(--sf-accent)", borderRadius: 14, padding: 14 }}>
-                <p style={{ margin: 0, fontWeight: 700 }}>{checkout.testMode ? "Test payment gateway" : "Payment"}</p>
+                <p style={{ margin: 0, fontWeight: 700 }}>{checkout.testMode ? "Simulated online payment" : "Payment"}</p>
                 <p style={{ margin: "4px 0 0", fontSize: 26, fontWeight: 800 }} className="sf-num">{formatMoney(checkout.amount)}</p>
-                {checkout.testMode && <p className="sf-hint">Development gateway — no real money is charged. The server verifies the result with the gateway.</p>}
+                {checkout.testMode && <p className="sf-hint">Simulated payment — no real money is charged.</p>}
                 <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                   <button type="button" className="sf-btn sf-btn-primary" style={{ flex: 1 }} disabled={busy} onClick={() => void finishCheckout()}>
                     {busy ? <Spinner /> : null} Approve payment
@@ -302,8 +303,10 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
                   {view.pendingPaymentId ? "Resume payment" : "Pay online"} {formatMoney(due)}
                   {view.payment.testMode ? " (test)" : ""}
                 </button>
-                {view.payment.mode === "SANDBOX" && <p className="sf-hint" data-testid="gateway-mode">Razorpay test mode: no real money is charged. Use Razorpay&apos;s test cards or UPI ids.</p>}
-                {view.payment.mode === "MOCK" && !view.payment.testMode && <p className="sf-hint" data-testid="gateway-mode">Simulated payment gateway (testing): no real money is charged.</p>}
+                <p className="sf-hint" data-testid="gateway-mode">
+                  {guestOnlinePaymentCopy(view.payment).detail}
+                  {view.payment.mode === "SANDBOX" ? " Use Razorpay's test cards or UPI ids." : ""}
+                </p>
                 <p className="sf-alert sf-alert-info" data-testid="pay-at-counter" style={{ margin: 0 }}>
                   Prefer cash? Pay at the counter and show order #{view.ref}.
                 </p>

@@ -128,8 +128,29 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
     if (!isSet(env.RAZORPAY_KEY_SECRET)) problems.push("RAZORPAY_KEY_SECRET is required when PAYMENT_PROVIDER=razorpay");
     if (!isSet(env.RAZORPAY_WEBHOOK_SECRET)) problems.push("RAZORPAY_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=razorpay (payment webhooks are verified with it)");
   }
+  // A public demo must not enable mock adapters: they approve any payment and
+  // relax webhook-secret checks. Razorpay test keys (rzp_test_) are the simulated
+  // path that still verifies signatures and cannot charge real money.
+  if (env.DEMO_DEPLOYMENT === "true" && mocksAllowed) {
+    problems.push("ALLOW_MOCK_PROVIDERS must not be true when DEMO_DEPLOYMENT is set (mock adapters approve any payment and are not for a public demo; use Razorpay test keys instead)");
+  }
+  if (isSet(env.DEMO_STAFF_PASSWORD) || env.DEMO_DATABASE_CONFIRMED === "true") {
+    problems.push("DEMO_STAFF_PASSWORD and DEMO_DATABASE_CONFIRMED are seed-CLI settings and must not be set on the running app");
+  }
+  // Live keys charge real money. Mock/demo deployments must never be able to reach Razorpay live.
+  const liveRazorpay = env.RAZORPAY_KEY_ID?.trim().startsWith("rzp_live_") === true;
+  if (liveRazorpay && (mocksAllowed || env.DEMO_DEPLOYMENT === "true")) {
+    problems.push("RAZORPAY_KEY_ID must not be a live key when ALLOW_MOCK_PROVIDERS or DEMO_DEPLOYMENT is set (simulated/test payments only)");
+  }
   // The Razorpay emulator override exists for automated tests only.
   if (isSet(env.RAZORPAY_API_BASE) && !mocksAllowed) problems.push("RAZORPAY_API_BASE (test emulator) must not be set in production");
+
+  // Vercel has no durable in-process worker; cron invokes /api/cron/worker with this secret.
+  if (env.VERCEL === "1") {
+    const cron = env.CRON_SECRET;
+    if (!isSet(cron)) problems.push("CRON_SECRET is required on Vercel (the maintenance worker is invoked by cron, not in-process)");
+    else if (DEV_SECRET_PLACEHOLDERS.includes(cron.trim().toLowerCase())) problems.push("CRON_SECRET must not use a development placeholder value in production");
+  }
 
   // --- The demo seed wipes data and creates public-password accounts ---
   if (env.ALLOW_DEMO_SEED === "true") problems.push("ALLOW_DEMO_SEED must not be 'true' in production");
@@ -178,6 +199,8 @@ export function productionEnvWarnings(env: NodeJS.ProcessEnv = process.env): str
   if (env.NODE_ENV !== "production") return [];
   const w: string[] = [];
   if (env.ALLOW_MOCK_PROVIDERS === "true") w.push("ALLOW_MOCK_PROVIDERS=true: mock payment/POS/aggregator adapters approve anything — never on a public deployment");
+  if (env.DEMO_DEPLOYMENT === "true") w.push("DEMO_DEPLOYMENT=true: sample data and simulated/test payments only; not a live restaurant");
+  if (env.VERCEL === "1") w.push("VERCEL=1: in-process maintenance worker is disabled; /api/cron/worker must be invoked by Vercel Cron");
   if (env.ALLOW_MOCK_PROVIDERS === "true") {
     for (const name of WEBHOOK_SECRET_VARS) {
       const v = env[name];
