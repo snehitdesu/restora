@@ -13,6 +13,7 @@ import { Totals } from "@/features/guest/components/GuestCartScreen";
 import { CouponBox, ReferralAndOffers } from "@/features/guest/components/GuestOffers";
 import { Alert, Spinner } from "@/features/guest/components/Bits";
 import { SfIcon } from "@/features/guest/components/SfIcon";
+import { guestOnlinePaymentCopy } from "@/features/guest/paymentCopy";
 
 type PayMethod = "CASH" | "ONLINE";
 
@@ -50,6 +51,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
   const closed = (quote?.ordering ?? data.ordering)?.open === false;
   const total = quote ? quote.total : estimate.total;
   const payMethod: PayMethod = online ? method : "CASH";
+  const onlineCopy = guestOnlinePaymentCopy(data.payment);
 
   async function place() {
     setTouched(true);
@@ -225,8 +227,8 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
                 <input className="sf-hit" type="radio" name="payment" value="ONLINE" checked={payMethod === "ONLINE"} onChange={() => setMethod("ONLINE")} />
                 <span className="sf-pay-ico"><SfIcon name="card" /></span>
                 <span>
-                  <b>Pay online{data.payment.testMode ? " (test)" : ""}</b>
-                  <small>{data.payment.mode === "SANDBOX" ? "Razorpay test mode — no real money" : "UPI, cards, netbanking · Razorpay"}</small>
+                  <b>{onlineCopy.title}</b>
+                  <small>{onlineCopy.detail}</small>
                 </span>
                 <span className="sf-option-mark" data-kind="radio"><SfIcon name="check" strokeWidth={3} /></span>
               </label>
@@ -236,7 +238,9 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
           </div>
           <p className="sf-note">
             {payMethod === "ONLINE"
-              ? "Your order goes to the kitchen as soon as the payment is confirmed by the bank."
+              ? data.payment.mode === "LIVE"
+                ? "Your order goes to the kitchen as soon as the payment is confirmed by the bank."
+                : `${onlineCopy.detail} The café sends the order to the kitchen only after that payment is accepted.`
               : "The café confirms your order and sends it to the kitchen. Pay at the counter whenever you're ready."}
           </p>
         </section>

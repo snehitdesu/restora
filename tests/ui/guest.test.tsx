@@ -207,7 +207,10 @@ describe("guest storefront — checkout", () => {
     expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
     await user.type(screen.getByLabelText(/Your name/), "Ananya");
     await user.type(screen.getByLabelText(/Phone/), "+91 98765-43210");
-    await user.click(screen.getByRole("radio", { name: /Pay online/ }));
+    expect(screen.getByRole("radio", { name: /Simulated online payment/ })).toBeInTheDocument();
+    expect(screen.getByText("Simulated payment — no real money is charged.")).toBeInTheDocument();
+    expect(screen.queryByText(/Razorpay/)).toBeNull();
+    await user.click(screen.getByRole("radio", { name: /Simulated online payment/ }));
     const place = screen.getByRole("button", { name: /Place order & pay ₹252\.00/ });
     await user.dblClick(place);
 
@@ -242,6 +245,15 @@ describe("guest storefront — checkout", () => {
     const keys = calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders")).map((c) => c.headers["Idempotency-Key"]);
     expect(keys[0]).toBe(keys[1]);
     expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("CASH");
+  });
+
+  it("names Razorpay only for test mode, and says no real money is charged", async () => {
+    seedCart([line({})]);
+    handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: { ...menuData(), payment: { online: true, testMode: false, mode: "SANDBOX" } } });
+    inStore(<GuestCheckoutScreen navigate={() => undefined} />, { ...menuData(), payment: { online: true, testMode: false, mode: "SANDBOX" } });
+    expect(await screen.findByRole("radio", { name: /Pay online/ })).toBeInTheDocument();
+    expect(screen.getByText("Razorpay test mode — no real money is charged.")).toBeInTheDocument();
+    expect(screen.queryByText("Simulated online payment")).toBeNull();
   });
 
   it("validates the optional phone before sending anything", async () => {

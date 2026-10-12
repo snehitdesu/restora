@@ -177,6 +177,16 @@ describe("production configuration (Phase 9)", () => {
     expect(msg).not.toContain("shown?no");
     expect(productionEnvWarnings({ ...base, ...rzp }).join("\n")).not.toMatch(/TEST key/);
     expect(productionEnvWarnings({ ...base, ...rzp, RAZORPAY_KEY_ID: "rzp_test_AbC123" }).join("\n")).toMatch(/RAZORPAY_KEY_ID is a TEST key/);
+    fails({ ...rzp, ALLOW_MOCK_PROVIDERS: "true" }, /must not be a live key/);
+    fails({ ...rzp, DEMO_DEPLOYMENT: "true" }, /must not be a live key/);
+    expect(() => validateProductionEnv({ ...base, ...rzp, RAZORPAY_KEY_ID: "rzp_test_AbC123", DEMO_DEPLOYMENT: "true" })).not.toThrow();
+    fails({ DEMO_DEPLOYMENT: "true", ALLOW_MOCK_PROVIDERS: "true", PAYMENT_PROVIDER: "mock" }, /ALLOW_MOCK_PROVIDERS must not be true when DEMO_DEPLOYMENT is set/);
+    fails({ DEMO_STAFF_PASSWORD: "not-for-the-running-app", DEMO_DATABASE_CONFIRMED: "true" }, /must not be set on the running app/);
+    fails({ VERCEL: "1" }, /CRON_SECRET is required on Vercel/);
+    fails({ VERCEL: "1", CRON_SECRET: "dev-cron-secret", ALLOW_MOCK_PROVIDERS: "true" }, /CRON_SECRET must not use a development placeholder/);
+    expect(() => validateProductionEnv({ ...base, VERCEL: "1", CRON_SECRET: "a-sufficiently-long-cron-secret-value" })).not.toThrow();
+    expect(productionEnvWarnings({ ...base, VERCEL: "1", DEMO_DEPLOYMENT: "true" }).join("\n")).toMatch(/DEMO_DEPLOYMENT=true/);
+    expect(productionEnvWarnings({ ...base, VERCEL: "1" }).join("\n")).toMatch(/VERCEL=1/);
   });
 
   it("names variables and reasons only — never a value — and warns about risky defaults", () => {

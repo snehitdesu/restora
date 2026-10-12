@@ -46,9 +46,19 @@ export async function operationalGauges(db: PrismaClient = prisma, now = new Dat
 
 const digest = (v: string) => createHash("sha256").update(v).digest();
 
-/** `Authorization: Bearer <METRICS_TOKEN>`, compared in constant time. False when no token is configured. */
-export function metricsAuthorized(header: string | null, token = process.env.METRICS_TOKEN): boolean {
+/** `Authorization: Bearer <token>`, compared in constant time. False when no token is configured. */
+export function bearerAuthorized(header: string | null, token: string | undefined): boolean {
   if (!token) return false;
   const m = /^Bearer\s+(.+)$/i.exec(header ?? "");
   return Boolean(m) && timingSafeEqual(digest(m![1].trim()), digest(token));
+}
+
+/** `Authorization: Bearer <METRICS_TOKEN>`, compared in constant time. False when no token is configured. */
+export function metricsAuthorized(header: string | null, token = process.env.METRICS_TOKEN): boolean {
+  return bearerAuthorized(header, token);
+}
+
+/** Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`. False when the secret is unset. */
+export function cronAuthorized(header: string | null, token = process.env.CRON_SECRET): boolean {
+  return bearerAuthorized(header, token);
 }
