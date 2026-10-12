@@ -13,6 +13,7 @@ import { ForbiddenError, ValidationError } from "@/server/db/scope";
 import { createMenuItem } from "@/server/services/menu";
 import { createOrder, addOrderItem, submitOrder } from "@/server/services/orders";
 import { dishPrepTimes, percentile, PREP_MIN_SAMPLES } from "@/server/services/prepTimes";
+import { updateKOTStatus } from "@/server/services/kot";
 import { makeEnv, type Env } from "./growthSupport";
 
 let env: Env;
@@ -100,6 +101,43 @@ describe("P2. what is not a measurement", () => {
     const other = await dishPrepTimes(prisma, env.owner, { outletId: env.outletB, days: 30 }, NOW);
     expect(other.dishes.find((x) => x.name === "Bao Bun")).toMatchObject({ tickets: 1, medianMinutes: 6 });
     expect((await times({ days: 90 })).dishes.find((x) => x.name === "Bao Bun")!.tickets).toBe(4); // the 45-day-old one counts in a longer period
+  });
+});
+
+describe("P4. the kitchen's own taps are what get measured", () => {
+  it("P4 Accept, Start, Ready and Served each stamp their time once, in order, and the report measures a ticket that was never edited by hand", async () => {
+    const dish = (await createMenuItem(env.owner, { name: "Lifecycle Idli", price: 60, taxPct: 5 })).id;
+    const o = await createOrder(env.owner, { outletId: env.outletA, channel: "TAKEAWAY" });
+    await addOrderItem(env.owner, o.id, { menuItemId: dish, name: "Lifecycle Idli", qty: 1 });
+    await submitOrder(env.owner, o.id);
+    const kot = await prisma.kot.findFirstOrThrow({ where: { orderId: o.id } });
+    const stamps = async () => {
+      const k = await prisma.kot.findUniqueOrThrow({ where: { id: kot.id } });
+      return { status: k.status, acceptedAt: k.acceptedAt, startedAt: k.startedAt, readyAt: k.readyAt, servedAt: k.servedAt };
+    };
+    expect(await stamps()).toMatchObject({ status: "NEW", acceptedAt: null, startedAt: null, readyAt: null, servedAt: null });
+
+    const seen: Array<Date | null> = [];
+    for (const [to, column] of [["ACCEPTED", "acceptedAt"], ["PREPARING", "startedAt"], ["READY", "readyAt"], ["SERVED", "servedAt"]] as const) {
+      await new Promise((r) => setTimeout(r, 5)); // distinct instants
+      await updateKOTStatus(env.owner, kot.id, to);
+      const now = await stamps();
+      expect(now.status).toBe(to);
+      expect(now[column], `${column} after ${to}`).toBeInstanceOf(Date);
+      seen.push(now[column]);
+      // A repeated tap on the same status (a second KDS screen) changes nothing, including the stamp.
+      await updateKOTStatus(env.owner, kot.id, to);
+      expect((await stamps())[column]!.getTime()).toBe(now[column]!.getTime());
+    }
+    const times = seen.map((d) => d!.getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times); // accepted <= started <= ready <= served
+    expect(new Set(times).size).toBe(4);
+
+    // The report picks the ticket up, and its cooking time runs from Start to Ready.
+    const r = await dishPrepTimes(prisma, env.manager, { outletId: env.outletA, days: 30 }, new Date(Date.now() + 60_000));
+    const idli = r.dishes.find((x) => x.name === "Lifecycle Idli");
+    expect(idli).toMatchObject({ tickets: 1 });
+    expect(idli!.cookMedianMinutes).not.toBeNull();
   });
 });
 

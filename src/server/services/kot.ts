@@ -74,6 +74,9 @@ export async function createKOTsForOrder(tx: Tx, ctx: AccessContext, orderId: st
   return created;
 }
 
+/** The KOT column that records when a ticket reached a status (transitions are sequential, so each is stamped once). */
+const KOT_STAMP: Partial<Record<KOTStatus, "acceptedAt" | "startedAt" | "readyAt" | "servedAt">> = { ACCEPTED: "acceptedAt", PREPARING: "startedAt", READY: "readyAt", SERVED: "servedAt" };
+
 /**
  * KDS status change (audited). When every live KOT of an order is READY, an
  * ORDER_READY notification is raised for the outlet (deduplicated).
@@ -93,7 +96,9 @@ export async function updateKOTStatus(ctx: AccessContext, kotId: string, to: KOT
     if (!canTransition(KOT_TRANSITIONS, kot.status as KOTStatus, to)) {
       throw new ValidationError(`Cannot move KOT from ${kot.status} to ${to}`);
     }
-    const updated = await tx.kot.update({ where: { id: kotId }, data: { status: to } });
+    // The moment each stage was reached: what the measured prep times and the late-ticket alerts are built from.
+    const stamp = KOT_STAMP[to];
+    const updated = await tx.kot.update({ where: { id: kotId }, data: { status: to, ...(stamp && !kot[stamp] ? { [stamp]: new Date() } : {}) } });
     await tx.kotItem.updateMany({ where: { kotId }, data: { status: to } });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Kot", entityId: kotId, outletId: kot.outletId, before: { status: kot.status }, after: { status: to } });
     if (to === "READY") {
