@@ -147,6 +147,10 @@ test.describe.serial("account provisioning and password lifecycle", () => {
       const { context, page } = await freshPage(browser);
       await page.goto("/login");
       await page.getByRole("link", { name: "Forgot password?" }).click();
+      // The sign-in page also has an "Email" field and stays on screen until the client-side navigation commits:
+      // typing before the new page is there would fill the wrong form and leave the reset form empty.
+      await expect(page).toHaveURL(/\/forgot-password$/);
+      await expect(page.getByRole("heading", { name: "Reset your password" })).toBeVisible();
       await page.getByLabel("Email").fill(address);
       await page.getByRole("button", { name: "Request reset link" }).click();
       const status = page.getByRole("status").filter({ hasText: "If an active account exists" });
