@@ -80,7 +80,7 @@ async function checkoutAndPay(g: Page, opts: { name: string; phone: string; offe
   await g.getByLabel(/Your name/).fill(opts.name);
   await g.getByLabel(/^Phone/).fill(opts.phone);
   if (opts.offers) await g.getByRole("checkbox", { name: /Send me offers/ }).check();
-  await g.getByRole("radio", { name: /Pay online/ }).check();
+  await g.getByRole("radio", { name: /Simulated online payment|Pay online/ }).check();
   await expect(g.getByRole("button", { name: /^Place order & pay/ })).toBeEnabled();
   await g.getByRole("button", { name: /^Place order & pay/ }).click();
   await g.waitForURL(/\/o\/[^/#]+#k=/);
@@ -337,7 +337,7 @@ test.describe("growth (Group 6)", () => {
     await g.getByLabel(/^Phone/).fill(PHONE_B);
     await expect(friend).toBeEnabled();
     await expect(g.getByRole("checkbox", { name: /Send me offers/ })).not.toBeChecked(); // never pre-ticked
-    await g.getByRole("radio", { name: /Pay online/ }).check();
+    await g.getByRole("radio", { name: /Simulated online payment|Pay online/ }).check();
     await g.getByRole("button", { name: /^Place order & pay/ }).click();
     await g.waitForURL(/\/o\/[^/#]+#k=/);
     const gw = g.getByRole("region", { name: "Test payment gateway" });

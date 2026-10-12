@@ -246,7 +246,7 @@ async function orderFromTable(guest: Page, link: string, tableCode: string, cart
   await expect(guest.getByTestId("cart-total")).toHaveText(inr(expectedTotal));
   await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await expect(guest.getByText(`Table ${tableCode}`).first()).toBeVisible();
-  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Pay online/ }).check();
+  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Simulated online payment|Pay online/ }).check();
 }
 async function placeOrder(guest: Page) {
   await guest.getByRole("button", { name: /^Place order/ }).click();
@@ -405,7 +405,7 @@ test("ACC-A  steps 1-25: T07 → live menu → cart → pay online → verified 
   });
 
   await step(7, "CUSTOMER", "Choose online payment (the configured Razorpay test / emulator flow)", async () => {
-    const online = g.getByRole("radio", { name: /Pay online/ });
+    const online = g.getByRole("radio", { name: /Simulated online payment|Pay online/ });
     await online.check();
     await expect(online).toBeChecked();
     const options = (await call(anon, "GET", `/api/qr/t/${t07.qrToken}`)).json!.data!.payment as Record<string, unknown>;

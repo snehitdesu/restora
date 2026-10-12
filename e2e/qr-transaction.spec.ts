@@ -43,7 +43,7 @@ async function checkout(page: Page, opts: { total?: string; online?: boolean } =
   if (opts.total) await expect(page.getByTestId("cart-total")).toHaveText(opts.total);
   await page.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await page.waitForURL(/\/checkout$/);
-  if (opts.online) await page.getByRole("radio", { name: /Pay online/ }).check();
+  if (opts.online) await page.getByRole("radio", { name: /Simulated online payment|Pay online/ }).check();
   await page.getByRole("button", { name: /^Place order/ }).click();
 }
 

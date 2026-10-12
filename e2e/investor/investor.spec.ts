@@ -157,7 +157,7 @@ async function orderFromTable(guest: Page, link: string, cart: Array<{ item: str
   await expect(guest.getByTestId("cart-total")).toHaveText(inr(expectedTotal));
   await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await expect(guest.getByText("Table T07").first()).toBeVisible();
-  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Pay online/ }).check();
+  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Simulated online payment|Pay online/ }).check();
   await guest.getByRole("button", { name: /^Place order/ }).click();
   await guest.waitForURL(/\/o\/[^/#]+#k=/);
   // Cash: the order waits for the restaurant (no KOT yet). Online: the payment window is already opening.

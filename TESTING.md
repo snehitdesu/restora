@@ -3,8 +3,8 @@
 ## Current totals (2026-10-09, end of the master program)
 | Suite | Command | Result |
 |---|---|---|
-| Unit + DB integration, SQLite | `npm test` | 160 files, 1605 passed, 8 skipped, 0 failed |
-| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 160 files (157 run, 3 skipped), 1582 passed, 31 skipped, 0 failed |
+| Unit + DB integration, SQLite | `npm test` | 162 files, 1627 passed, 8 skipped, 0 failed (2026-10-12, with `main` merged) |
+| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 162 files (159 run, 3 skipped), 1604 passed, 31 skipped, 0 failed |
 | Browser E2E (production build), SQLite | `npm run e2e` | 133/133 (5 sign-in setups + 128 specs), CI |
 | Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) |
 | Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3, CI |
@@ -13,10 +13,10 @@
 | Backup / restore drill, load test | `node scripts/ops/backup-drill.mjs`, `node scripts/ops/load-test.mjs` | 2026-10-09 on the current schema: drill 10/10; load run 0 correctness violations (`docs/production-infrastructure.md` §7.1, §8.0). PITR drill and post-deploy smoke last run 2026-10-05 |
 
 **All of the above except the drills run in CI on every change** (`.github/workflows/ci.yml`: SQLite, PostgreSQL 16, web E2E on both,
-investor flow, desktop on Windows and both macOS architectures). The 160 Vitest files: `tests/domain` 74, `tests/ui` 32, `tests/api` 22,
-`tests/db` 9, `tests/integrations` 6, `tests/auth` 5, `tests/desktop` 4, `tests/config` 3, and one each in `tests/docs` (audit totals),
-`tests/e2e` (guest journey in the service layer), `tests/ops`, `tests/qa`, `tests/site`. Browser specs: `e2e/*.spec.ts` (33 files) plus
-`e2e/investor/`; desktop: `desktop/e2e/`.
+investor flow, desktop on Windows and both macOS architectures). The 162 Vitest files: `tests/domain` 75, `tests/ui` 32, `tests/api` 22,
+`tests/db` 9, `tests/integrations` 6, `tests/auth` 5, `tests/desktop` 4, `tests/config` 3, `tests/ops` 2, and one each in `tests/docs` (audit totals),
+`tests/e2e` (guest journey in the service layer), `tests/qa`, `tests/site`. Browser specs: `e2e/*.spec.ts` (33 files) plus
+`e2e/investor/` and `e2e/acceptance/`; desktop: `desktop/e2e/`.
 
 Where to find the tests of a group: `docs/group-delivery-map.md`. Quality gates that are tests, not documents: `e2e/quality-sweep.spec.ts`
 (ten viewports from 320 to 1920 px plus a phone held sideways: no console error, no error status, no sideways scrolling; axe WCAG 2.1 A / AA

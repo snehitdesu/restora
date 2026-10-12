@@ -118,8 +118,8 @@ pass or read from the GitHub Actions run named next to it.
 | Check | Result | Evidence |
 |---|---|---|
 | Typecheck, lint | clean on the SQLite client and on the PostgreSQL client | CI jobs "SQLite" and "PostgreSQL 16" |
-| Vitest, SQLite | 160 files, 1605 passed, 8 skipped, 0 failed | local run and CI |
-| Vitest, PostgreSQL 16 (fresh migrated database) | 160 files (157 run, 3 skipped), 1582 passed, 31 skipped, 0 failed | local run and CI |
+| Vitest, SQLite | 162 files, 1627 passed, 8 skipped, 0 failed | local run on the head merged with `main` (2026-10-12) and CI |
+| Vitest, PostgreSQL 16 (fresh migrated database) | 162 files (159 run, 3 skipped), 1604 passed, 31 skipped, 0 failed | local run and CI |
 | Migrations | both histories apply to an empty database; `migrate status` up to date; no drift (committed history vs schema, deployed database vs schema) | CI |
 | Browser E2E, SQLite, production build | 133/133 (5 sign-in setups + 128 specs), CI | CI run 24 (`2e5a1d4`; later commits: see below) |
 | Browser E2E, PostgreSQL 16 | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) | CI run 24 (`2e5a1d4`; later commits: see below) |
@@ -179,6 +179,8 @@ A 30-step walk on a fresh database (customer on a phone at table T07 to a served
 (`npm run e2e:acceptance`). 7 tests, 31 of 31 recorded observations PASS; the exact order, payment, KOT and invoice ids, every step's evidence and the conditions
 (Razorpay emulated, GSTIN and a recipe set up by the test) are in `docs/acceptance-coders-cafe.md`. It found one product defect (kitchen ticket times never written,
 see 8.2) and two mistakes in its own first versions. It is evidence for RESTORA's side of the payment contract, not for Razorpay's.
+
+On the head merged with `main` (`a80caa9`, the investor-demo release, which also changed the guest payment wording: a simulated gateway is now labelled "Simulated online payment") the local re-runs were: Vitest SQLite 162 files / 1627 passed, PostgreSQL 162 files / 1604 passed, browser E2E on SQLite 133/133, investor 3/3, acceptance 7/7. The browser specs that selected the radio by the old label were updated to accept both labels. The PostgreSQL browser E2E is left to CI (`PWD-005`, the test that failed there twice, passes on PostgreSQL locally, also with a slowed navigation).
 
 ### 8.5 Remaining, by kind
 
