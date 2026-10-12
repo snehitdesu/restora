@@ -34,22 +34,25 @@ webhook, an operator with database access.
 - Security headers on every response: CSP (`default-src 'self'`; `script-src` still needs `'unsafe-inline'` for Next.js hydration — nonce CSP deferred), HSTS (production), `X-Content-Type-Options`, `Referrer-Policy`, `frame-ancestors 'none'`, `Permissions-Policy`; API `Cache-Control: no-store`. Verified `SEC-HDR-001/002` (zero CSP violations on the main screens).
 - Input validation with Zod at every service boundary; body size caps; numeric overflow → 422.
 - Errors: no stack traces or internals in responses (500 = generic message + request id).
+- Forms that handle passwords read their fields when submitted, so text typed before the page finished loading is never lost; the sign-in form stays actionable and the forgot / change-password buttons wait only until the page is interactive (never until something is typed, and an empty form is explained). They post with `method="post"`, so an early submit never puts anything in the address bar (`LOGIN-002b`, `PWD-007`).
+- Guest bill splits: the request body is only the number of people (a strict schema refuses an amount or any other field); the share is computed on the server from the balance at that moment, every phone gets its own payment, and the payment is verified with the gateway like any other (`tests/domain/guest-split-reorder.test.ts`).
 - Idempotency keys on every money / stock creation (orders, rounds, payments, refunds, vendor payments, GRNs, transfers, wastage, expenses, drawer movements) — retries never double-charge or double-post.
 
 ## 5. Integrations and webhooks
 - Webhooks: raw-body HMAC (timing-safe), tenant binding by provider account id → `IntegrationConnection` (never by a body field), per-tenant secrets AES-256-GCM encrypted (`INTEGRATION_SECRETS_KEY`), event-id dedupe, amount re-verification, rate limit. Verified: `tests/domain/webhook-tenant.test.ts`, `INT-002` (forged webhook refused).
-- Mock providers refused in production unless explicitly allowed (warned at every boot); development placeholder secrets refused.
+- Mock providers refused in production unless explicitly allowed (warned at every boot); development placeholder secrets refused. Covers every provider factory: payment, POS, aggregator (closed 2026-10-08), notification, messaging, Google Sheets, and the webhook entry point (`tests/integrations/production-providers.test.ts`).
 - Outbound HTTP: deadlines, bounded retries, secret-free error messages.
 
 ## 6. Data protection
 - Logs: structured JSON; credential keys redacted, secrets in free text scrubbed, email / phone masked (`tests/ops/infrastructure.test.ts`; `verify-runtime.mjs` "no secret material in server logs").
 - Backups: AES-256-GCM encrypted with a key kept apart from the backups; checksum + authenticated decryption on restore (`backup-drill.mjs`).
 - Database roles: the app role cannot alter schema and cannot UPDATE / DELETE / TRUNCATE `AuditLog` or `InventoryLedger` (`scripts/ops/pg-roles.sql`, verified in the drill).
+- **History the database itself refuses to rewrite** (2026-10-09): triggers on `AuditLog` and `InventoryLedger` abort every UPDATE and DELETE (and TRUNCATE on PostgreSQL) whoever sends it, including the schema owner; they survive backup and restore; the readiness check reports missing triggers (`src/server/db/appendOnly.ts`, `tests/db/append-only.test.ts` on both engines, backup drill 10/10 afterwards). Only a disposable-database wipe lifts them, and nothing in the running application does.
 - Exports: re-authorized at download, owner-bound, expire after `EXPORT_RETENTION_HOURS`.
 - Desktop: DPAPI-protected install secret, loopback-only server, renderer sandbox / context isolation / no Node, navigation locked, Electron fuses (no RunAsNode, no NODE_OPTIONS, no inspector), asar integrity — `desktop:verify` 23/23.
 
 ## 7. Supply chain and secrets
-- `npm ci` from the committed lockfile; `npm audit --omit=dev` reviewed each release (current: two build/deploy-time advisories — PostCSS inside Next's build tooling, `deepmerge-ts` inside the Prisma CLI — not reachable at runtime; fixed by the next Next / Prisma majors).
+- `npm ci` from the committed lockfile; `npm audit --omit=dev` reviewed each release. **2026-10-09: 6 advisories (5 high, 1 moderate), all in build / CLI tooling and none loaded by the running server:** PostCSS (XSS in stringified CSS, `sourceMappingURL` file reads) and its `source-map-js` (event-loop DoS on crafted source maps) inside Next's build pipeline, which only ever processes this repository's own CSS; `deepmerge-ts` (stack exhaustion on recursive objects) inside the Prisma CLI / `@prisma/config`, run by operators on trusted schema files. The fixes are major upgrades (Next, Prisma) or `npm audit fix --force`, which were deliberately not applied at release time; re-check at the next Next / Prisma upgrade. Dev-only advisories (test runner tooling) are not shipped.
 - Secret scan of the tree each release (patterns for cloud keys, private keys, live gateway keys, tokens, passwords in URLs); `.env`, databases and backup dumps are git-ignored; the desktop build scans its payload for secrets.
 - No secrets in the repository; production values only via environment / secrets manager.
 
@@ -59,6 +62,6 @@ webhook, an operator with database access.
 | No RLS | a code-level tenant bug could cross organizations | single-organization deployments for V1; RLS before multi-tenant hosting |
 | `script-src 'unsafe-inline'` | weaker XSS containment | nonce-based CSP |
 | No MFA | stolen password = account | TOTP for owner / manager (post-V1) |
-| In-memory rate limits | per instance only | single instance (V1); shared store before scaling out |
+| Rate limits per process by default | with `RATE_LIMIT_STORE=database` the counters are shared by every instance (one atomic upsert per limited request; a database failure falls back to per-process counting and is logged) | choose `database` when running more than one instance |
 | Unsigned Windows installer | SmartScreen warnings; no publisher identity | code-signing certificate (external) |
 | No customer data erasure workflow | privacy requests handled manually | `docs/data-retention.md` |

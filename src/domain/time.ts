@@ -51,6 +51,11 @@ export function utcOffsetMinutes(instant: Date, tz: string): number {
   return Math.round((asUtc - Math.floor(instant.getTime() / 1000) * 1000) / 60000);
 }
 
+/** Hour of the day (0-23) at `instant` in `tz`. */
+export function localHour(instant: Date, tz: string): number {
+  return parts(instant, tz).h % 24;
+}
+
 /** Calendar date ("YYYY-MM-DD") of `instant` in `tz`. */
 export function localDate(instant: Date, tz: string): string {
   const p = parts(instant, tz);

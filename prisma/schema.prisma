@@ -243,6 +243,8 @@ model Material {
   organizationId    String
   sku               String
   name              String
+  // The maker's brand ("Amul", "Tata Salt"): what the store looks for on the shelf and the vendor quotes against.
+  brand             String?
   categoryId        String?
   category          MaterialCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
   baseUnitId        String
@@ -308,6 +310,9 @@ model Vendor {
   creditLimit    Decimal  @default(0)
   // UPI id for vendor payments (shown masked like bank details).
   upiId          String?
+  // What kind of vendor (Dairy, Produce, Packaging ...) and the GST nature of supply: GOODS | SERVICES | BOTH.
+  category       String?
+  natureOfSupply String?
   // Mirrors status == ACTIVE (kept for existing filters); status is authoritative.
   active         Boolean  @default(true)
   // PENDING | ACTIVE | INACTIVE | BLACKLISTED (VENDOR_STATUS_TRANSITIONS). New
@@ -322,10 +327,28 @@ model Vendor {
   updatedAt      DateTime @updatedAt
 
   materials VendorMaterial[]
+  contacts  VendorContact[]
 
   @@unique([organizationId, name])
   @@index([organizationId, active])
   @@index([organizationId, status])
+}
+
+/// A person to call at a vendor (the account manager, the delivery desk, accounts): a vendor has several.
+model VendorContact {
+  id             String   @id @default(cuid())
+  organizationId String
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  name           String
+  role           String?
+  phone          String?
+  email          String?
+  isPrimary      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([vendorId])
+  @@index([organizationId])
 }
 
 model VendorMaterial {
@@ -377,6 +400,8 @@ model MenuItem {
   posCode        String? // external POS item code for mapping
   // HSN / SAC code for tax invoices (restaurant service: SAC 996331).
   hsnSac         String?
+  // Comma-separated lower-case tags: "south-indian,breakfast". Cuisine / meal-type labels for filtering the menu.
+  cuisineTags    String?
   isVeg          Boolean       @default(true)
   active         Boolean       @default(true)
   soldOut        Boolean       @default(false)
@@ -601,7 +626,11 @@ model Customer {
   phone          String?
   email          String?
   birthday       DateTime?
+  /// Group 6: anniversary offers (proposal p. 17).
+  anniversary    DateTime?
   notes          String?
+  /// Group 6: what the guest likes (diet, favourite table, allergies): staff-visible free text.
+  preferences    String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -611,6 +640,7 @@ model Customer {
   orders       Order[]
   reservations Reservation[]
   feedback     Feedback[]
+  consents     CustomerConsent[]
 
   @@unique([organizationId, phone])
   @@index([organizationId])
@@ -675,9 +705,20 @@ model Feedback {
   rating         Int       @default(5)
   comment        String?
   createdAt      DateTime  @default(now())
+  /// Group 6. STAFF (typed in by staff) | GUEST (the guest's own form on the order page or a feedback link).
+  source         String    @default("STAFF")
+  /// NEW | ACKNOWLEDGED | RESOLVED: a private complaint is worked like a task.
+  status         String    @default("NEW")
+  /// What the guest was shown after rating: GOOGLE (happy: a public review link) | PRIVATE (unhappy: reaches the manager).
+  routedTo       String?
+  handledById    String?
+  handledAt      DateTime?
+  resolution     String?
 
   @@index([organizationId])
   @@index([customerId])
+  @@index([organizationId, status, createdAt])
+  @@index([orderId])
 }
 
 model Reservation {
@@ -725,6 +766,9 @@ model WaitlistEntry {
   partySize      Int      @default(2)
   status         String   @default("WAITING") // WAITING | ARRIVED | SEATED | LEFT | CANCELLED
   estWaitMins    Int      @default(15)
+  // When the party was last told its table is ready (message accepted by the message gate), and how many times.
+  notifiedAt     DateTime?
+  notifyCount    Int      @default(0)
   createdAt      DateTime @default(now())
 
   @@index([organizationId, outletId, status])
@@ -758,6 +802,10 @@ model Order {
   stockConsumed  Boolean          @default(false)
   covers         Int              @default(1)
   notes          String?
+  // A bill saved at the counter without sending it to the kitchen ("held"): the POS's named hold list is the OPEN orders
+  // that carry heldAt. The label is what the cashier called it ("window table", "Ravi").
+  holdLabel      String?
+  heldAt         DateTime?
   // Client-supplied Idempotency-Key for order creation: a retry returns the
   // original order; reuse with a different request is rejected (requestHash).
   idempotencyKey String?
@@ -1034,6 +1082,11 @@ model PurchaseOrder {
   createdById    String?
   approvedById   String?
   approvedAt     DateTime?
+  // Two-person approval (ProcurementSettings.dualApprovalAtOrAbove): the first approver, kept until a different second one approves.
+  firstApprovedById String?
+  firstApprovedAt   DateTime?
+  // Approved by the small-order rule at submission (nobody approved it by hand).
+  autoApproved   Boolean   @default(false)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -1058,6 +1111,11 @@ model PurchaseOrderLine {
   taxPct         Decimal       @default(0)
   receivedQty    Decimal       @default(0)
   unitId         String?
+  // ACTIVE | REJECTED: an approver can take a line off the order without rejecting the rest. A rejected line is not billed
+  // in the order's total, cannot be received and is not counted as on order.
+  lineStatus     String        @default("ACTIVE")
+  // The quantity as raised, kept when an approver changed it.
+  requestedQty   Decimal?
 
   @@index([poId])
   @@index([materialId])
@@ -1103,6 +1161,8 @@ model GoodsReceiptLine {
   damagedQty     Decimal      @default(0)
   batchNo        String?
   expiryDate     DateTime?
+  // FSSAI lot code printed on the pack (traceability for a recall).
+  fssaiLot       String?
   unitId         String?
 
   @@index([grnId])
@@ -1214,6 +1274,7 @@ model InventoryLedger {
   sourceRef      String?           @unique
   batchNo        String?
   expiryDate     DateTime?
+  fssaiLot       String?
   note           String?
   // Correction chain (append-only): a mistake is fixed with a new row.
   correctionOfId String?
@@ -1284,6 +1345,8 @@ model InventoryIssue {
   toDepartmentId   String?
   status           String    @default("DRAFT") // DRAFT | ISSUED | CANCELLED
   notes            String?
+  // The approved indent this issue fulfils (the kitchen asked, the store dispatched).
+  indentId         String?
   // Client Idempotency-Key for creation: a retry with the same key + request
   // returns the original document; reuse for a different request is refused.
   idempotencyKey   String?
@@ -1297,6 +1360,7 @@ model InventoryIssue {
   @@unique([organizationId, idempotencyKey])
   @@unique([outletId, number])
   @@index([organizationId, outletId, status])
+  @@index([indentId])
 }
 
 model InventoryIssueLine {
@@ -1705,7 +1769,57 @@ model Shift {
   startTime      String // "09:00"
   endTime        String // "17:00"
 
+  assignments ShiftAssignment[]
+
   @@index([organizationId, outletId])
+}
+
+/// Who works which shift on which day (the roster). One person once per shift per day.
+model ShiftAssignment {
+  id             String   @id @default(cuid())
+  organizationId String
+  outletId       String
+  shiftId        String
+  shift          Shift    @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  userId         String
+  /// The calendar day at the outlet, YYYY-MM-DD.
+  date           String
+  createdById    String?
+  createdAt      DateTime @default(now())
+
+  @@unique([shiftId, userId, date])
+  @@index([organizationId, outletId, date])
+  @@index([userId, date])
+}
+
+/// A reusable duty list (opening, closing, training): a named set of items that becomes one task per item each time it is started.
+model ChecklistTemplate {
+  id             String                  @id @default(cuid())
+  organizationId String
+  outletId       String
+  name           String
+  /// OPENING | CLOSING | TRAINING | OTHER
+  kind           String                  @default("OPENING")
+  active         Boolean                 @default(true)
+  createdById    String?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  items          ChecklistTemplateItem[]
+
+  @@unique([outletId, name])
+  @@index([organizationId, outletId])
+}
+
+model ChecklistTemplateItem {
+  id          String            @id @default(cuid())
+  templateId  String
+  template    ChecklistTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  priority    String            @default("MEDIUM")
+  sortOrder   Int               @default(0)
+
+  @@index([templateId])
 }
 
 model LeaveRequest {
@@ -1737,9 +1851,13 @@ model Task {
   completedAt    DateTime?
   verifiedById   String?
   createdById    String?
+  /// Set when the task came from a checklist: which template item, and for which day. Starting a checklist twice for a day makes each task once.
+  templateItemId String?
+  runDate        String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
+  @@unique([templateItemId, runDate])
   @@index([organizationId, outletId, status])
   @@index([assignedToId])
 }
@@ -2255,4 +2373,269 @@ model JobRun {
   /// Secret-free JSON summary or error.
   detail     String?
   @@unique([name, scopeKey, runDate])
+}
+
+// ============================================================
+// GROUP 6: GROWTH, CRM AND COMMUNICATIONS (proposal pp. 16-17)
+// ============================================================
+
+/// Who may be messaged, per channel. Marketing needs an explicit yes; messages about the guest's
+/// own order, booking or bill go out unless the guest opted out of that channel.
+model CustomerConsent {
+  id             String   @id @default(cuid())
+  organizationId String
+  customerId     String
+  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  /// SMS | WHATSAPP | EMAIL
+  channel        String
+  marketing      Boolean  @default(false)
+  transactional  Boolean  @default(true)
+  /// STAFF | GUEST_QR | IMPORT | GUEST_REPLY
+  source         String   @default("STAFF")
+  updatedById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([customerId, channel])
+  @@index([organizationId, channel, marketing])
+}
+
+/// One row per organization: every rule of the growth programme in one place.
+model GrowthSettings {
+  organizationId        String   @id
+  referralEnabled       Boolean  @default(false)
+  referrerPoints        Int      @default(100)
+  refereePoints         Int      @default(50)
+  referralMinOrderValue Decimal  @default(0)
+  referralMonthlyCap    Int      @default(20)
+  birthdayCouponId      String?
+  anniversaryCouponId   String?
+  winbackCouponId       String?
+  /// Guests whose last paid order is older than this many days get the win-back message (proposal: 45).
+  winbackAfterDays      Int      @default(45)
+  /// ...and are not asked again for this many days.
+  winbackCooldownDays   Int      @default(90)
+  feedbackEnabled       Boolean  @default(false)
+  feedbackDelayMinutes  Int      @default(120)
+  /// Shown only to guests who rated 4 or 5 (https only).
+  googleReviewUrl       String?
+  /// A rating at or below this reaches the manager privately and is never sent to a public site.
+  lowRatingMax          Int      @default(3)
+  /// Marketing is never sent in the guest's night: hours in the outlet's time zone (start inclusive, end exclusive).
+  quietHoursStart       Int      @default(21)
+  quietHoursEnd         Int      @default(9)
+  /// At most this many marketing messages per guest in any 7 days.
+  marketingWeeklyCap    Int      @default(2)
+  /// Booking confirmation and a reminder before the table (off until the owner turns it on).
+  bookingMessagesEnabled Boolean @default(false)
+  bookingReminderHours  Int      @default(2)
+  digestEnabled         Boolean  @default(false)
+  digestHour            Int      @default(9)
+  /// Where the 9 AM summary goes besides the in-app notification (E.164, optional).
+  digestPhone           String?
+  updatedById           String?
+  updatedAt             DateTime @updatedAt
+}
+
+/// Tiers with perks (proposal p. 17). Without any row the legacy lifetime-points thresholds apply.
+model LoyaltyTier {
+  id                String   @id @default(cuid())
+  organizationId    String
+  code              String
+  name              String
+  /// Spend on paid orders over the last 365 days that reaches this tier.
+  minSpend          Decimal  @default(0)
+  /// 100 = standard earn rule, 150 = 1.5x points.
+  earnMultiplierPct Decimal  @default(100)
+  /// What the guest gets, in words (shown to staff and on the guest's profile).
+  perks             String?
+  sortOrder         Int      @default(0)
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([organizationId, code])
+  @@index([organizationId, active])
+}
+
+/// A code the guest or the cashier types; the server prices it, the client never does.
+model Coupon {
+  id               String    @id @default(cuid())
+  organizationId   String
+  /// Upper case, unique per organization.
+  code             String
+  name             String
+  description      String?
+  /// PERCENT | FIXED
+  kind             String
+  value            Decimal
+  /// Cap on a PERCENT coupon.
+  maxDiscount      Decimal?
+  minOrderValue    Decimal?
+  validFrom        DateTime?
+  validTo          DateTime?
+  /// Total redemptions allowed (null = unlimited).
+  usageLimit       Int?
+  perCustomerLimit Int?
+  firstOrderOnly   Boolean   @default(false)
+  /// A tier code: only guests at that tier or above.
+  minTier          String?
+  /// Comma separated order channels (null = every channel).
+  channels         String?
+  /// Comma separated outlet ids (null = every outlet).
+  outletIds        String?
+  /// May sit on an order that already carries a manual discount.
+  stackable        Boolean   @default(false)
+  active           Boolean   @default(true)
+  createdById      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  redemptions CouponRedemption[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId, active])
+}
+
+model CouponRedemption {
+  id             String    @id @default(cuid())
+  organizationId String
+  couponId       String
+  coupon         Coupon    @relation(fields: [couponId], references: [id], onDelete: Restrict)
+  orderId        String
+  customerId     String?
+  amount         Decimal
+  /// APPLIED | REVERSED
+  status         String    @default("APPLIED")
+  reversedAt     DateTime?
+  reverseReason  String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([orderId, couponId])
+  @@index([couponId, status])
+  @@index([organizationId, customerId])
+}
+
+/// A guest's own code to share. One per customer.
+model ReferralCode {
+  id             String   @id @default(cuid())
+  organizationId String
+  customerId     String
+  code           String
+  createdAt      DateTime @default(now())
+
+  @@unique([organizationId, customerId])
+  @@unique([organizationId, code])
+}
+
+/// Who brought whom. A guest can be referred once, ever.
+model Referral {
+  id                 String    @id @default(cuid())
+  organizationId     String
+  referrerCustomerId String
+  referredCustomerId String
+  codeId             String
+  /// PENDING (waiting for the first paid order) | REWARDED | REJECTED
+  status             String    @default("PENDING")
+  rejectReason       String?
+  qualifyingOrderId  String?
+  referrerPoints     Int?
+  refereePoints      Int?
+  createdAt          DateTime  @default(now())
+  rewardedAt         DateTime?
+
+  @@unique([organizationId, referredCustomerId])
+  @@index([organizationId, referrerCustomerId, status])
+}
+
+/// The question sent after a visit (proposal p. 17: "2 hours later"), one per paid order.
+model FeedbackRequest {
+  id             String    @id @default(cuid())
+  organizationId String
+  outletId       String
+  orderId        String
+  customerId     String?
+  /// The unguessable part of the feedback link.
+  token          String
+  /// PENDING | SENT | ANSWERED | SKIPPED | EXPIRED
+  status         String    @default("PENDING")
+  skipReason     String?
+  dueAt          DateTime
+  sentAt         DateTime?
+  answeredAt     DateTime?
+  feedbackId     String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([orderId])
+  @@unique([token])
+  @@index([organizationId, status, dueAt])
+}
+
+/// A message to a segment of guests who said yes to marketing on that channel.
+model Campaign {
+  id             String    @id @default(cuid())
+  organizationId String
+  name           String
+  /// SMS | WHATSAPP | EMAIL
+  channel        String
+  /// MANUAL | BIRTHDAY | ANNIVERSARY | WINBACK
+  kind           String    @default("MANUAL")
+  /// JSON: who (segment, minimum orders / spend, last order before N days, birthday month ...).
+  audience       String
+  body           String
+  couponId       String?
+  /// DRAFT | SCHEDULED | SENDING | SENT | CANCELLED
+  status         String    @default("DRAFT")
+  scheduledAt    DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  recipientCount Int       @default(0)
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  recipients CampaignRecipient[]
+
+  @@index([organizationId, status, scheduledAt])
+}
+
+model CampaignRecipient {
+  id             String   @id @default(cuid())
+  organizationId String
+  campaignId     String
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  customerId     String
+  /// QUEUED | SENT | DELIVERED | FAILED | SKIPPED
+  status         String   @default("QUEUED")
+  skipReason     String?
+  deliveryId     String?
+  createdAt      DateTime @default(now())
+
+  @@unique([campaignId, customerId])
+  @@index([organizationId, customerId])
+}
+
+/// Approval rules for purchase orders, per organization (audit PP-07). Both limits are optional; with neither set every
+/// order waits for one approver, as before.
+model ProcurementSettings {
+  id                    String   @id @default(cuid())
+  organizationId        String   @unique
+  /// A purchase order at or below this total is approved when it is submitted.
+  autoApproveBelow      Decimal?
+  /// A purchase order at or above this total needs two different approvers.
+  dualApprovalAtOrAbove Decimal?
+  updatedById           String?
+  updatedAt             DateTime @updatedAt
+}
+
+/// Shared rate-limit counters (audit SE-03): one fixed window per key, advanced atomically with a single upsert so that
+/// several app instances count against the same number. Used when RATE_LIMIT_STORE=database; expired windows are swept by
+/// the worker.
+model RateLimitWindow {
+  key     String @id
+  count   Int
+  /// End of the window, milliseconds since the epoch.
+  resetAt BigInt
+
+  @@index([resetAt])
 }

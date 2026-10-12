@@ -18,6 +18,7 @@ import { assertCan, can } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
 import { type Client, type Tx, runInTx } from "@/server/services/_workflow";
 import { D } from "@/domain/money";
+import { activeTiers, tierForSpend, trailingSpend } from "@/server/services/loyaltyTiers";
 
 const TIER_THRESHOLDS: Array<{ tier: string; minLifetimeEarned: number }> = [
   { tier: "PLATINUM", minLifetimeEarned: 5000 },
@@ -69,11 +70,43 @@ async function applyTxn(tx: Tx, ctx: AccessContext, customerId: string, type: Lo
   });
   // Recompute cache + tier from the ledger.
   const balance = await ledgerBalance(tx, ctx, customerId);
-  const earnedAgg = await tx.loyaltyTransaction.aggregate({ where: { organizationId: ctx.organizationId, customerId, type: "EARN" }, _sum: { points: true } });
-  const tier = TIER_THRESHOLDS.find((t) => (earnedAgg._sum.points ?? 0) >= t.minLifetimeEarned)!.tier;
+  const tier = await tierCodeFor(tx, ctx, customerId);
+  const before = await tx.loyaltyAccount.findUnique({ where: { customerId }, select: { tier: true } });
   await tx.loyaltyAccount.update({ where: { customerId }, data: { pointsBalance: balance, tier } });
+  if (before && before.tier !== tier) await writeAudit(tx, ctx, { action: "UPDATE", entityType: "LoyaltyAccount", entityId: customerId, outletId: opts.outletId, before: { tier: before.tier }, after: { tier } });
   await writeAudit(tx, ctx, { action: "CREATE", entityType: "LoyaltyTransaction", entityId: txn.id, outletId: opts.outletId, after: { customerId, type, points, orderId: opts.orderId, balance } });
   return { txn, balance, tier };
+}
+
+/**
+ * The guest's tier: from the organization's configured tiers by the last 365 days' real spend, or (no tiers configured)
+ * the legacy lifetime-points thresholds. Internal: called inside the ledger transaction.
+ */
+async function tierCodeFor(tx: Tx, ctx: AccessContext, customerId: string): Promise<string> {
+  const tiers = await activeTiers(tx, ctx.organizationId);
+  if (tiers.length) return tierForSpend(tiers, await trailingSpend(tx, ctx.organizationId, customerId))?.code ?? tiers[0].code;
+  const earnedAgg = await tx.loyaltyTransaction.aggregate({ where: { organizationId: ctx.organizationId, customerId, type: "EARN" }, _sum: { points: true } });
+  return TIER_THRESHOLDS.find((t) => (earnedAgg._sum.points ?? 0) >= t.minLifetimeEarned)!.tier;
+}
+
+/** Earn multiplier of the guest's current tier (100 = standard). The tier before this order counts, not the one it creates. */
+async function earnMultiplierPct(tx: Tx, ctx: AccessContext, customerId: string): Promise<number> {
+  const tiers = await activeTiers(tx, ctx.organizationId);
+  if (!tiers.length) return 100;
+  const acct = await tx.loyaltyAccount.findUnique({ where: { customerId }, select: { tier: true } });
+  return tiers.find((t) => t.code === acct?.tier)?.earnMultiplierPct ?? 100;
+}
+
+/**
+ * Internal: put bonus points on the ledger (referral rewards, goodwill from automations). No order is attached, so it
+ * never collides with the per-order EARN / REDEEM / reversal rows; the caller makes it idempotent (a state change in the
+ * same transaction). A negative amount is capped at the current balance.
+ */
+export async function grantPointsTx(tx: Tx, ctx: AccessContext, customerId: string, points: number, note: string, outletId?: string) {
+  const balance = await ledgerBalance(tx, ctx, customerId);
+  const delta = points < 0 ? -Math.min(-points, balance) : points;
+  if (delta === 0) return null;
+  return (await applyTxn(tx, ctx, customerId, "ADJUST", delta, { note, outletId })).txn;
 }
 
 async function orderNetValue(tx: Tx, orderId: string, total: ReturnType<typeof D>) {
@@ -94,7 +127,8 @@ export async function awardOrderLoyaltyTx(tx: Tx, ctx: AccessContext, orderId: s
   if (!order.customerId) return { status: "NO_CUSTOMER", points: 0 };
   const existing = await tx.loyaltyTransaction.findUnique({ where: { customerId_orderId_type: { customerId: order.customerId, orderId, type: "EARN" } } });
   if (existing) return { status: "DUPLICATE", points: existing.points, txnId: existing.id, balance: await ledgerBalance(tx, ctx, order.customerId) };
-  const points = pointsForOrderValue((await orderNetValue(tx, orderId, D(order.total))).toNumber());
+  const base = pointsForOrderValue((await orderNetValue(tx, orderId, D(order.total))).toNumber());
+  const points = Math.floor((base * (await earnMultiplierPct(tx, ctx, order.customerId))) / 100);
   if (points <= 0) return { status: "ZERO_POINTS", points: 0 };
   const res = await applyTxn(tx, ctx, order.customerId, "EARN", points, { orderId, note: `Order ${order.invoiceNo ?? orderId}`, outletId: order.outletId });
   return { status: "EARNED", points, balance: res.balance, txnId: res.txn.id };

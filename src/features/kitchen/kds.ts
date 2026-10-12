@@ -13,7 +13,7 @@ export type KdsTicket = {
   orderId: string;
   station: { id: string; name: string } | null;
   order: { id: string; channel: string; source: string; covers: number; notes: string | null; createdAt: string; table: { code: string } | null } | null;
-  items: Array<{ id: string; name: string; qty: string | number; status: string; notes: string | null; orderItem: { notes: string | null; modifiers: Array<{ name: string }> } | null }>;
+  items: Array<{ id: string; name: string; qty: string | number; status: string; notes: string | null; orderItem: { menuItemId?: string | null; notes: string | null; modifiers: Array<{ name: string }> } | null }>;
 };
 
 export const KDS_COLUMNS: Array<{ id: "new" | "progress" | "ready"; title: string; statuses: KOTStatus[] }> = [
@@ -51,6 +51,60 @@ export function canCancel(status: KOTStatus): boolean {
 export function urgency(createdAt: string, now: number = Date.now(), thresholds = { warn: 10, late: 20 }): "normal" | "warn" | "late" {
   const mins = (now - new Date(createdAt).getTime()) / 60000;
   return mins >= thresholds.late ? "late" : mins >= thresholds.warn ? "warn" : "normal";
+}
+
+// ---------------- measured expectations and late tickets ----------------
+
+/** Median minutes (measured by `dishPrepTimes`) a dish usually takes, only for dishes with enough tickets behind them. */
+export type PrepExpectations = { byItem: Record<string, number>; byName: Record<string, number> };
+export const NO_EXPECTATIONS: PrepExpectations = { byItem: {}, byName: {} };
+
+export function expectationsFrom(dishes: Array<{ menuItemId: string | null; name: string; medianMinutes: number; reliable: boolean }>): PrepExpectations {
+  const out: PrepExpectations = { byItem: {}, byName: {} };
+  for (const d of dishes) {
+    if (!d.reliable) continue;
+    if (d.menuItemId) out.byItem[d.menuItemId] = d.medianMinutes;
+    else out.byName[d.name] = d.medianMinutes;
+  }
+  return out;
+}
+
+/** A ticket is expected to be ready when its slowest dish usually is. Null when no dish on it has a measured time. */
+export function expectedMinutes(t: KdsTicket, ex: PrepExpectations): number | null {
+  let slowest: number | null = null;
+  for (const i of t.items) {
+    const m = (i.orderItem?.menuItemId ? ex.byItem[i.orderItem.menuItemId] : undefined) ?? ex.byName[i.name];
+    if (m !== undefined && (slowest === null || m > slowest)) slowest = m;
+  }
+  return slowest;
+}
+
+export type Lateness = { level: "normal" | "warn" | "late"; expected: number | null; elapsed: number };
+
+/**
+ * Warn once the ticket has waited as long as it usually takes; late at half as long again (and at least 3 minutes over),
+ * so the kitchen hears about it before the guest asks. Dishes without a measured time fall back to the fixed 10 / 20
+ * minute line. Tickets already READY are waiting to be served, not to be cooked: they are never "late" for the kitchen.
+ */
+export function ticketLateness(t: KdsTicket, now: number, ex: PrepExpectations = NO_EXPECTATIONS): Lateness {
+  const elapsed = (now - new Date(t.createdAt).getTime()) / 60000;
+  if (t.status === "READY") return { level: "normal", expected: null, elapsed };
+  const expected = expectedMinutes(t, ex);
+  if (expected === null) return { level: urgency(t.createdAt, now), expected: null, elapsed };
+  const late = Math.max(expected * 1.5, expected + 3);
+  return { level: elapsed >= late ? "late" : elapsed >= expected ? "warn" : "normal", expected, elapsed };
+}
+
+/** What the banner says: tickets past their late line, and tickets that have reached their usual time. */
+export function lateSummary(tickets: KdsTicket[], now: number, ex: PrepExpectations = NO_EXPECTATIONS): { late: number; due: number } {
+  let late = 0;
+  let due = 0;
+  for (const t of tickets) {
+    const l = ticketLateness(t, now, ex).level;
+    if (l === "late") late++;
+    else if (l === "warn") due++;
+  }
+  return { late, due };
 }
 
 export function ticketLabel(t: KdsTicket): string {

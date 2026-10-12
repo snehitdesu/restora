@@ -16,7 +16,7 @@ import { request } from "@/lib/api/client";
 import { cartItemCount, cartReducer, emptyCart, lineKey, type CartAction, type CartLine, type CartState } from "@/features/pos/cart";
 import { estimateTotals } from "@/features/pos/estimate";
 import type { MenuItemDTO } from "@/features/pos/types";
-import { loadCart, saveCart } from "@/features/guest/session";
+import { loadCart, loadCoupon, saveCart, saveCoupon } from "@/features/guest/session";
 import { brandFor, type Brand } from "@/features/guest/brand";
 
 export type GuestMenuData = {
@@ -84,6 +84,9 @@ type StorefrontValue = {
   cart: CartState;
   /** True once the saved cart was restored on this device (avoid flashing an empty cart). */
   cartReady: boolean;
+  /** A coupon code the guest entered (the server prices it; it is only sent with the quote and the order). */
+  couponCode: string | null;
+  setCouponCode: (code: string | null) => void;
   dispatch: (a: StoreAction) => void;
   count: number;
   estimate: ReturnType<typeof estimateTotals>;
@@ -111,6 +114,7 @@ export function StorefrontProvider({ token, initial, children }: { token: string
   const [data, setData] = useState(initial);
   const [cart, dispatch] = useReducer(storeReducer, undefined, () => emptyCart("DINE_IN"));
   const [cartReady, setCartReady] = useState(false);
+  const [couponCode, setCouponState] = useState<string | null>(null);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
@@ -121,7 +125,12 @@ export function StorefrontProvider({ token, initial, children }: { token: string
   // Restore this device's cart after hydration (sessionStorage is not available on the server).
   useEffect(() => {
     dispatch({ type: "load", state: loadCart(token) });
+    setCouponState(loadCoupon(token));
     setCartReady(true);
+  }, [token]);
+  const setCouponCode = useCallback((code: string | null) => {
+    setCouponState(code);
+    saveCoupon(token, code);
   }, [token]);
   useEffect(() => {
     if (cartReady) saveCart(token, cart);
@@ -187,6 +196,8 @@ export function StorefrontProvider({ token, initial, children }: { token: string
     base,
     cart,
     cartReady,
+    couponCode,
+    setCouponCode,
     dispatch,
     count: cartItemCount(cart),
     estimate: estimateTotals(cart.lines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }))),
@@ -211,7 +222,14 @@ export function StorefrontProvider({ token, initial, children }: { token: string
 export type QuoteLine =
   | { index: number; ok: true; menuItemId: string; name: string; unitPrice: string; modifiers: Array<{ name: string; priceDelta: string }>; modifiersPerUnit: string; taxPct: string; qty: number; lineTotal: string }
   | { index: number; ok: false; menuItemId: string; reason: string };
-export type Quote = { lines: QuoteLine[]; subtotal: string; tax: string; taxes: Array<{ ratePct: string; amount: string }>; total: string; allAvailable: boolean; ordering: { open: boolean; message: string | null } };
+export type QuoteCoupon = { ok: true; code: string; name: string; discount: string } | { ok: false; message: string };
+export type Quote = {
+  lines: QuoteLine[]; subtotal: string; tax: string; taxes: Array<{ ratePct: string; amount: string }>; total: string; allAvailable: boolean; ordering: { open: boolean; message: string | null };
+  /** Present when a code was sent: what it is worth, or why not (in words a guest may see). */
+  coupon?: QuoteCoupon;
+  /** Total discount already taken off `total` ("0.00" without a coupon). */
+  discount?: string;
+};
 
 const itemsOf = (lines: CartLine[]) => lines.map((l) => ({ menuItemId: l.menuItemId, variantId: l.variantId, modifierOptionIds: l.modifierOptionIds.length ? l.modifierOptionIds : undefined, qty: l.qty }));
 
@@ -220,20 +238,25 @@ const itemsOf = (lines: CartLine[]) => lines.map((l) => ({ menuItemId: l.menuIte
  * change. When the restaurant changed a price, the cart line takes the
  * server's price and `repriced` lists what changed so the page can say so.
  */
-export function useServerQuote() {
-  const { token, cart, cartReady, dispatch } = useStorefront();
+export function useServerQuote(opts: { phone?: string } = {}) {
+  const { token, cart, cartReady, dispatch, couponCode } = useStorefront();
+  // The phone only matters to a coupon (first-order / per-guest rules): without one, typing it must not re-price the cart.
+  const phone = couponCode ? opts.phone || undefined : undefined;
   const [quote, setQuote] = useState<(Quote & { sig: string }) | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [repriced, setRepriced] = useState<string[]>([]);
-  const signature = JSON.stringify(itemsOf(cart.lines));
+  const signature = JSON.stringify([itemsOf(cart.lines), couponCode, phone ?? null]);
   const seq = useRef(0);
   const linesRef = useRef(cart.lines);
   linesRef.current = cart.lines;
+  const offerRef = useRef({ couponCode, phone });
+  offerRef.current = { couponCode, phone };
 
   const run = useCallback(async () => {
     const lines = linesRef.current;
-    const sig = JSON.stringify(itemsOf(lines));
+    const { couponCode: code, phone: ph } = offerRef.current;
+    const sig = JSON.stringify([itemsOf(lines), code, ph ?? null]);
     const mine = ++seq.current;
     if (!lines.length) {
       setQuote(null);
@@ -242,7 +265,7 @@ export function useServerQuote() {
     }
     setLoading(true);
     try {
-      const q = await request<Quote>(`/api/qr/t/${encodeURIComponent(token)}/quote`, { method: "POST", body: { items: itemsOf(lines) } });
+      const q = await request<Quote>(`/api/qr/t/${encodeURIComponent(token)}/quote`, { method: "POST", body: { items: itemsOf(lines), ...(code ? { couponCode: code, ...(ph ? { phone: ph } : {}) } : {}) } });
       if (mine !== seq.current) return;
       setError(null);
       const changes: Array<{ key: string; unitPrice: number; modifiersPerUnit: number; taxPct: number }> = [];

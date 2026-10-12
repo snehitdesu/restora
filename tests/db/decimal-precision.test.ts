@@ -53,13 +53,13 @@ describe("PostgreSQL schema generator", () => {
   const fields = decimalFieldsOf(source);
   const generated = toPostgresSchema(source);
 
-  it("classifies every Decimal field of prisma/schema.prisma (115 today) and annotates each one", () => {
-    expect(fields.length).toBe(115);
+  it("classifies every Decimal field of prisma/schema.prisma (125 today) and annotates each one", () => {
+    expect(fields.length).toBe(125);
     for (const key of fields) expect(Object.keys(DECIMAL_CLASSES)).toContain(classOf(key));
     const listed = Object.entries(DECIMAL_FIELDS).flatMap(([m, fs]) => Object.keys(fs).map((f) => `${m}.${f}`));
     expect(listed.sort()).toEqual([...fields].sort());
     // No Decimal reaches PostgreSQL without an explicit precision (would be numeric(65,30)).
-    expect(generated.match(/@db\.Decimal\(\d+, \d+\)/g)).toHaveLength(115);
+    expect(generated.match(/@db\.Decimal\(\d+, \d+\)/g)).toHaveLength(125);
     for (const line of generated.split("\n")) if (/^\s+\w+\s+Decimal\??(\s|$)/.test(line)) expect(line).toMatch(/@db\.Decimal\(\d+, \d+\)/);
   });
 

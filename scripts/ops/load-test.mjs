@@ -149,6 +149,8 @@ async function setup() {
   const db = new PrismaClient({ datasources: { db: { url: DB } } });
   const org = await db.organization.findFirstOrThrow({ orderBy: { createdAt: "asc" } });
   const outlet = await db.outlet.findFirstOrThrow({ where: { organizationId: org.id }, orderBy: { createdAt: "asc" } });
+  // Guest ordering honours the outlet's opening hours; the scenarios must not depend on the time of day they happen to run.
+  await db.outlet.update({ where: { id: outlet.id }, data: { openTime: null, closeTime: null } });
   const hash = await bcrypt.hash(PASSWORD, 10);
   const users = { cashier: [], manager: [] };
   for (const [role, n] of [["CASHIER", 40], ["MANAGER", 10]]) {
@@ -290,7 +292,7 @@ async function main() {
       const p = await http("POST", `/api/qr/orders/${id}/payments`, { ip, headers: { "x-order-key": key, "idempotency-key": `load-qrp-${randomUUID()}` }, body: {} });
       rec.add("pay_start", p, [200]);
       if (p.status !== 200) return;
-      const c = await http("POST", `/api/qr/orders/${id}/payments/confirm`, { ip, headers: { "x-order-key": key }, body: { paymentId: p.data.data.paymentId, providerRef: `mockref_${randomUUID().slice(0, 12)}` } });
+      const c = await http("POST", `/api/qr/orders/${id}/payments/confirm`, { ip, headers: { "x-order-key": key }, body: { paymentId: p.data.data.paymentId } }); // no reference of its own: the server asks the gateway about the payment it created
       rec.add("pay_confirm", c, [200]);
     });
   });

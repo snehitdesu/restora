@@ -2336,6 +2336,27 @@
   margin-top: 16px;
 }
 
+.sf-actions .sf-actions-wide {
+  grid-column: 1 / -1;
+}
+
+/* splitting the bill between the people at the table */
+.sf-split {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1.5px solid var(--sf-line);
+  border-radius: 14px;
+}
+
+.sf-split-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
 .sf-orders-list {
   list-style: none;
   margin: 12px 0 0;

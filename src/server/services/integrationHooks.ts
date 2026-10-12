@@ -8,6 +8,7 @@ import type { AccessContext } from "@/server/db/scope";
 import { autoPrintKots, kickDrawerAfter } from "@/server/services/printing";
 import { queueOrderMessage } from "@/server/services/messaging";
 import { pushAggregatorStatus } from "@/server/services/aggregatorSync";
+import { pushItemAvailability } from "@/server/services/aggregatorMenu";
 
 /** New kitchen tickets: auto-print them; tell the guest the order is confirmed (if enabled). */
 export async function afterKotsCreated(ctx: AccessContext, orderId: string) {
@@ -31,4 +32,9 @@ export async function afterOrderReady(ctx: AccessContext, orderId: string) {
 /** Cash moved in / out of the drawer outside a sale (float, pay-in, pay-out). */
 export async function afterCashMovement(ctx: AccessContext, outletId: string, reason: string) {
   await kickDrawerAfter(ctx, outletId, reason);
+}
+
+/** A dish was switched on / off or marked sold out (everywhere, or at one outlet): tell the connected ordering platforms. */
+export async function afterMenuAvailabilityChanged(ctx: AccessContext, p: { menuItemId: string; outletId?: string; changeKey: string }) {
+  await pushItemAvailability(ctx, p);
 }

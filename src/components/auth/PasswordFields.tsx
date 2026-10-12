@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { ApiError, describeError } from "@/lib/api/client";
 import { PASSWORD_MIN_LENGTH } from "@/constants/password";
 
@@ -8,14 +9,40 @@ export const inputClass =
 
 export const PASSWORD_HINT = `At least ${PASSWORD_MIN_LENGTH} characters, with a letter and a number or symbol. Avoid your name or email.`;
 
-export function PasswordInput({ id, label, value, onChange, autoComplete, hint }: { id: string; label: string; value: string; onChange: (v: string) => void; autoComplete: string; hint?: string }) {
+/**
+ * Uncontrolled on purpose: the form reads the fields when it is submitted, so text typed before the page finished
+ * hydrating (a slow phone) is not lost and never leaves the button disabled (same approach as the sign-in form).
+ */
+export function PasswordInput({ id, label, autoComplete, hint }: { id: string; label: string; autoComplete: string; hint?: string }) {
   return (
     <div>
       <label htmlFor={id} className="block text-sm font-medium text-ink-700">{label}</label>
-      <input id={id} name={id} type="password" autoComplete={autoComplete} required value={value} onChange={(e) => onChange(e.target.value)} aria-describedby={hint ? `${id}-hint` : undefined} className={inputClass} />
+      <input id={id} name={id} type="password" autoComplete={autoComplete} required aria-describedby={hint ? `${id}-hint` : undefined} className={inputClass} />
       {hint && <p id={`${id}-hint`} className="mt-1 text-xs text-ink-500">{hint}</p>}
     </div>
   );
+}
+
+/**
+ * False until the page's scripts are running. A server-rendered form's submit button waits for it: a click before then would be a
+ * plain browser POST that only re-renders the page (the answer never shows), whereas text typed before then is still read at submit.
+ */
+export function useHydrated(): boolean {
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => setHydrated(true), []);
+  return hydrated;
+}
+
+/** What is in the form's fields right now, by field name. */
+export function readFields(form: HTMLFormElement, ...names: string[]): Record<string, string> {
+  const entered = new FormData(form);
+  return Object.fromEntries(names.map((n) => [n, String(entered.get(n) ?? "")]));
+}
+
+/** Focus the first named field that is empty. */
+export function focusFirstEmpty(values: Record<string, string>) {
+  const first = Object.keys(values).find((k) => !values[k].trim());
+  if (first) document.getElementById(first)?.focus();
 }
 
 export function FormAlert({ tone = "error", children }: { tone?: "error" | "success"; children: React.ReactNode }) {

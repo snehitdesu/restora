@@ -195,7 +195,7 @@ function ChargesTab({ outletId, platforms, canWrite }: { outletId: string; platf
           { key: "d", header: "Date", cell: (c) => formatDate(c.chargedOn) },
           { key: "p", header: "Platform", cell: (c) => name(c.aggregatorId) },
           { key: "k", header: "Kind", cell: (c) => humanize(c.kind) },
-          { key: "a", header: "Amount", numeric: true, cell: (c) => <span className={c.voided ? "text-ink-400 line-through" : ""}>{formatMoney(c.amount)}</span> },
+          { key: "a", header: "Amount", numeric: true, cell: (c) => <span className={c.voided ? "text-ink-500 line-through" : ""}>{formatMoney(c.amount)}</span> },
           { key: "r", header: "Reference", cell: (c) => <span className="text-xs">{c.reference ?? ""}{c.voided ? ` · void: ${c.voidReason ?? ""}` : ""}</span> },
           { key: "v", header: "", cell: (c) => (canWrite && !c.voided ? <Button size="sm" onClick={() => setVoiding(c)}>Void</Button> : c.voided ? <Badge tone="neutral">Void</Badge> : null) },
         ]} />

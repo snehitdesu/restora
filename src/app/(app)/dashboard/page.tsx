@@ -99,7 +99,7 @@ export default async function DashboardPage() {
         <section aria-label="Supporting metrics" className="grid grid-cols-2 gap-3 lg:grid-cols-3">
           {sales && <Stat tone="accent" label="Average order value" value={sales.ok ? formatMoney(sales.value.aov) : unavailable} hint="Settled orders today" />}
           {tables && <Stat tone="ok" label="Open tables" value={tables.ok ? `${availableTables} / ${tables.value.length}` : unavailable} hint="Available now" />}
-          {stockAlerts && <Stat tone={stockAlerts.ok && stockAlerts.value.length > 0 ? "warn" : "ok"} label="Low stock" value={stockAlerts.ok ? stockAlerts.value.length : unavailable} hint={has.has("purchase.view") ? <>At or below reorder level · <Link href="/procurement/reorder" className="text-brand-600 hover:underline">Open reorder</Link></> : "At or below reorder level"} />}
+          {stockAlerts && <Stat tone={stockAlerts.ok && stockAlerts.value.length > 0 ? "warn" : "ok"} label="Low stock" value={stockAlerts.ok ? stockAlerts.value.length : unavailable} hint={has.has("purchase.view") ? <>At or below reorder level · <Link href="/procurement/reorder" className="text-brand-600 underline underline-offset-2 hover:no-underline">Open reorder</Link></> : "At or below reorder level"} />}
         </section>
       )}
 

@@ -128,14 +128,6 @@ export function setLogSink(s: Sink | null): () => void {
   };
 }
 
-type Listener = (level: LogLevel, event: string, fields: Record<string, unknown>) => void;
-const listeners = new Set<Listener>();
-/** Observability hooks (metrics / alerts) see every error-level event after redaction. */
-export function onLog(l: Listener): () => void {
-  listeners.add(l);
-  return () => listeners.delete(l);
-}
-
 function pretty(rec: Record<string, unknown>): string {
   const { ts, level, msg, requestId, ...rest } = rec;
   const extra = Object.keys(rest).length ? ` ${JSON.stringify(rest)}` : "";
@@ -145,13 +137,6 @@ function pretty(rec: Record<string, unknown>): string {
 function emit(level: LogLevel, msg: string, fields: Record<string, unknown> = {}) {
   const withStack = RANK[level] >= RANK.error;
   const safe = redact(fields, withStack) as Record<string, unknown>;
-  for (const l of listeners) {
-    try {
-      l(level, msg, safe);
-    } catch {
-      /* an observer must never break logging */
-    }
-  }
   if (RANK[level] < minLevel()) return;
   const ctx = als.getStore();
   const rec: Record<string, unknown> = { ts: new Date().toISOString(), level, msg, ...(ctx?.requestId ? { requestId: ctx.requestId } : {}), ...(ctx?.userId && !safe.userId ? { userId: ctx.userId } : {}), ...safe };

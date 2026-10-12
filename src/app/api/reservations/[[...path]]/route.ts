@@ -6,6 +6,7 @@ import {
   listReservations, createReservation, confirmReservation, cancelReservation, noShowReservation, completeReservation, seatReservation, assignTable,
   listWaitlist, createWaitlistEntry, markWaitlistArrived, markWaitlistLeft, cancelWaitlistEntry, promoteWaitlistEntry,
 } from "@/server/services/reservations";
+import { notifyWaitlistEntry } from "@/server/services/waitlistNotify";
 
 export const runtime = "nodejs";
 
@@ -26,5 +27,7 @@ export const { GET, POST } = createRouter([
   { method: "POST", path: "waitlist/:id/arrived", handler: ({ ctx, params }) => markWaitlistArrived(ctx, params.id) },
   { method: "POST", path: "waitlist/:id/left", handler: ({ ctx, params }) => markWaitlistLeft(ctx, params.id) },
   { method: "POST", path: "waitlist/:id/cancel", handler: ({ ctx, params }) => cancelWaitlistEntry(ctx, params.id) },
+  // "Your table is ready" by message (answers { sent: false, reason } when no message could go: the host tells them in person).
+  { method: "POST", path: "waitlist/:id/notify", handler: ({ ctx, params, body }) => notifyWaitlistEntry(ctx, params.id, z.object({ holdMinutes: z.number().int().min(1).max(120).optional() }).parse(body ?? {})) },
   { method: "POST", path: "waitlist/:id/promote", handler: ({ ctx, params, body }) => promoteWaitlistEntry(ctx, params.id, table.parse(body).tableId) },
 ]);

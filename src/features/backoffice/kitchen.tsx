@@ -190,7 +190,7 @@ export function WorksheetScreen() {
     },
     {
       key: "var", header: "Unexplained", numeric: true,
-      cell: (r) => (r.variance === null ? <span className="text-ink-400" title="Enter the prepared portions">—</span>
+      cell: (r) => (r.variance === null ? <span className="text-ink-500" title="Enter the prepared portions">—</span>
         : <span className={r.variance > 0 ? "font-semibold text-bad-600" : r.variance < 0 ? "text-warn-700" : "text-ok-600"}>{formatQty(r.variance)}</span>),
     },
   ];
@@ -265,7 +265,7 @@ export function VarianceScreen() {
   const depts = useDepartments(outletId);
   // Date-only from/to are whole business days in the outlet's timezone (server-side).
   const q = useQuery<VarianceReport>(outletId ? "/api/analytics/consumption-variance" : null, { outletId: outletId ?? undefined, from: range.from || undefined, to: range.to || undefined, departmentId: dept || undefined });
-  const qtyCell = (v: number, unit: string | null) => (v === 0 ? <span className="text-ink-400">0</span> : `${formatQty(v)} ${unit ?? ""}`);
+  const qtyCell = (v: number, unit: string | null) => (v === 0 ? <span className="text-ink-500">0</span> : `${formatQty(v)} ${unit ?? ""}`);
   return (
     <>
       <PageHeader title="Consumption variance" subtitle="What the recipes say you used, against what actually left the shelf" />

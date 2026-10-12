@@ -116,6 +116,35 @@ describe("guest API", () => {
     expect(bill.json.data).toEqual(confirmed.json.data.bill);
   });
 
+  it("splits a bill between two phones over HTTP: the body is only the number of people, the amounts are the server's", async () => {
+    const ctx = systemContext(orgId, [outletId]);
+    const t = await prisma.restaurantTable.create({ data: { organizationId: orgId, outletId, code: "T10" } });
+    const tableToken = (await rotateTableQr(ctx, t.id)).qrToken!;
+    const placed = await call(Guest, "POST", `t/${tableToken}/orders`, { body: { items: [{ menuItemId: dish, qty: 2 }] }, origin: ORIGIN, headers: { "idempotency-key": `ga-${RUN}-s1` } });
+    const { orderId, accessKey } = placed.json.data;
+    const pay = (idem: string, body?: unknown) => call(Guest, "POST", `orders/${orderId}/payments`, { body, origin: ORIGIN, headers: { "x-order-key": accessKey, "idempotency-key": idem } });
+
+    const view = await call(Guest, "GET", `orders/${orderId}`, { headers: { "x-order-key": accessKey } });
+    expect(view.json.data.split).toEqual({ sharesPaid: 0, minParts: 2, maxParts: 12 });
+    expect(view.json.data.reorder).toEqual([expect.objectContaining({ menuItemId: dish, qty: 2 })]);
+
+    // Not a split: an amount, a single person, too many people, or no key.
+    for (const body of [{ amount: 1 }, { parts: 1 }, { parts: 13 }, { parts: "2" }, { parts: 2, amount: 1 }]) expect((await pay(`gp-${RUN}-bad`, body)).status).toBe(422);
+    expect((await call(Guest, "POST", `orders/${orderId}/payments`, { body: { parts: 2 }, origin: ORIGIN, headers: { "x-order-key": accessKey } })).status).toBe(422);
+    expect((await call(Guest, "POST", `orders/${orderId}/payments`, { body: { parts: 2 }, origin: ORIGIN, headers: { "x-order-key": "forged", "idempotency-key": `gp-${RUN}-f` } })).status).toBe(404);
+
+    const first = await pay(`gp-${RUN}-s2`, { parts: 2 });
+    expect(first.status).toBe(200);
+    expect(first.json.data).toMatchObject({ amount: "105.00", share: { parts: 2, remainingParts: 2, last: false } });
+    const done = await call(Guest, "POST", `orders/${orderId}/payments/confirm`, { body: { paymentId: first.json.data.paymentId }, origin: ORIGIN, headers: { "x-order-key": accessKey } });
+    expect(done.json.data).toMatchObject({ paymentStatus: "SUCCESS", status: "OPEN", split: { sharesPaid: 1 }, bill: { paid: "105.00", balanceDue: "105.00" } });
+
+    const second = await pay(`gp-${RUN}-s3`, { parts: 2 });
+    expect(second.json.data).toMatchObject({ amount: "105.00", share: { parts: 2, remainingParts: 1, last: true } });
+    const closed = await call(Guest, "POST", `orders/${orderId}/payments/confirm`, { body: { paymentId: second.json.data.paymentId }, origin: ORIGIN, headers: { "x-order-key": accessKey } });
+    expect(closed.json.data).toMatchObject({ paymentStatus: "SUCCESS", status: "PAID", bill: { kind: "RECEIPT", paymentStatus: "PAID", balanceDue: "0.00" } });
+  });
+
   it("limits orders per table", async () => {
     const store = getRateLimitStore();
     const k = `${RATE_POLICIES.guestOrderPerTable.name}:${token}`;

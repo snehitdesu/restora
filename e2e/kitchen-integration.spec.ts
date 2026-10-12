@@ -43,7 +43,7 @@ async function order(g: Page, token: string, dish: string, method: "CASH" | "ONL
   await g.waitForURL(/\/cart$/);
   await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await g.waitForURL(/\/checkout$/);
-  await g.getByRole("radio", { name: method === "ONLINE" ? /Pay online/ : /^Cash/ }).check();
+  await g.getByRole("radio", { name: method === "ONLINE" ? /Simulated online payment|Pay online/ : /^Cash/ }).check();
   await g.getByRole("button", { name: /^Place order/ }).click();
   await g.waitForURL(/\/o\/[^/#]+#k=/);
   const url = new URL(g.url());

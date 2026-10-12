@@ -1,17 +1,42 @@
 # RESTORA (Aharos) — Testing
 
-## Current totals (2026-10-05, Phase 9 validation)
+## Current totals (2026-10-09, end of the master program)
 | Suite | Command | Result |
 |---|---|---|
-| Unit + DB integration, SQLite | `npm test` | 884 passed, 6 skipped (PostgreSQL-only) |
-| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 862 passed, 28 skipped (SQLite/desktop-only) |
-| Browser E2E (production build) | `npm run e2e` · PostgreSQL: `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 77/77 on both |
-| Desktop E2E | `npm run desktop:build && npm run desktop:e2e` | 7/7 |
-| Packaged desktop security | `npx electron-builder --dir && npm run desktop:verify` | 23/23 |
-| Runtime (shutdown / crash recovery) | `VERIFY_DATABASE_URL=postgresql://…/<fresh db> node scripts/ops/verify-runtime.mjs` | 18/18 |
-| Contention benchmark | `scripts/ops/contention-bench.mjs` (header) | `docs/production-infrastructure.md` §7 |
-| DR drills | `scripts/ops/backup-drill.mjs`, `scripts/ops/pitr-drill.mjs` | 11/11, 7/7 |
-| Post-deploy smoke | `SMOKE_BASE=… SMOKE_EMAIL=… SMOKE_PASSWORD=… node scripts/ops/smoke-test.mjs [--write]` | 18/18 on a restored copy |
+| Unit + DB integration, SQLite | `npm test` | 162 files, 1627 passed, 8 skipped, 0 failed (2026-10-12, with `main` merged) |
+| Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 162 files (159 run, 3 skipped), 1604 passed, 31 skipped, 0 failed |
+| Browser E2E (production build), SQLite | `npm run e2e` | 133/133 (5 sign-in setups + 128 specs), CI |
+| Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) |
+| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3, CI |
+| Coders' Cafe 30-step customer / investor acceptance (fresh database, Razorpay emulator, five attack families) | `npm run e2e:acceptance` | 7 tests = steps 1-30 + final sweep, all passing (2026-10-12), CI; evidence in `docs/acceptance-coders-cafe.md` |
+| Desktop E2E + packaged-app verification | `npm run desktop:build && npm run desktop:e2e`; `npx electron-builder --dir && npm run desktop:verify` | Windows, macOS arm64 and macOS x64 in CI: build, E2E, packaging (fuses, asar integrity, upgrade from the previous release, launch attacks), DMG |
+| Backup / restore drill, load test | `node scripts/ops/backup-drill.mjs`, `node scripts/ops/load-test.mjs` | 2026-10-09 on the current schema: drill 10/10; load run 0 correctness violations (`docs/production-infrastructure.md` §7.1, §8.0). PITR drill and post-deploy smoke last run 2026-10-05 |
+
+**All of the above except the drills run in CI on every change** (`.github/workflows/ci.yml`: SQLite, PostgreSQL 16, web E2E on both,
+investor flow, desktop on Windows and both macOS architectures). The 162 Vitest files: `tests/domain` 75, `tests/ui` 32, `tests/api` 22,
+`tests/db` 9, `tests/integrations` 6, `tests/auth` 5, `tests/desktop` 4, `tests/config` 3, `tests/ops` 2, and one each in `tests/docs` (audit totals),
+`tests/e2e` (guest journey in the service layer), `tests/qa`, `tests/site`. Browser specs: `e2e/*.spec.ts` (33 files) plus
+`e2e/investor/` and `e2e/acceptance/`; desktop: `desktop/e2e/`.
+
+Where to find the tests of a group: `docs/group-delivery-map.md`. Quality gates that are tests, not documents: `e2e/quality-sweep.spec.ts`
+(ten viewports from 320 to 1920 px plus a phone held sideways: no console error, no error status, no sideways scrolling; axe WCAG 2.1 A / AA
+at a phone and a desktop width, serious or critical findings fail), `tests/db/append-only.test.ts` (the database refuses to change history),
+`tests/docs/audit-totals.test.ts` (the audit's totals match its rows).
+
+Notes for running locally:
+- The SQLite and PostgreSQL suites share one generated Prisma client: run `npx prisma generate` (SQLite) or
+  `npx prisma generate --schema prisma/postgres/schema.prisma` before switching, and never run both at once. `npm run build`
+  regenerates the SQLite client; build with `npx next build` after generating the PostgreSQL client.
+- Playwright pins a Chromium build; if the image has another one, point a throwaway config at it with
+  `use.launchOptions.executablePath` instead of changing the repository config.
+- `tests/desktop/shell-policy.test.ts` has a Windows-path test (runs on Windows only) and a POSIX twin: `sqliteUrl`
+  resolves with the host's path rules by design.
+- E2E and the demo seed use the outlet's business day (Asia/Kolkata), not the host's calendar day; the Money Desk spec
+  depends on yesterday being untouched. The demo outlets are open 11:00-23:30; `e2e/prepare-db.ts` (and the load script) open them all day so
+  guest ordering does not depend on the time the suite runs, and the storefront spec sets its own hours to test the closed state.
+- With `RATE_LIMIT_STORE=database` the counters live in `RateLimitWindow` and survive a server restart: clear that table between load runs
+  on a disposable database.
+- Tests that fill a form before the page has hydrated hold back the scripts on purpose (`LOGIN-002b`, `PWD-007`); other specs wait for hydration.
 
 PostgreSQL databases for tests must be **fresh** (create one per run): nothing in
 the test harnesses resets or force-pushes a database. The section below is the
@@ -123,6 +148,15 @@ The E2E database is only ever modified through the app, except `e2eDb()` in
 Test data is created through the real services. Exceptions: master data with
 no admin service yet (units, materials, vendors, tables) is inserted directly,
 and one export test injects a simulated DB fault to exercise the FAILED path.
+
+## Customer / investor acceptance (`npm run e2e:acceptance`)
+`playwright.acceptance.config.ts`, `e2e/acceptance/`. Its own database (`prisma/e2e-acceptance.db`, deleted and rebuilt by `prepare-db.ts` on every run: migrations,
+the Coders' Cafe dataset, the outlet's GSTIN, the Razorpay account binding, a recipe with stocked ingredients for Loaded Veg Nachos, and a second, unrelated restaurant for
+the cross-tenant checks), its own ports, the production build. One test walks the order from a phone scanning table T07 to a served, invoiced, stock-consumed,
+reported order (steps 1-25); one test per attack family follows (26 failed payment, 27 duplicate payment / webhook, 28 duplicate submission, 29 amount, 30 restaurant /
+outlet / table identifiers); a last test proves the books still hold exactly the one paid order after all of them. Every step records what it observed to
+`e2e/.evidence-acceptance/acceptance-evidence.{json,md}` (+ screenshots); CI uploads that folder as an artifact. Razorpay is the emulator, so this proves RESTORA's side
+of the contract, not Razorpay's. The guest write limit (60 a minute per address) applies to the attacks too: each simulated visitor uses its own address.
 
 ## Core transaction (Phase 2)
 | Command | Covers |

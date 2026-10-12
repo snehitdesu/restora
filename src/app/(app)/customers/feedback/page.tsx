@@ -1,5 +1,5 @@
 import { gated } from "@/lib/auth/gate";
-import { FeedbackScreen } from "@/features/backoffice/crm";
+import { FeedbackScreen } from "@/features/backoffice/growthFeedback";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Guest feedback — RESTORA" };

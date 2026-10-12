@@ -16,7 +16,7 @@ import { systemContext } from "@/server/auth/context";
 import { type AccessContext, ForbiddenError, assertOutletAccess } from "@/server/db/scope";
 import { getPOSProvider, type POSProvider, type NormalizedOrder } from "@/integrations/pos";
 import { consumeInventoryForOrder } from "@/server/services/orderConsumption";
-import { awardOrderLoyaltyTx } from "@/server/services/loyalty";
+import { afterOrderPaidTx } from "@/server/services/growthHooks";
 import { calculateOrderTotals } from "@/server/services/orders";
 import { authenticateWebhook, outletMismatch, rejectForTenant, tenantEventId } from "@/server/services/webhookTenant";
 import { D, money } from "@/domain/money";
@@ -230,7 +230,7 @@ export async function processPOSOrder(
     // Consume inventory once (idempotent).
     if (normalized.settled) {
       await consumeInventoryForOrder(tx, ctx, order.id);
-      await awardOrderLoyaltyTx(tx, ctx, order.id); // no-op without a customer
+      await afterOrderPaidTx(tx, ctx, order.id); // loyalty, referral reward, feedback request (no-ops without a customer)
     }
 
     return { orderId: order.id, duplicate: false };
