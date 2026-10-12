@@ -91,6 +91,7 @@ Mock providers are refused in production unless `ALLOW_MOCK_PROVIDERS=true`
 | Adapter contract (signatures, amounts, pending, retries, refunds, settlements, no secret leakage) | `tests/integrations/razorpay.test.ts` (recorded Razorpay response shapes) | automated |
 | Full transaction on the real menu with every failure path | `tests/domain/coders-cafe-razorpay.test.ts` (adapter → service → webhook → order/KOT/invoice/analytics; Razorpay emulated over HTTP) | automated |
 | Browser: owner / manager / chef / customer, Razorpay success, decline + retry, cash | `npm run e2e:investor` (production build; Razorpay emulated; Checkout script stubbed) | automated |
+| The same transaction as a 30-step acceptance, fresh database, with the shortcut-to-paid, failed-payment, duplicate-webhook, amount and identifier attacks | `npm run e2e:acceptance`; evidence in `docs/acceptance-coders-cafe.md` | automated |
 | Against Razorpay's real test mode | `npx tsx scripts/razorpay/sandbox-check.ts` with `rzp_test_` keys, then one manual payment (below) | **requires your test keys** |
 
 ### Test-mode run (with real `rzp_test_` keys)

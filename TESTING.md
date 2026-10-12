@@ -8,6 +8,7 @@
 | Browser E2E (production build), SQLite | `npm run e2e` | 133/133 (5 sign-in setups + 128 specs), CI |
 | Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) |
 | Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3, CI |
+| Coders' Cafe 30-step customer / investor acceptance (fresh database, Razorpay emulator, five attack families) | `npm run e2e:acceptance` | 7 tests = steps 1-30 + final sweep, all passing (2026-10-12), CI; evidence in `docs/acceptance-coders-cafe.md` |
 | Desktop E2E + packaged-app verification | `npm run desktop:build && npm run desktop:e2e`; `npx electron-builder --dir && npm run desktop:verify` | Windows, macOS arm64 and macOS x64 in CI: build, E2E, packaging (fuses, asar integrity, upgrade from the previous release, launch attacks), DMG |
 | Backup / restore drill, load test | `node scripts/ops/backup-drill.mjs`, `node scripts/ops/load-test.mjs` | 2026-10-09 on the current schema: drill 10/10; load run 0 correctness violations (`docs/production-infrastructure.md` §7.1, §8.0). PITR drill and post-deploy smoke last run 2026-10-05 |
 
@@ -147,6 +148,15 @@ The E2E database is only ever modified through the app, except `e2eDb()` in
 Test data is created through the real services. Exceptions: master data with
 no admin service yet (units, materials, vendors, tables) is inserted directly,
 and one export test injects a simulated DB fault to exercise the FAILED path.
+
+## Customer / investor acceptance (`npm run e2e:acceptance`)
+`playwright.acceptance.config.ts`, `e2e/acceptance/`. Its own database (`prisma/e2e-acceptance.db`, deleted and rebuilt by `prepare-db.ts` on every run: migrations,
+the Coders' Cafe dataset, the outlet's GSTIN, the Razorpay account binding, a recipe with stocked ingredients for Loaded Veg Nachos, and a second, unrelated restaurant for
+the cross-tenant checks), its own ports, the production build. One test walks the order from a phone scanning table T07 to a served, invoiced, stock-consumed,
+reported order (steps 1-25); one test per attack family follows (26 failed payment, 27 duplicate payment / webhook, 28 duplicate submission, 29 amount, 30 restaurant /
+outlet / table identifiers); a last test proves the books still hold exactly the one paid order after all of them. Every step records what it observed to
+`e2e/.evidence-acceptance/acceptance-evidence.{json,md}` (+ screenshots); CI uploads that folder as an artifact. Razorpay is the emulator, so this proves RESTORA's side
+of the contract, not Razorpay's. The guest write limit (60 a minute per address) applies to the attacks too: each simulated visitor uses its own address.
 
 ## Core transaction (Phase 2)
 | Command | Covers |

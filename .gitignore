@@ -39,6 +39,11 @@ npm-debug.log*
 /e2e/.auth/
 /e2e/.results/
 /e2e/.report/
+/e2e/.results-investor/
+/e2e/.report-investor/
+/e2e/.results-acceptance/
+/e2e/.report-acceptance/
+/e2e/.evidence-acceptance/
 
 # stray local databases / TypeScript incremental build info
 /*.db

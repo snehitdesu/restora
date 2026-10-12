@@ -26,6 +26,7 @@
     "e2e": "npm run build && playwright test",
     "e2e:test": "playwright test",
     "e2e:investor": "playwright test -c playwright.investor.config.ts",
+    "e2e:acceptance": "playwright test -c playwright.acceptance.config.ts",
     "desktop:build": "node desktop/scripts/build.mjs",
     "desktop:start": "electron build/desktop/app",
     "desktop:pack": "node desktop/scripts/build.mjs && electron-builder --dir --publish never",

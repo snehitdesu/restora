@@ -16,8 +16,8 @@ const E2E_DB_URL = process.env.E2E_DATABASE_URL ?? `file:${path.join(process.cwd
 
 export default defineConfig({
   testDir: "e2e",
-  // The investor acceptance suite has its own server, database and Razorpay setup (playwright.investor.config.ts).
-  testIgnore: ["investor/**"],
+  // The investor and acceptance suites have their own server, database and Razorpay setup (playwright.investor.config.ts, playwright.acceptance.config.ts).
+  testIgnore: ["investor/**", "acceptance/**"],
   // One shared server + database: run serially for deterministic state.
   workers: 1,
   fullyParallel: false,

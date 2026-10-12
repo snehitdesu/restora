@@ -42,6 +42,7 @@ npm run typecheck && npm run lint
 npm test                         # full suite on SQLite
 TEST_DATABASE_URL=postgresql://…/fresh_db npm run test:pg   # same suite on PostgreSQL
 npm run e2e                      # production build + browser E2E (Playwright), one seeded SQLite database
+npm run e2e:acceptance           # Coders' Cafe 30-step customer / investor acceptance on a fresh database (after a build)
 E2E_DATABASE_URL=postgresql://…/fresh_empty_db npm run e2e:test   # the same specs on PostgreSQL (build with `npx next build` after generating the PostgreSQL client)
 npm run desktop:build && npm run desktop:e2e                # desktop app
 ```

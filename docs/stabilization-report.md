@@ -143,6 +143,8 @@ shutdown fix, on this host and on the previous release).
 |---|---|---|
 | CI (SQLite E2E) | forgot-password button stayed disabled when the address was typed before the page hydrated (a slow phone gets this too) | read the fields on submit like the sign-in form; `PWD-007` |
 | CI (PostgreSQL E2E, next run) | with that fix the button was enabled before hydration, so `PWD-005` clicked it early: a plain browser POST that re-rendered the page and never showed the answer (the old disabled state had hidden this race) | the forgot / change-password buttons wait until the page is interactive (`useHydrated`), not until something is typed; `PWD-007` asserts the early state |
+| CI (PostgreSQL E2E, run 27 on `060be98`) | `PWD-005` failed again, on PostgreSQL only, with no request reaching the server. Root cause (reproduced locally by delaying the navigation): the test typed the address while the sign-in page, which also has an "Email" field, was still on screen during the client-side navigation; the forgot-password page then arrived empty and answered "Enter the email address of your account". A **test race**, not a product defect, and a different one from the early click above | the test waits for the URL and the page heading before typing (`0293a42`) |
+| Customer acceptance test, step 20 (2026-10-12) | **Product defect**: nothing in the application ever wrote `Kot.acceptedAt` / `startedAt` / `readyAt` / `servedAt`. `updateKOTStatus` changed only `status`. The measured prep times and late-ticket alerts (MB-07, MB-08) read `readyAt`, so on real tickets the report was empty; their tests had set the stamps by hand, so they passed | `updateKOTStatus` stamps the time of the status reached (once; a repeated tap changes nothing); `P4` in `tests/domain/prep-times.test.ts` drives the real taps (fails without the fix) and the acceptance test asserts all four stamps |
 | CI (PostgreSQL E2E job) | `npm run build` regenerated the SQLite client under the PostgreSQL build | the job builds with `npx next build` |
 | Desktop tests | the desktop migrator could not run migrations containing triggers | statement splitter understands `CREATE TRIGGER … BEGIN … END` |
 | Test run | the Coders' Cafe reset was refused by the append-only triggers | reset runs inside `withAppendOnlyGuardsOff` (disposable-database wipe only) |
@@ -170,6 +172,13 @@ instance, code signing, more than one application instance, a network between cl
 | Printer hardware | MB-09 |
 | Hosting (Mumbai, HTTPS), a hosted PostgreSQL instance, scheduled backups | XC-01, XC-07, SE-16 |
 | Code-signing certificates | SE-14 |
+
+### 8.4a Customer / investor acceptance test (2026-10-12)
+
+A 30-step walk on a fresh database (customer on a phone at table T07 to a served, invoiced, stock-consumed, reported order, then five attack families) is now a CI step
+(`npm run e2e:acceptance`). 7 tests, 31 of 31 recorded observations PASS; the exact order, payment, KOT and invoice ids, every step's evidence and the conditions
+(Razorpay emulated, GSTIN and a recipe set up by the test) are in `docs/acceptance-coders-cafe.md`. It found one product defect (kitchen ticket times never written,
+see 8.2) and two mistakes in its own first versions. It is evidence for RESTORA's side of the payment contract, not for Razorpay's.
 
 ### 8.5 Remaining, by kind
 

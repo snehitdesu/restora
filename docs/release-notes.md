@@ -15,6 +15,9 @@ message, measured dish prep times and late-ticket alerts, upsell hints, universa
 sales-per-staff reports, invitation e-mail. Guests: order the same again and split the bill between phones. Alerts: purchase approval, reservation, low stock
 and overdue vendor bills. Reports: sales by cuisine tag.
 
+**Fixed.** Kitchen tickets now record when they were accepted, started, made ready and served; before, nothing wrote those times, so the dish prep-time report and the
+late-ticket alerts had nothing to measure on real tickets.
+
 **Changed.** `AuditLog` and `InventoryLedger` are now refused by the database itself (triggers). Rate limits can be shared between instances. Password forms keep
 what was typed before the page finished loading. Graceful shutdown keeps answering 503 briefly after the drain instead of resetting unread connections. Vendor-due
 alerts go to people who can pay vendors (`vendor.pay`), not to everyone with `finance.view`. The browser E2E suites on SQLite and PostgreSQL are CI release gates.

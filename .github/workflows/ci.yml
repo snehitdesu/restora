@@ -11,7 +11,8 @@
 #              runners), plus the RESTORA.app + DMG for that arch
 #   web-e2e  — the web release gate: every browser spec (e2e/*.spec.ts) against the
 #              production build in real Chromium on SQLite, then the investor
-#              acceptance suite (Coders' Cafe, Razorpay emulator)
+#              acceptance suite and the 30-step customer acceptance (Coders' Cafe,
+#              Razorpay emulator, evidence uploaded as an artifact)
 #   web-e2e-postgres — the same browser specs on PostgreSQL 16 (production path):
 #              fresh database, committed migrations, demo seed, `next start`
 #
@@ -167,6 +168,16 @@ jobs:
         run: npm run e2e
       - name: "E2E: investor acceptance (real Coders' Cafe menu, Razorpay emulator, cash) on the same build"
         run: npm run e2e:investor
+      - name: "E2E: Coders' Cafe 30-step customer acceptance (fresh database, Razorpay emulator, five attack families) on the same build"
+        run: npm run e2e:acceptance
+      - name: Keep the acceptance evidence (order, payment, KOT and invoice ids, every step's observations, screenshots)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-evidence-coders-cafe
+          path: e2e/.evidence-acceptance
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Keep the report and traces when a spec fails
         if: failure()
         uses: actions/upload-artifact@v4
@@ -177,6 +188,8 @@ jobs:
             e2e/.results
             e2e/.report-investor
             e2e/.results-investor
+            e2e/.report-acceptance
+            e2e/.results-acceptance
           retention-days: 7
           if-no-files-found: ignore
 
