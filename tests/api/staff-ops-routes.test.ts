@@ -11,13 +11,15 @@ import * as Reports from "@/app/api/reports/[[...path]]/route";
 import { createShift } from "@/server/services/staff";
 import { makeEnv, connectMock, uniq, type Env } from "../domain/growthSupport";
 import { call, sessionFor } from "./routeSupport";
+import { localDate } from "@/domain/time";
 
 const PW = "StaffOps#Pass123";
 let env: Env;
 let shiftId: string;
 let cashierId: string;
 const s: Record<string, string> = {};
-const day = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+// The outlet's business day (the test organization is Asia/Kolkata), as the service computes it.
+const day = (n: number) => localDate(new Date(Date.now() + n * 86_400_000), "Asia/Kolkata");
 
 async function ownerSession() {
   const u = await prisma.user.create({ data: { organizationId: env.orgId, email: `owner-${uniq()}@so.test`, name: "Owner", passwordHash: await hashPassword(PW) } });

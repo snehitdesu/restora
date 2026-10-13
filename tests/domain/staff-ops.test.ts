@@ -15,12 +15,15 @@ import { settleAfterCommit } from "@/server/services/afterCommit";
 import { getReport } from "@/server/services/reports";
 import { transitionTask } from "@/server/services/staff";
 import { makeEnv, member, uniq, type Env } from "./growthSupport";
+import { localDate } from "@/domain/time";
 
 let env: Env;
 let manager: AccessContext;
 let outletManagerB: AccessContext;
 const people: Record<string, { id: string; ctx: AccessContext }> = {};
-const today = () => new Date().toISOString().slice(0, 10);
+// The outlet's business day (the test organization is Asia/Kolkata), as the service computes it:
+// a UTC date here fails every night between 18:30 and 24:00 UTC.
+const today = () => localDate(new Date(), "Asia/Kolkata");
 const addDays = (day: string, n: number) => new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
 async function person(name: string, role = "CAPTAIN", outletId: string | null = env.outletA) {
