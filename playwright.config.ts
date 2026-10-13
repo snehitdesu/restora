@@ -48,6 +48,10 @@ export default defineConfig({
     // ALLOW_MOCK_PROVIDERS: this disposable, non-public deployment uses the
     // development payment gateway (guest QR online payments, e2e/qr-transaction.spec.ts).
     // PUBLIC_BASE_URL: campaigns refuse to send without the address behind every unsubscribe link (e2e/growth.spec.ts).
-    env: { DATABASE_URL: E2E_DB_URL, NODE_ENV: "production", AUTH_SECRET: "e2e-test-auth-secret-not-a-real-production-value-0123456789", ALLOW_MOCK_PROVIDERS: "true", PUBLIC_BASE_URL: `http://localhost:${PORT}` },
+    // SESSION_IDLE_TIMEOUT_SECONDS: the specs reuse the sessions auth.setup signs in once, and the accessibility /
+    // responsive sweeps alone can run past the 15-minute default on a slower machine, after which every later spec
+    // using a stored session gets 401 (measured locally: 16 failures after a 34-minute run). Idle expiry itself is
+    // tested in tests/auth/session-security.test.ts.
+    env: { DATABASE_URL: E2E_DB_URL, NODE_ENV: "production", AUTH_SECRET: "e2e-test-auth-secret-not-a-real-production-value-0123456789", ALLOW_MOCK_PROVIDERS: "true", PUBLIC_BASE_URL: `http://localhost:${PORT}`, SESSION_IDLE_TIMEOUT_SECONDS: "14400" },
   },
 });

@@ -208,7 +208,8 @@ test.describe("QR guest transaction", () => {
     await gw.getByRole("button", { name: "Approve payment" }).click();
     await expect(a.getByText(/Your part is paid\. ₹42\.00 is still due on this bill\./)).toBeVisible();
     let o = await order(page.request, orderId);
-    expect(o.status).toBe("OPEN"); // one part is not the whole bill
+    // One part is not the whole bill. (Ordered "pay at the counter", so it went to the kitchen when it was placed.)
+    expect(o.status).toBe("SENT");
     expect(o.payments!.map((x) => [x.method, x.status, Number(x.amount)])).toEqual([["ONLINE", "SUCCESS", 42]]);
 
     // ---- Phone B opens the same order (the link a friend shares) and pays what is left.
