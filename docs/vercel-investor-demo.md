@@ -93,16 +93,24 @@ Startup **refuses** `rzp_live_` when `ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT`
 | `RAZORPAY_KEY_ID` live (`rzp_live_`) | Real charges |
 | `DEMO_DATABASE_CONFIRMED` / `DEMO_STAFF_PASSWORD` | CLI seed only, never the app |
 
-### Shared sign-in limits (needs one approved migration)
+### Shared rate limits (needs the approved migrations)
 
 Each Vercel instance has its own memory, so with the default
-`RATE_LIMIT_STORE=memory` the sign-in and password-reset limits are counted per
-instance (startup logs a warning). The code from 2026-10-13 adds migration
-`20261017100000_rate_limit_buckets` (one new empty table, additive). Once that
-migration has been applied to the demo database **with approval** (read-only
-`prisma migrate status` first), set `RATE_LIMIT_STORE=database`. Until then,
-deploying this code is safe: the store is not used, housekeeping skips the
-missing table, and `/api/health/ready` reports `pending` for the migration.
+`RATE_LIMIT_STORE=memory` the limits are counted per instance (startup logs a
+warning on PostgreSQL). The shared store is the `RateLimitWindow` table, created
+by `20261021100000_append_only_rate_limit` (which also adds the append-only
+triggers on `AuditLog` and `InventoryLedger`). This release needs five
+PostgreSQL migrations the hosted demo does not have yet:
+`20261017100000_growth_crm`, `20261018100000_floor_ops`,
+`20261019100000_purchasing_rules_expiry`, `20261020100000_staff_ops`,
+`20261021100000_append_only_rate_limit`. Apply them **with approval**, after a
+backup and a read-only `prisma migrate status`; then set
+`RATE_LIMIT_STORE=database`. The growth, floor and staff features need their
+tables, so deploy the code only after the migrations (see §4).
+
+(`20261017100000_rate_limit_buckets`, written on 2026-10-13 before the branches
+were reconciled, was superseded by `RateLimitWindow` and is not part of this
+release; it was never applied to the hosted database.)
 
 ### Optional / unused on Vercel demo
 
@@ -150,7 +158,7 @@ local `Demo@12345` value):
 1. Confirm §2 variables are on the Vercel project.
 2. Deploy the current git revision (no force).
 3. Smoke: `GET /api/health/live` → 200; `GET /api/health/ready` → 200
-   (migrations include `20261016100000_integrations_control_room`).
+   (migrations include `20261021100000_append_only_rate_limit`).
 4. Sign in as owner with the unique password from §3.
 5. Open Tables → a T01–T10 QR → guest menu (Coders' Cafe, unchanged) → cart →
    order → Razorpay test-mode payment (no live charge) → kitchen KDS.

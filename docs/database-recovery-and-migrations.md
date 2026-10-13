@@ -154,3 +154,43 @@ answers QR checkout with HTTP 500 (`OrderItem.unitCost` missing).
   separate approval and a read-only `prisma migrate status` first
   (`docs/vercel-investor-demo.md` §3). Until then the code runs unchanged with
   `RATE_LIMIT_STORE=memory`.
+
+## 7. Reconciliation with the Groups 1-9 branch (2026-10-13, evening)
+
+The release branch `release/coders-cafe-2026-10-13` merges this work with
+`origin/claude/serene-ramanujan-rmvdss`. That branch already had a shared
+rate-limit store (`RateLimitWindow`, migration
+`20261021100000_append_only_rate_limit`) and its own `20261017100000_growth_crm`.
+The local `20261017100000_rate_limit_buckets` (table `RateLimitBucket`) was
+superseded and is not in the release. Verified (read-only, on copies) where it
+was recorded:
+
+| Database | `rate_limit_buckets` recorded? | What the release does |
+|---|---|---|
+| `prisma/dev.db` | **yes** (23 rows, last = it; the table is empty) | needs the 5 new migrations; one orphan to clear (below) |
+| `prisma/test.db` | yes | disposable, rebuilt by every test run |
+| `prisma/e2e.db` | no | disposable |
+| installed desktop app (`%APPDATA%\Aharos\data\aharos.db`) | no (17 migrations, through `fk_indexes`) | upgrades normally on start |
+| hosted demo (PostgreSQL) | never applied (no deploy of this code) | see `docs/vercel-investor-demo.md` |
+
+Rehearsed on a byte copy of `prisma/dev.db` with the release's migrations:
+`prisma migrate deploy` applied the five new migrations (exit 0); `migrate status`
+then still lists the orphan "not found locally". The optional cleanup, also on
+the copy:
+
+```sql
+DROP TABLE "RateLimitBucket";   -- 0 rows
+DELETE FROM _prisma_migrations WHERE migration_name = '20261017100000_rate_limit_buckets';
+```
+
+gave `integrity_check` ok, 0 foreign-key violations, "Database schema is up to
+date", and `prisma migrate diff` (database vs `schema.prisma`): no difference.
+Running this on the real `prisma/dev.db` needs the user's approval and the §5
+backup routine first. Without the cleanup the app still works (readiness only
+needs the newest migration), but `migrate status` keeps reporting the orphan.
+
+**Desktop:** the desktop migrator refuses a database that records a migration
+the app does not know. No installed copy here has it, but desktop builds made
+from the pre-reconciliation tree (scratchpad artifacts, never distributed)
+contain it: do not distribute those builds.
+
