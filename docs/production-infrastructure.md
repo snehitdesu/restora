@@ -33,7 +33,9 @@ risky-but-legal setting. Messages name the variable only, never its value.
 | `DATABASE_URL` | yes | PostgreSQL URL of the **app role**; size the pool explicitly: `?connection_limit=10&pool_timeout=10` (§6.2). SQLite → warning. |
 | `AUTH_SECRET` | yes | ≥ 32 chars, not the dev placeholder. |
 | `SESSION_TTL_SECONDS`, `SESSION_IDLE_TIMEOUT_SECONDS`, `REAUTH_TTL_SECONDS` | no | positive integers. |
-| `RATE_LIMIT_DISABLED` | no | must not be `true`. `RATE_LIMIT_STORE` must be `memory`. |
+| `RATE_LIMIT_DISABLED` | no | must not be `true`. |
+| `RATE_LIMIT_STORE` | no (default `memory`) | `memory` (one app instance) or `database` (several instances, e.g. Vercel). `database` counts the sign-in / password / step-up limits in the `RateLimitBucket` table (migration `20261017100000_rate_limit_buckets`; keys are SHA-256 hashes, no email or IP stored) and falls back to per-process counting, logged, if that table is unavailable. Any other value refuses to boot. On Vercel without `database` → warning. |
+| `GUEST_MAX_UNPAID_ORDERS_PER_TABLE` | no (default 6) | Integer 1–50. How many unpaid QR orders one table may have while paying at the counter (an abuse guard for a public QR link, not a documented restaurant rule: the owner should confirm the number). |
 | `TRUSTED_PROXY_HOPS` | no (default 1) | number of reverse proxies appending to `X-Forwarded-For`. |
 | `PAYMENT_PROVIDER`, `POS_PROVIDER`, `WHATSAPP_PROVIDER`, `EMAIL_PROVIDER`, `GOOGLE_SHEETS_PROVIDER` | no | `mock` refused unless `ALLOW_MOCK_PROVIDERS=true` (non-public test deployments only; warning at every boot). |
 | `PAYMENT_WEBHOOK_SECRET`, `AGGREGATOR_WEBHOOK_SECRET`, `PETPOOJA_WEBHOOK_SECRET`, `CRON_SECRET` | per integration | dev placeholders refused. |
@@ -42,7 +44,8 @@ risky-but-legal setting. Messages name the variable only, never its value.
 | `EXPORT_DIR`, `EXPORT_RUNNER`, `EXPORT_RETENTION_HOURS` | recommended | `EXPORT_DIR` unset → warning (temp dir). |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | when `PAYMENT_PROVIDER=razorpay` | all three required; key id must be `rzp_test_…` / `rzp_live_…`; a test key under production → warning (staging only). Guide: `docs/payments-razorpay.md`. |
 | `RAZORPAY_API_BASE` | never in production | test emulator only; refused unless `ALLOW_MOCK_PROVIDERS=true` (the adapter then reports MOCK). |
-| `PUBLIC_BASE_URL` | for provider callbacks and printed table QR codes | must be https. Unset → the Tables screen's QR uses the address it is viewed on and warns (a desktop / localhost address is unreachable from guests' phones). |
+| `PUBLIC_BASE_URL` | for provider callbacks, printed table QR codes, and password-reset links | must be https. Unset → the Tables screen's QR uses the address it is viewed on and warns (a desktop / localhost address is unreachable from guests' phones). Also required when Resend password-reset email is configured. |
+| `RESEND_API_KEY`, `RESEND_FROM` | together, for password-reset email | Optional. Both plus `PUBLIC_BASE_URL` must be set, or neither Resend variable. `RESEND_API_KEY` is a Resend key (`re_…`). `RESEND_FROM` is a verified sender (`Name <addr@host>` or a bare address). Unset → no reset email is sent (warning); a manager issues the link. A partial setup refuses to boot. |
 | `LOG_LEVEL` (`debug|info|warn|error`), `LOG_FORMAT` (`json|pretty`), `SLOW_REQUEST_MS` | no | validated. |
 | `METRICS_TOKEN` | recommended | ≥ 24 chars; unset → `/api/health/metrics` returns 404 (warning). |
 | `ALERT_WEBHOOK_URL`, `ALERT_THROTTLE_SECONDS`, `ALERT_5XX_THRESHOLD`, `ALERT_AUTH_FAILURE_THRESHOLD`, `ALERT_WEBHOOK_FAILURE_THRESHOLD` | recommended | https URL; unset → alerts only in the log (warning). |
@@ -59,7 +62,7 @@ backups), `BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY`, `PG_BIN_DIR`.
 | Endpoint | Meaning | Auth |
 |---|---|---|
 | `GET /api/health/live` | process + event loop answer (no I/O) — liveness probe | none |
-| `GET /api/health/ready` | not draining, DB answers within `READINESS_DB_TIMEOUT_MS`, schema contains this build's newest migration (`EXPECTED_MIGRATION`, currently `20261011100000_fk_indexes`) with nothing failed/half-applied — readiness probe | none |
+| `GET /api/health/ready` | not draining, DB answers within `READINESS_DB_TIMEOUT_MS`, schema contains this build's newest migration (`EXPECTED_MIGRATION`, currently `20261017100000_rate_limit_buckets`) with nothing failed/half-applied — readiness probe | none |
 | `GET /api/health` | legacy combined check (200 / 503) | none |
 | `GET /api/health/metrics` | Prometheus text | `Bearer METRICS_TOKEN` |
 

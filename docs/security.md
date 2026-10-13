@@ -17,16 +17,18 @@ webhook, an operator with database access.
 |---|---|---|
 | Passwords | bcrypt (cost 10); policy ≥ 10 chars, letter + digit/symbol, ≤ 72 bytes (no silent bcrypt truncation), common / email / name refused | `tests/auth/password-lifecycle.test.ts`, `PWD-*` E2E |
 | Sessions | opaque random token in an `httpOnly`, `SameSite=Lax`, `Secure` (production) cookie; only its SHA-256 is stored; 7-day absolute, 15-min idle (configurable); revoked on sign-out, password change (other sessions), deactivation | `tests/auth/session-security.test.ts`, `SESSION-001/002`, `ADMIN-001` |
-| Sign-in throttling | per email (10 / 15 min) and per client IP (50 / min); client IP from the right of `X-Forwarded-For` by `TRUSTED_PROXY_HOPS` (not spoofable from the left) | rate-limit tests, `SESSION-003` |
-| Enumeration | identical error and timing (dummy bcrypt) for unknown accounts; forgot-password answers the same for known / unknown emails | `SESSION-003`, `PWD-005` |
+| Sign-in throttling | per email (10 / 15 min) and per client IP (50 / min); client IP from the right of `X-Forwarded-For` by `TRUSTED_PROXY_HOPS` (not spoofable from the left). `RATE_LIMIT_STORE=database` counts these (and the password / step-up limits) in the shared `RateLimitBucket` table for multi-instance hosting (one atomic upsert per hit, SHA-256 keys, per-process fallback on a database error) | rate-limit tests, `SESSION-003`, `tests/auth/auth-matrix.test.ts` (40 concurrent hits counted exactly; window reset; no raw email stored; fallback) |
+| Enumeration | identical error and timing (dummy bcrypt) for unknown accounts; forgot-password answers the same for known / unknown emails, and does the lookup, link and email **after** the response (`runAfterResponse` → Next `after()`), so response time does not depend on the account or on the mail provider | `SESSION-003`, `PWD-005`, password-lifecycle "answers before the lookup and send finish" |
 | Step-up re-authentication | owner / settings / refunds / voids / restore require a fresh password confirmation (short-lived grant, never adds a privilege) | `REAUTH-*`, `tests/auth/reauth-client.test.ts` |
 | Account provisioning | first owner only on an empty database (`bootstrap:owner`); staff get single-use setup links (72 h); reset links 1 h; links hashed at rest | `PWD-001…004` |
 | Open redirect | post-login destination restricted to same-site paths | `SESSION-004` |
+| Password-reset delivery | Resend only when `RESEND_API_KEY` + `RESEND_FROM` + `PUBLIC_BASE_URL` are all set; a link counts as delivered only when Resend returns an email id; a failed send retires only its own link. Without email the page says so ("not set up … ask your manager") instead of promising a link | `tests/auth/password-reset-email.test.ts`, `PWD-005` |
+| Session replacement | signing in ends the session cookie the browser already held (same or another account), not just overwrites it | `tests/auth/auth-matrix.test.ts` |
 
 ## 3. Authorization and tenant isolation
 - Role-based permissions (`src/server/auth/rbac.ts`) per outlet and org-wide; every service checks `assertCan` + outlet access server-side (the UI is never the only guard).
 - Organization isolation on every read (scoped queries) and write (`assertOutletInOrg` for client-supplied outlet ids).
-- Verified: `RBAC-001…004`, `MOB-003`, `INT-003`, route tests (`tests/api/*`), cross-org / cross-outlet tests in every domain suite, the Phase 12 day simulation (kitchen / captain cannot take payments, cashier cannot refund / cancel, outlet manager cannot move stock to another outlet).
+- Verified: `tests/auth/auth-matrix.test.ts` (2026-10-13): 10 roles × 15 protected endpoints over the real route handlers (allowed exactly when the role holds the endpoint's permission, else 403), outlet-scoped roles refused at a sister outlet, another organization's owner refused (404) or shown nothing, and six session states (none / forged / revoked / expired / idle / deactivated user) refused with 401 on every endpoint; a role removed mid-session is gone on the next request. Also `RBAC-001…004`, `MOB-003`, `INT-003`, route tests (`tests/api/*`), cross-org / cross-outlet tests in every domain suite, the Phase 12 day simulation (kitchen / captain cannot take payments, cashier cannot refund / cancel, outlet manager cannot move stock to another outlet).
 - Not implemented: PostgreSQL Row-Level Security (defence in depth; plan in `docs/postgres-rls.md`). Required before hosting a second, untrusted organization in the same database.
 
 ## 4. Web application
@@ -59,6 +61,13 @@ webhook, an operator with database access.
 | No RLS | a code-level tenant bug could cross organizations | single-organization deployments for V1; RLS before multi-tenant hosting |
 | `script-src 'unsafe-inline'` | weaker XSS containment | nonce-based CSP |
 | No MFA | stolen password = account | TOTP for owner / manager (post-V1) |
-| In-memory rate limits | per instance only | single instance (V1); shared store before scaling out |
+| In-memory rate limits on multi-instance hosting | the default `memory` store counts per instance | `RATE_LIMIT_STORE=database` (2026-10-13) after migration `20261017100000_rate_limit_buckets`; startup warns on Vercel without it. Guest throttles stay per instance by design |
 | Unsigned Windows installer | SmartScreen warnings; no publisher identity | code-signing certificate (external) |
 | No customer data erasure workflow | privacy requests handled manually | `docs/data-retention.md` |
+
+## 9. Audit 2026-10-13 (authentication completion pass)
+
+Fixed: forgot-password timing side channel and false "a link will be sent" promise when no email is configured; failed reset send retiring a concurrently issued newer link; previous browser session left alive at sign-in; per-instance-only sign-in limits on Vercel (shared store added, opt-in).
+Checked, no defect: opaque hashed sessions; idle and absolute expiry; revocation on logout / password change / reset / deactivation; RBAC rebuilt from the database on every request (no stale roles); step-up re-authentication; Origin checks; body caps; guest QR tokens (unguessable, one message for unknown / disabled / foreign); guest order access keys (HMAC, in the URL fragment, never sent to the server in the URL); desktop shell (sandbox, context isolation, IPC sender checks, navigation and permission denial, debug switches refused, single instance).
+Low, documented: `GET /api/customers/:id` answers 200 with `data: null` for another organization's (or a missing) id instead of 404; no data or existence oracle.
+Dependencies (`npm audit --omit=dev`, 2026-10-13): 6 advisories (5 high, 1 moderate), all in build / CLI tooling (Next's bundled PostCSS, source-map-js, the Prisma CLI's deepmerge-ts), not reachable from requests at runtime. Dev-only: 2 critical in vitest / tinypool (test runner, never shipped).

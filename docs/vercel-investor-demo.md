@@ -40,11 +40,10 @@ housekeeping runs on the same daily tick, not hourly.
 
 ## 1. Create (do not migrate yet)
 
-1. A **new** PostgreSQL 16 database (Vercel Postgres / Neon / similar). Empty.
+1. The current demo database is already a PostgreSQL 16 database with Coders' Cafe loaded. It is not empty. Do not create a second one, and do not treat this one as disposable without a new explicit decision.
 2. A Vercel project pointed at this repository. Framework: Next.js. Build:
    `npm run build` (already in `package.json`). Install: `npm ci`.
-3. Do **not** click Deploy until environment variables in §2 are set **and**
-   §3 has been approved and run.
+3. Do **not** click Deploy until the environment variables in §2 are set on that project. §3 must not be run again against the current database.
 
 ## 2. Environment variable names
 
@@ -94,14 +93,29 @@ Startup **refuses** `rzp_live_` when `ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT`
 | `RAZORPAY_KEY_ID` live (`rzp_live_`) | Real charges |
 | `DEMO_DATABASE_CONFIRMED` / `DEMO_STAFF_PASSWORD` | CLI seed only, never the app |
 
+### Shared sign-in limits (needs one approved migration)
+
+Each Vercel instance has its own memory, so with the default
+`RATE_LIMIT_STORE=memory` the sign-in and password-reset limits are counted per
+instance (startup logs a warning). The code from 2026-10-13 adds migration
+`20261017100000_rate_limit_buckets` (one new empty table, additive). Once that
+migration has been applied to the demo database **with approval** (read-only
+`prisma migrate status` first), set `RATE_LIMIT_STORE=database`. Until then,
+deploying this code is safe: the store is not used, housekeeping skips the
+missing table, and `/api/health/ready` reports `pending` for the migration.
+
 ### Optional / unused on Vercel demo
 
 `EXPORT_DIR`, `METRICS_TOKEN`, `ALERT_WEBHOOK_URL`, `BACKUP_*`, `WORKER_DISABLED`
 (already implied by `VERCEL=1`).
 
-## 3. Database (approval required — do not run yet)
+## 3. Database (do not run against the current demo)
 
-Against the **confirmed empty demo database only**:
+The current demo database already has Coders' Cafe: one organization, one outlet, four staff users, the starter menu, and tables T01–T10. Orders and payments were empty at the last read-only check. `npm run db:seed:cafe` without `--reset` sees that organization and changes nothing. `--reset` deletes that organization and every row scoped to it, then rebuilds users, passwords, menu, and QR tokens. Do not run `--reset`. Do not run `db:push`, `db:reset`, `setup`, or `prisma/seed.ts`.
+
+`prisma migrate status` last reported 12 migrations and an up-to-date schema. Do not run `npm run db:pg:deploy` unless a later read-only status shows a pending migration.
+
+The commands below are only for a **new, empty, disposable** database that you have explicitly approved. They are not the next step for the current demo.
 
 ```bash
 # 1. migrations (owner role). NEVER prisma db push / migrate reset / migrate dev.

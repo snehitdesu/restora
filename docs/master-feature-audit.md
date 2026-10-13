@@ -285,7 +285,7 @@ See the bottom of this file ("Totals") for counts. The proposal's **core back of
 |---|---|---|---|---|---|---|---|---|
 | SE-01 | S09 p21 | Authentication, opaque sessions, idle timeout, step-up re-auth | COMPLETE | `src/server/auth/*` | none | P0 | | auth tests, session E2E |
 | SE-02 | | CSRF / origin checks on every state change | COMPLETE | `assertSameOrigin` | none | P0 | | same-origin tests |
-| SE-03 | | Rate limiting (login, webhooks, guest, reports) | PARTIAL | in-memory limiter | shared store for multi-instance | P0 | hosting | security tests |
+| SE-03 | | Rate limiting (login, webhooks, guest, reports) | PRODUCTION VERIFICATION REQUIRED | in-memory limiter; shared `RATE_LIMIT_STORE=database` store for the account-protecting limits (2026-10-13) | apply migration `20261017100000_rate_limit_buckets` to the hosted database (approval) and set `RATE_LIMIT_STORE=database` there | P0 | hosting | security tests, `tests/auth/auth-matrix.test.ts` (SQLite + PostgreSQL) |
 | SE-04 | | Webhook signatures + idempotency | COMPLETE | HMAC, `WebhookEvent` unique | none | P0 | | webhook tests |
 | SE-05 | | Payment never trusted from the client; refunds capped at captured | COMPLETE | `svc/payment.ts` | none | P0 | | idempotency-refunds, payment-balance tests |
 | SE-06 | | Audit log with before / after | COMPLETE | `AuditLog`, `/audit` | none | P0 | | |
