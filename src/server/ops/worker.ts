@@ -16,7 +16,7 @@
  *     twice; the delivery's idempotency key prevents duplicates at creation.
  *  2. Stuck work (crash between "row written" and "outcome recorded", older
  *     than OUTBOX_STUCK_SECONDS, default 300):
- *       - PENDING AGGREGATOR_STATUS -> FAILED + due now (a status push is safe to repeat);
+ *       - PENDING AGGREGATOR_STATUS / AGGREGATOR_ITEM -> FAILED + due now (a status or on/off push is safe to repeat);
  *       - PENDING MESSAGE -> FAILED, NOT auto-retried (it may have reached the
  *         provider: re-sending could text the guest twice) — manual retry;
  *       - PENDING ACCOUNTING_SYNC -> FAILED; Zoho Books is retried (the journal is looked up
@@ -38,9 +38,10 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
 import { purgeExpiredSessions } from "@/server/auth/session";
-import { purgeRateLimitBuckets } from "@/server/api/rateLimit";
 import { deliverMessage } from "@/server/services/messaging";
 import { pushAggregatorStatus } from "@/server/services/aggregatorSync";
+import { deliverItemAvailability } from "@/server/services/aggregatorMenu";
+import { sweepRateLimitWindows } from "@/server/api/rateLimitDb";
 import { deliverAccountingSync, recoverInterruptedAccountingSync } from "@/server/services/accountingSync";
 import { failStaleExportJobs } from "@/server/services/exportJobs";
 import { webhookClaimStaleMs } from "@/server/services/pos";
@@ -68,7 +69,7 @@ export type TickResult = { retried: number; sent: number; givenUp: number; stuck
 /** 1. Re-send due deliveries. */
 export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Date()) {
   const due = await db.integrationDelivery.findMany({
-    where: { status: "FAILED", kind: { in: ["MESSAGE", "AGGREGATOR_STATUS", "ACCOUNTING_SYNC"] }, nextAttemptAt: { lte: now } },
+    where: { status: "FAILED", kind: { in: ["MESSAGE", "AGGREGATOR_STATUS", "AGGREGATOR_ITEM", "ACCOUNTING_SYNC"] }, nextAttemptAt: { lte: now } },
     orderBy: { nextAttemptAt: "asc" },
     take: BATCH,
   });
@@ -87,6 +88,7 @@ export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Da
       let after: { status: string; attempts: number; maxAttempts: number; nextAttemptAt: Date | null } | null = null;
       if (d.kind === "MESSAGE") after = await deliverMessage(ctx, d.id, db);
       else if (d.kind === "ACCOUNTING_SYNC") after = await deliverAccountingSync(d.id, db);
+      else if (d.kind === "AGGREGATOR_ITEM") after = await deliverItemAvailability(ctx, d.id, db);
       else if (d.sourceId) after = await pushAggregatorStatus(ctx, d.sourceId, (JSON.parse(d.payload) as { status: "READY" }).status, db);
       if (after && (after.status === "SENT" || after.status === "DELIVERED")) sent++;
       else if (after && after.status === "FAILED" && !after.nextAttemptAt) {
@@ -112,7 +114,7 @@ export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Da
 export async function recoverStuckWork(db: PrismaClient = prisma, now = new Date()) {
   const cutoff = new Date(now.getTime() - stuckMs());
   const aggregator = await db.integrationDelivery.updateMany({
-    where: { status: "PENDING", kind: "AGGREGATOR_STATUS", updatedAt: { lt: cutoff } },
+    where: { status: "PENDING", kind: { in: ["AGGREGATOR_STATUS", "AGGREGATOR_ITEM"] }, updatedAt: { lt: cutoff } },
     data: { status: "FAILED", lastError: INTERRUPTED_MESSAGE, nextAttemptAt: now },
   });
   const messages = await db.integrationDelivery.updateMany({
@@ -139,12 +141,12 @@ export async function housekeeping(db: PrismaClient = prisma, now = new Date()) 
   const tokens = await db.passwordToken.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600_000) } } });
   // The table only matters with RATE_LIMIT_STORE=database; a database that has not
   // applied its migration yet must not stop the rest of housekeeping.
-  const rateLimitBuckets = await purgeRateLimitBuckets(db, now.getTime()).catch((e) => {
-    log.warn("rate-limit buckets were not purged", { event: "housekeeping_rate_limit_skipped", error: e instanceof Error ? e.name : "Error" });
+  const rateLimitWindows = await sweepRateLimitWindows(db, now.getTime()).catch((e) => {
+    log.warn("rate-limit windows were not swept", { event: "housekeeping_rate_limit_skipped", error: e instanceof Error ? e.name : "Error" });
     return 0;
   });
-  if (sessions || tokens.count || rateLimitBuckets) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count, rateLimitBuckets });
-  return { sessions, passwordTokens: tokens.count, rateLimitBuckets };
+  if (sessions || tokens.count || rateLimitWindows) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count, rateLimitWindows });
+  return { sessions, passwordTokens: tokens.count };
 }
 
 export type BackupStatus = { lastSuccessAt?: string; lastFailureAt?: string; lastError?: string; lastFile?: string };

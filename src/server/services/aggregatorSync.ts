@@ -20,6 +20,7 @@ import { refundPayment } from "@/server/services/payment";
 import { D, money, num } from "@/domain/money";
 import { getAggregatorProvider, type AggregatorOutboundStatus, type AggregatorProvider } from "@/integrations/aggregator";
 import { nextAttemptAt, safeMessage } from "@/integrations/http";
+import { ProviderUnavailableError } from "@/integrations/policy";
 import { log } from "@/server/observability/log";
 import { inc } from "@/server/observability/metrics";
 
@@ -57,7 +58,17 @@ export async function cancelAggregatorOrder(ctx: AccessContext, input: { aggrega
 export async function pushAggregatorStatus(ctx: AccessContext, orderId: string, status: AggregatorOutboundStatus, db: PrismaClient = prisma, provider?: AggregatorProvider) {
   const link = await db.aggregatorOrder.findFirst({ where: { organizationId: ctx.organizationId, orderId }, include: { aggregator: true } });
   if (!link) return null;
-  const adapter = provider ?? getAggregatorProvider(link.aggregator.name.toLowerCase());
+  let adapter: AggregatorProvider;
+  try {
+    adapter = provider ?? getAggregatorProvider(link.aggregator.name.toLowerCase());
+  } catch (e) {
+    // No real adapter is available (the mock is refused in production): say so, never record a push that did not happen.
+    // A missing adapter must not break the kitchen flow that triggers the push (order READY).
+    if (!(e instanceof ProviderUnavailableError)) throw e;
+    inc("restora_integration_failures_total", { kind: "aggregator_status" });
+    log.warn("aggregator status not pushed: no adapter available", { event: "integration_failed", kind: "AGGREGATOR_STATUS", aggregatorId: link.aggregatorId, error: e });
+    return null;
+  }
   const key = `agg:${link.aggregatorId}:${link.externalId}:${status}`;
   let d = await db.integrationDelivery.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: key } } });
   if (d && (d.status === "SENT" || d.status === "DELIVERED")) return d;

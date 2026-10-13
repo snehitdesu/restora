@@ -16,6 +16,7 @@ import { verifyPassword } from "@/server/auth/password";
 import { loginWithPassword } from "@/server/auth/login";
 import { buildAccessContext } from "@/server/auth/context";
 import { ConflictError, ValidationError } from "@/server/db/scope";
+import { withAppendOnlyGuardsOff } from "@/server/db/appendOnly";
 
 const require = createRequire(import.meta.url);
 const prismaCli = require.resolve("prisma/build/index.js");
@@ -45,12 +46,15 @@ async function counts(c: PrismaClient) {
 const EMPTY = { orgs: 0, outlets: 0, users: 0, memberships: 0, audits: 0 };
 
 async function wipe(c: PrismaClient) {
-  await c.auditLog.deleteMany();
-  await c.membership.deleteMany();
-  await c.session.deleteMany();
-  await c.user.deleteMany();
-  await c.outlet.deleteMany();
-  await c.organization.deleteMany();
+  // A disposable fixture database: the audit trail is append-only, so the guard is lifted for the wipe.
+  await withAppendOnlyGuardsOff(c, async () => {
+    await c.auditLog.deleteMany();
+    await c.membership.deleteMany();
+    await c.session.deleteMany();
+    await c.user.deleteMany();
+    await c.outlet.deleteMany();
+    await c.organization.deleteMany();
+  });
 }
 
 describe.skipIf(pg)("bootstrapOwner service", () => {

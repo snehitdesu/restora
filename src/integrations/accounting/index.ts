@@ -102,7 +102,6 @@ export class ZohoBooksAccountingFormat implements AccountingFormat {
 }
 
 export const ACCOUNTING_FORMATS = ["generic", "tally", "zoho"] as const;
-export type AccountingFormatName = (typeof ACCOUNTING_FORMATS)[number];
 
 export function getAccountingFormat(name?: string): AccountingFormat {
   const n = (name ?? "generic").toLowerCase();

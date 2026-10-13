@@ -5,7 +5,7 @@
  * whose key is reused on retry; a running order's round, marking READY food
  * served and requesting the bill; the offline banner; the manager's today /
  * live / alerts tabs (insights explained) and staff tab gated by permission;
- * the alert centre marking a notification read.
+ * the alert centre marking a notification read; the owner's purchase-order approval queue.
  */
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -25,8 +25,8 @@ const menu = [
   { id: "m1", name: "Dosa", description: null, price: 100, taxPct: 5, station: "KITCHEN", isVeg: true, active: true, soldOut: false, categoryId: "c1", category: { id: "c1", name: "Tiffin", sortOrder: 1 }, variants: [], modifierGroups: [], effectivePrice: 100, offered: true, effectiveSoldOut: false },
 ];
 const board = (tables: unknown[]) => ({ tables, counts: { all: tables.length, available: 1, occupied: tables.length - 1, kitchen: 1, ready: 0, payment: 0 } });
-const freeTable = { id: "t1", code: "T1", capacity: 4, floor: null, status: "AVAILABLE", order: null, tags: ["available"] };
-const busyTable = { id: "t2", code: "T2", capacity: 2, floor: null, status: "OCCUPIED", tags: ["occupied", "kitchen"], order: { id: "o2", status: "SENT", total: 210, paid: 0, due: 210, items: 2, unsent: 0, kots: { live: 1, ready: 0, served: 0, cancelled: 0 }, payment: "UNPAID", openedAt: now, elapsedMinutes: 12, openedBy: "Asha" } };
+const freeTable = { id: "t1", code: "T1", capacity: 4, floor: null, status: "AVAILABLE", order: null, others: [], tags: ["available"] };
+const busyTable = { id: "t2", code: "T2", capacity: 2, floor: null, status: "OCCUPIED", others: [], tags: ["occupied", "kitchen"], order: { id: "o2", status: "SENT", total: 210, paid: 0, due: 210, items: 2, unsent: 0, kots: { live: 1, ready: 0, served: 0, cancelled: 0 }, payment: "UNPAID", openedAt: now, elapsedMinutes: 12, openedBy: "Asha" } };
 
 describe("captain app", () => {
   it("board + filters; a new table's first send is ONE keyed POST, and a retry reuses the key", async () => {
@@ -133,7 +133,7 @@ describe("manager app", () => {
       "GET /api/notifications": () => [{ id: "n1", type: "BILL_REQUESTED", title: "Bill requested · table T2", body: "Order #ABC · ₹210.00", readAt: null, createdAt: now }],
       "POST /api/notifications/n1/read": () => ({}),
     };
-    const view = renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={{ staff: false, captain: true, pos: true, kitchen: true }} />, ["reports.view", "finance.view"]);
+    const view = renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={{ staff: false, captain: true, pos: true, kitchen: true, approve: false }} />, ["reports.view", "finance.view"]);
     expect(await screen.findByText("₹4,780.00")).toBeInTheDocument();
     expect(screen.getByText("₹860.00")).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "Payment methods" })).toHaveTextContent("₹1,895.00");
@@ -160,7 +160,7 @@ describe("manager app", () => {
         { id: "u2", email: "c@x", name: "Chetan", phone: null, active: true, lastLoginAt: null, memberships: [{ id: "m2", role: "CAPTAIN", outletId: OUT_A }] },
       ], nextCursor: null }),
     };
-    renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={{ staff: true, captain: true, pos: true, kitchen: true }} />, ["reports.view", "staff.manage"]);
+    renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={{ staff: true, captain: true, pos: true, kitchen: true, approve: false }} />, ["reports.view", "staff.manage"]);
     await userEvent.click(await screen.findByRole("button", { name: /Staff/ }));
     const list = await screen.findByRole("list", { name: "Staff members" });
     const me = within(list).getByText("Asha").closest("li")!;
@@ -169,5 +169,72 @@ describe("manager app", () => {
     const other = within(list).getByText("Chetan").closest("li")!;
     expect(within(other).getByRole("button", { name: "Deactivate" })).toBeInTheDocument();
     expect(gets("/api/staff")[0].query.get("outletId")).toBe(OUT_A);
+  });
+});
+
+describe("manager app: purchase orders to approve (MB-05)", () => {
+  const queue = (rows: Array<Record<string, unknown>>) => ({ ...summary, approvals: { pendingPurchaseOrders: rows.length, purchaseOrders: rows } });
+  const row = (id: string, number: string, vendor: string, total: number) => ({ id, number, vendor, total, lines: 3, raisedAt: now, expectedDate: null, notes: null });
+  const perms = { staff: false, captain: true, pos: true, kitchen: true, approve: true };
+
+  it("the tab appears only with the approval right, shows the waiting count, and lists vendor, amount and items", async () => {
+    state.routes = { "GET /api/mobile/manager": () => queue([row("p1", "PO-0007", "Fresh Farms", 4200.5), row("p2", "PO-0008", "Dairy Co", 900)]), "GET /api/notifications/unread-count": () => ({ unread: 0 }) };
+    const view = renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={perms} />, ["reports.view", "purchase.approve", "purchase.create"]);
+    const tab = await screen.findByRole("button", { name: /Approvals/ });
+    expect(within(tab).getByLabelText("2 waiting for approval")).toBeInTheDocument();
+    await userEvent.click(tab);
+    const list = await screen.findByRole("list", { name: "Purchase orders waiting" });
+    expect(screen.getByText(/2 purchase orders waiting for approval/)).toBeInTheDocument();
+    expect(within(list).getByTestId("approval-PO-0007")).toHaveTextContent("Fresh Farms");
+    expect(within(list).getByTestId("approval-PO-0007")).toHaveTextContent("₹4,200.50");
+    expect(within(list).getByTestId("approval-PO-0007")).toHaveTextContent("3 items");
+    expect(within(list).getByRole("link", { name: "Open PO-0007" })).toHaveAttribute("href", "/procurement/purchase-orders/p1");
+    view.unmount();
+
+    renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={{ ...perms, approve: false }} />, ["reports.view"]);
+    await screen.findByText("₹4,780.00");
+    expect(screen.queryByRole("button", { name: /Approvals/ })).toBeNull();
+  });
+
+  it("Approve asks first, then sends the ordinary PO transition and refreshes the queue", async () => {
+    let approved = false;
+    state.routes = {
+      "GET /api/mobile/manager": () => queue(approved ? [] : [row("p1", "PO-0007", "Fresh Farms", 4200.5)]),
+      "GET /api/notifications/unread-count": () => ({ unread: 0 }),
+      "POST /api/procurement/purchase-orders/p1/transition": () => { approved = true; return { id: "p1", status: "APPROVED" }; },
+    };
+    renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={perms} />, ["reports.view", "purchase.approve", "purchase.create"]);
+    await userEvent.click(await screen.findByRole("button", { name: /Approvals/ }));
+    const card = await screen.findByTestId("approval-PO-0007");
+    await userEvent.click(within(card).getByRole("button", { name: "Approve" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(/₹4,200.50 to Fresh Farms/);
+    expect(posts()).toHaveLength(0); // nothing is sent until the owner confirms
+    await userEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]).toMatchObject({ path: "/api/procurement/purchase-orders/p1/transition", body: { to: "APPROVED" } });
+    await waitFor(() => expect(screen.queryByTestId("approval-PO-0007")).toBeNull());
+    expect(screen.getByText("Nothing is waiting for you.")).toBeInTheDocument();
+  });
+
+  it("Reject cancels the order and is offered only to someone who can raise orders; an error stays on the card", async () => {
+    state.routes = {
+      "GET /api/mobile/manager": () => queue([row("p1", "PO-0007", "Fresh Farms", 100)]),
+      "GET /api/notifications/unread-count": () => ({ unread: 0 }),
+      "POST /api/procurement/purchase-orders/p1/transition": (c) => (c.body.to === "CANCELLED" ? fail(409, "ConflictError", "Cannot move purchase order from APPROVED to CANCELLED") : {}),
+    };
+    const { unmount } = renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={perms} />, ["reports.view", "purchase.approve"]);
+    await userEvent.click(await screen.findByRole("button", { name: /Approvals/ }));
+    expect(within(await screen.findByTestId("approval-PO-0007")).queryByRole("button", { name: "Reject" })).toBeNull();
+    unmount();
+
+    renderAs(<ManagerApp outletId={OUT_A} outletName="Andheri" perms={perms} />, ["reports.view", "purchase.approve", "purchase.create"]);
+    await userEvent.click(await screen.findByRole("button", { name: /Approvals/ }));
+    await userEvent.click(within(await screen.findByTestId("approval-PO-0007")).getByRole("button", { name: "Reject" }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Reject" }));
+    await waitFor(() => expect(posts()[0].body).toEqual({ to: "CANCELLED" }));
+    expect(await within(dialog).findByText(/Cannot move purchase order/)).toBeInTheDocument();
+    expect(screen.getByTestId("approval-PO-0007")).toBeInTheDocument(); // still there: the server said no
   });
 });

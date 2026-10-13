@@ -1,5 +1,7 @@
 # Group 3 implementation map: kitchen production, money desk, daily operations
 
+> Design record written before the group was built. Where it says something "does not exist" or is a "draft", it describes that moment, not the repository today: current state is in `docs/master-feature-audit.md` and `docs/stabilization-report.md`.
+
 Written 2026-10-08 before any Group 3 code, from a read of the services, schema,
 routes, screens and tests listed below. Proposal references are printed page
 numbers of the Yeswant Sai proposal.

@@ -29,7 +29,7 @@ const onPostgres = () => /^postgres(ql)?:/.test(process.env.DATABASE_URL ?? "");
  * predicate lock, no extra connection; a rolled-back order may leave a gap.
  * SQLite serializes writers, so max + 1 is safe and stays gap-free there.
  */
-async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
+export async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
   if (onPostgres()) {
     const [row] = await tx.$queryRaw<{ n: number }[]>`SELECT nextval('"kot_number_seq"')::int AS n`;
     return Number(row.n);
@@ -74,6 +74,7 @@ export async function createKOTsForOrder(tx: Tx, ctx: AccessContext, orderId: st
   return created;
 }
 
+/** The KOT column that records when a ticket reached a status (transitions are sequential, so each is stamped once). */
 /**
  * Lifecycle stamp written by the transition that reaches each state. KOT_TRANSITIONS
  * is linear (NEW -> ACCEPTED -> PREPARING -> READY -> SERVED), so each stamp has
@@ -111,6 +112,7 @@ export async function updateKOTStatus(ctx: AccessContext, kotId: string, to: KOT
     if (!canTransition(KOT_TRANSITIONS, kot.status as KOTStatus, to)) {
       throw new ValidationError(`Cannot move KOT from ${kot.status} to ${to}`);
     }
+    // The moment each stage was reached: what the measured prep times and the late-ticket alerts are built from.
     const stamp = KOT_STAMP[to];
     const moved = await tx.kot.updateMany({
       where: { id: kotId, status: kot.status },
@@ -177,7 +179,7 @@ export async function listKOTs(db: PrismaClient, ctx: AccessContext, filter: { o
     include: {
       station: { select: { id: true, name: true } },
       order: { select: { id: true, channel: true, source: true, covers: true, notes: true, createdAt: true, table: { select: { code: true } } } },
-      items: { include: { orderItem: { select: { notes: true, modifiers: { select: { name: true } } } } } },
+      items: { include: { orderItem: { select: { menuItemId: true, notes: true, modifiers: { select: { name: true } } } } } },
     },
   });
   return rows.reverse(); // the board reads oldest first
@@ -188,9 +190,6 @@ export async function listStations(db: PrismaClient, ctx: AccessContext, outletI
   assertCan(ctx, "kot.view", outletId);
   return db.kitchenStation.findMany({ where: { organizationId: ctx.organizationId, outletId, active: true }, orderBy: { name: "asc" }, select: { id: true, name: true, kind: true } });
 }
-
-/** KDS is the kitchen's view of the same lifecycle. */
-export const updateKDSStatus = updateKOTStatus;
 
 export async function routeKOTToStation(ctx: AccessContext, kotId: string, stationId: string, db: Client = prisma) {
   const kot = await db.kot.findUnique({ where: { id: kotId } });

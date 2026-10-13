@@ -16,7 +16,7 @@ import { request } from "@/lib/api/client";
 import { cartItemCount, cartReducer, emptyCart, lineKey, type CartAction, type CartLine, type CartState } from "@/features/pos/cart";
 import { estimateTotals } from "@/features/pos/estimate";
 import type { MenuItemDTO } from "@/features/pos/types";
-import { loadCart, saveCart } from "@/features/guest/session";
+import { loadCart, loadCoupon, saveCart, saveCoupon } from "@/features/guest/session";
 import { brandFor, type Brand } from "@/features/guest/brand";
 
 export type GuestMenuData = {
@@ -84,6 +84,9 @@ type StorefrontValue = {
   cart: CartState;
   /** True once the saved cart was restored on this device (avoid flashing an empty cart). */
   cartReady: boolean;
+  /** A coupon code the guest entered (the server prices it; it is only sent with the quote and the order). */
+  couponCode: string | null;
+  setCouponCode: (code: string | null) => void;
   dispatch: (a: StoreAction) => void;
   count: number;
   estimate: ReturnType<typeof estimateTotals>;
@@ -100,6 +103,8 @@ type StorefrontValue = {
   /** The server's last quote, shared by the cart and checkout pages (use useServerQuote). */
   quoteState: QuoteState;
   runQuote: () => Promise<void>;
+  /** The phone typed at checkout, for a coupon's per-guest rules (only sent with a coupon code). */
+  setQuotePhone: (phone: string | undefined) => void;
   dismissRepriced: () => void;
 };
 
@@ -117,6 +122,7 @@ export function StorefrontProvider({ token, initial, children }: { token: string
   const [data, setData] = useState(initial);
   const [cart, dispatch] = useReducer(storeReducer, undefined, () => emptyCart("DINE_IN"));
   const [cartReady, setCartReady] = useState(false);
+  const [couponCode, setCouponState] = useState<string | null>(null);
   const [sheet, setSheet] = useState<SheetState>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [online, setOnline] = useState(true);
@@ -127,7 +133,12 @@ export function StorefrontProvider({ token, initial, children }: { token: string
   // Restore this device's cart after hydration (sessionStorage is not available on the server).
   useEffect(() => {
     dispatch({ type: "load", state: loadCart(token) });
+    setCouponState(loadCoupon(token));
     setCartReady(true);
+  }, [token]);
+  const setCouponCode = useCallback((code: string | null) => {
+    setCouponState(code);
+    saveCoupon(token, code);
   }, [token]);
   useEffect(() => {
     if (cartReady) saveCart(token, cart);
@@ -202,11 +213,19 @@ export function StorefrontProvider({ token, initial, children }: { token: string
 
   // The server quote lives here, not in each page, so cart → checkout → cart does not
   // re-price an unchanged cart (the order is priced again by the server when placed).
+  // It covers the coupon too: the code (and, with a code, the phone its per-guest rules
+  // need) is part of the request and of the signature an answer is reused for.
   const [quoteState, setQuoteState] = useState<QuoteState>({ quote: null, loading: false, error: null, repriced: [] });
   const quoteSeq = useRef(0);
+  const offer = useRef<{ couponCode: string | null; phone?: string }>({ couponCode });
+  offer.current = { ...offer.current, couponCode };
+  const setQuotePhone = useCallback((phone: string | undefined) => {
+    offer.current = { ...offer.current, phone };
+  }, []);
   const runQuote = useCallback(async () => {
     const lines = cartLines.current;
-    const sig = JSON.stringify(itemsOf(lines));
+    const { couponCode: code, phone: ph } = offer.current;
+    const sig = quoteSignature(lines, code, ph);
     const mine = ++quoteSeq.current;
     if (!lines.length) {
       setQuoteState((s) => ({ ...s, quote: null, loading: false }));
@@ -214,7 +233,7 @@ export function StorefrontProvider({ token, initial, children }: { token: string
     }
     setQuoteState((s) => ({ ...s, loading: true }));
     try {
-      const q = await request<Quote>(`/api/qr/t/${encodeURIComponent(token)}/quote`, { method: "POST", body: { items: itemsOf(lines) } });
+      const q = await request<Quote>(`/api/qr/t/${encodeURIComponent(token)}/quote`, { method: "POST", body: { items: itemsOf(lines), ...(code ? { couponCode: code, ...(ph ? { phone: ph } : {}) } : {}) } });
       if (mine !== quoteSeq.current) return;
       const changes: Array<{ key: string; unitPrice: number; modifiersPerUnit: number; taxPct: number }> = [];
       const names: string[] = [];
@@ -230,7 +249,7 @@ export function StorefrontProvider({ token, initial, children }: { token: string
         }
       });
       if (changes.length) dispatch({ type: "reprice", prices: changes });
-      // Re-pricing does not change the signature (it is items / sizes / add-ons / quantities only).
+      // Re-pricing does not change the signature (items / sizes / add-ons / quantities / coupon only).
       setQuoteState((s) => ({ quote: { ...q, sig, at: Date.now() }, loading: false, error: null, repriced: names.length ? names : s.repriced }));
     } catch (e) {
       if (mine !== quoteSeq.current) return;
@@ -246,6 +265,8 @@ export function StorefrontProvider({ token, initial, children }: { token: string
     base,
     cart,
     cartReady,
+    couponCode,
+    setCouponCode,
     dispatch,
     count: cartItemCount(cart),
     estimate: estimateTotals(cart.lines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }))),
@@ -260,6 +281,7 @@ export function StorefrontProvider({ token, initial, children }: { token: string
     online,
     quoteState,
     runQuote,
+    setQuotePhone,
     dismissRepriced,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -270,9 +292,19 @@ export function StorefrontProvider({ token, initial, children }: { token: string
 export type QuoteLine =
   | { index: number; ok: true; menuItemId: string; name: string; unitPrice: string; modifiers: Array<{ name: string; priceDelta: string }>; modifiersPerUnit: string; taxPct: string; qty: number; lineTotal: string }
   | { index: number; ok: false; menuItemId: string; reason: string };
-export type Quote = { lines: QuoteLine[]; subtotal: string; tax: string; taxes: Array<{ ratePct: string; amount: string }>; total: string; allAvailable: boolean; ordering: { open: boolean; message: string | null } };
+export type QuoteCoupon = { ok: true; code: string; name: string; discount: string } | { ok: false; message: string };
+export type Quote = {
+  lines: QuoteLine[]; subtotal: string; tax: string; taxes: Array<{ ratePct: string; amount: string }>; total: string; allAvailable: boolean; ordering: { open: boolean; message: string | null };
+  /** Present when a code was sent: what it is worth, or why not (in words a guest may see). */
+  coupon?: QuoteCoupon;
+  /** Total discount already taken off `total` ("0.00" without a coupon). */
+  discount?: string;
+  /** `total` without the coupon: what the order is priced at when placed (checkout's expectedTotal). */
+  totalBeforeDiscount?: string;
+};
 
 const itemsOf = (lines: CartLine[]) => lines.map((l) => ({ menuItemId: l.menuItemId, variantId: l.variantId, modifierOptionIds: l.modifierOptionIds.length ? l.modifierOptionIds : undefined, qty: l.qty }));
+const quoteSignature = (lines: CartLine[], couponCode: string | null, phone: string | undefined) => JSON.stringify([itemsOf(lines), couponCode, phone ?? null]);
 
 /** How long the cart and checkout pages reuse the server's answer for an unchanged cart. */
 export const QUOTE_REUSE_MS = 30_000;
@@ -283,17 +315,20 @@ export const QUOTE_REUSE_MS = 30_000;
  * cart. When the restaurant changed a price, the cart line takes the server's
  * price and `repriced` lists what changed so the page can say so.
  */
-export function useServerQuote() {
-  const { cart, cartReady, quoteState, runQuote, dismissRepriced } = useStorefront();
+export function useServerQuote(opts: { phone?: string } = {}) {
+  const { cart, cartReady, couponCode, quoteState, runQuote, setQuotePhone, dismissRepriced } = useStorefront();
   const { quote, loading, error, repriced } = quoteState;
-  const signature = JSON.stringify(itemsOf(cart.lines));
+  // The phone only matters to a coupon (first-order / per-guest rules): without one, typing it must not re-price the cart.
+  const phone = couponCode ? opts.phone || undefined : undefined;
+  setQuotePhone(phone);
+  const signature = quoteSignature(cart.lines, couponCode, phone);
   const opened = useRef(false);
 
   useEffect(() => {
     if (!cartReady) return;
     const first = !opened.current;
     opened.current = true;
-    // Coming from the cart (or back): the provider already holds the answer for this exact cart.
+    // Coming from the cart (or back): the provider already holds the answer for this exact cart and coupon.
     if (quote && quote.sig === signature && Date.now() - quote.at < QUOTE_REUSE_MS) return;
     const id = window.setTimeout(() => void runQuote(), first ? 0 : 250);
     return () => window.clearTimeout(id);

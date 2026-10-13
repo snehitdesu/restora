@@ -43,6 +43,40 @@ test.describe("authentication", () => {
     await expect(page).toHaveURL(/\/login\?next=%2Fdashboard/);
   });
 
+  test("LOGIN-002b typing before the page hydrates is kept, and an early submit never puts credentials in the URL", async ({ page }) => {
+    // Slow device: hold back the scripts so the form is on screen but not yet interactive. This is
+    // what a slow CI runner does by itself (found as an intermittent desktop E2E login failure).
+    await page.route("**/_next/static/**/*.js", async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue();
+    });
+    await page.goto("/login?next=%2Fpos", { waitUntil: "commit" });
+    await page.getByLabel("Email").fill(ROLES.manager);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.waitForLoadState("load");
+    await page.unroute("**/_next/static/**/*.js");
+    // After hydration the typed text is still there and signing in uses it.
+    await expect(page.getByLabel("Email")).toHaveValue(ROLES.manager);
+    await page.waitForFunction(() => typeof (window as unknown as { next?: unknown }).next === "object");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await expect(page).toHaveURL(/\/pos$/);
+
+    // Submitting before hydration: the browser posts the form; nothing sensitive reaches the address bar.
+    await page.context().clearCookies();
+    await page.route("**/_next/static/**/*.js", async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue();
+    });
+    await page.goto("/login", { waitUntil: "commit" });
+    await page.getByLabel("Email").fill(ROLES.manager);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.waitForLoadState("load");
+    expect(page.url()).not.toContain(PASSWORD);
+    expect(page.url()).not.toContain("password=");
+    expect(new URL(page.url()).search).toBe("");
+  });
+
   test("LOGIN-003 signed-out /pos redirects to login", async ({ page }) => {
     await page.goto("/pos");
     await expect(page).toHaveURL(/\/login\?next=%2Fpos$/);

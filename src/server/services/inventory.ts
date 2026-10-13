@@ -56,6 +56,8 @@ export type LedgerEntryInput = {
   /** Unique idempotency key for external/business events. */
   sourceRef?: string;
   batchNo?: string;
+  /** FSSAI lot code printed on the pack (traceability). */
+  fssaiLot?: string;
   expiryDate?: Date;
   note?: string;
   correctionOfId?: string;
@@ -104,6 +106,7 @@ export async function appendLedger(tx: Tx, ctx: AccessContext, input: LedgerEntr
       sourceId: input.sourceId ?? null,
       sourceRef: input.sourceRef ?? null,
       batchNo: input.batchNo ?? null,
+      fssaiLot: input.fssaiLot ?? null,
       expiryDate: input.expiryDate ?? null,
       note: input.note ?? null,
       correctionOfId: input.correctionOfId ?? null,
@@ -293,82 +296,6 @@ export function recordSaleConsumption(ctx: AccessContext, input: ConsumptionInpu
   });
 }
 
-export type IssueInput = {
-  outletId: string;
-  materialId: string;
-  quantity: number | string;
-  fromDepartmentId?: string;
-  /** The department receiving the stock: an issue moves stock, it is not consumption. */
-  toDepartmentId: string;
-  unitId?: string;
-  sourceId?: string;
-  sourceRef?: string;
-  note?: string;
-};
-
-/** One-line department move (OUT of the source, IN to the destination, same cost). */
-export function recordIssue(ctx: AccessContext, input: IssueInput, db: Client = prisma) {
-  requirePermission(ctx, "inventory.issue", input.outletId);
-  positiveQty.parse(input.quantity);
-  if (!input.toDepartmentId || input.toDepartmentId === input.fromDepartmentId) throw new ValidationError("Choose a different department receiving the stock");
-  return runInTx(db, async (tx) => {
-    const rate = await getAvgCost(tx, ctx, input.outletId, input.materialId);
-    const common = { outletId: input.outletId, materialId: input.materialId, unitId: input.unitId, magnitude: input.quantity, rate, txnType: "ISSUE" as const, sourceType: "ISSUE" as const, sourceId: input.sourceId, note: input.note };
-    const row = await appendLedger(tx, ctx, { ...common, departmentId: input.fromDepartmentId, direction: "OUT", sourceRef: input.sourceRef });
-    await appendLedger(tx, ctx, { ...common, departmentId: input.toDepartmentId, direction: "IN", revalue: false, sourceRef: input.sourceRef ? `${input.sourceRef}:in` : undefined });
-    await writeAudit(tx, ctx, { action: "INVENTORY_MOVEMENT", entityType: "InventoryLedger", entityId: row.id, outletId: input.outletId, after: { txnType: "ISSUE" } });
-    return row;
-  });
-}
-
-export type TransferInput = {
-  fromOutletId: string;
-  toOutletId: string;
-  materialId: string;
-  quantity: number | string;
-  unitId?: string;
-  sourceId?: string;
-  /** base ref; TRANSFER_OUT/IN get suffixes so both rows are unique. */
-  sourceRef?: string;
-  note?: string;
-};
-
-/** Transfer stock between outlets: one TRANSFER_OUT and one TRANSFER_IN row. */
-export function recordTransfer(ctx: AccessContext, input: TransferInput, db: Client = prisma) {
-  requirePermission(ctx, "inventory.transfer", input.fromOutletId);
-  assertOutletAccess(ctx, input.toOutletId);
-  positiveQty.parse(input.quantity);
-  if (input.fromOutletId === input.toOutletId) throw new ValidationError("Cannot transfer to the same outlet");
-  return runInTx(db, async (tx) => {
-    const rate = await getAvgCost(tx, ctx, input.fromOutletId, input.materialId);
-    const out = await appendLedger(tx, ctx, {
-      outletId: input.fromOutletId,
-      materialId: input.materialId,
-      unitId: input.unitId,
-      magnitude: input.quantity,
-      rate,
-      txnType: "TRANSFER_OUT",
-      sourceType: "TRANSFER",
-      sourceId: input.sourceId,
-      sourceRef: input.sourceRef ? `${input.sourceRef}:out` : undefined,
-      note: input.note,
-    });
-    const inn = await appendLedger(tx, ctx, {
-      outletId: input.toOutletId,
-      materialId: input.materialId,
-      unitId: input.unitId,
-      magnitude: input.quantity,
-      rate, // carry source-outlet cost to receiving outlet
-      txnType: "TRANSFER_IN",
-      sourceType: "TRANSFER",
-      sourceId: input.sourceId,
-      sourceRef: input.sourceRef ? `${input.sourceRef}:in` : undefined,
-      note: input.note,
-    });
-    return { out, in: inn };
-  });
-}
-
 export type WastageInput = {
   outletId: string;
   materialId: string;
@@ -474,34 +401,6 @@ export function recordCountAdjustment(ctx: AccessContext, input: CountAdjustment
     });
     await writeAudit(tx, ctx, { action: "STOCK_ADJUSTMENT", entityType: "InventoryLedger", entityId: row.id, outletId: input.outletId, after: { variance: input.variance } });
     return row;
-  });
-}
-
-export type ReturnInput = {
-  outletId: string;
-  materialId: string;
-  quantity: number | string;
-  /** IN = returned into stock (default), OUT = returned to vendor */
-  direction?: "IN" | "OUT";
-  unitId?: string;
-  sourceId?: string;
-  sourceRef?: string;
-  note?: string;
-};
-
-export function recordReturn(ctx: AccessContext, input: ReturnInput, db: Client = prisma) {
-  requirePermission(ctx, "inventory.adjust", input.outletId);
-  positiveQty.parse(input.quantity);
-  return runInTx(db, async (tx) => {
-    const rate = await getAvgCost(tx, ctx, input.outletId, input.materialId);
-    return appendLedger(tx, ctx, {
-      ...input,
-      magnitude: input.quantity,
-      direction: input.direction ?? "IN",
-      rate,
-      txnType: "RETURN",
-      sourceType: "MANUAL",
-    });
   });
 }
 
@@ -693,21 +592,6 @@ export async function stockByOutlet(db: Client, ctx: AccessContext, outletId: st
     const avgCost = costMap.get(g.materialId) ?? D(0);
     return { materialId: g.materialId, quantity, avgCost, value: money(dMul(quantity, avgCost)) };
   });
-}
-
-/** On-hand grouped by department at an outlet. */
-export async function stockByDepartment(db: Client, ctx: AccessContext, outletId: string) {
-  return db.inventoryLedger.groupBy({
-    by: ["departmentId", "materialId"],
-    where: { organizationId: ctx.organizationId, outletId },
-    _sum: { qty: true },
-  });
-}
-
-/** Total stock value at an outlet. */
-export async function stockValue(db: Client, ctx: AccessContext, outletId: string): Promise<Prisma.Decimal> {
-  const rows = await stockByOutlet(db, ctx, outletId);
-  return rows.reduce((acc, r) => acc.plus(r.value), D(0));
 }
 
 /** Recent movements for a material (audit / history view). */

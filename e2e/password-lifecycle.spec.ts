@@ -160,6 +160,10 @@ test.describe.serial("account provisioning and password lifecycle", () => {
     expect(JSON.parse(answers[0]).data.delivery).toBe("manager");
   });
 
+  // PWD-007 (an address typed before hydration is kept; an empty form is explained) needs the reset FORM, which this
+  // deployment never shows: without RESEND_* the page says no email can be sent (PWD-005). The form's behaviour is
+  // covered in tests/ui/forgot-password-form.test.tsx; typing before hydration in a real browser by LOGIN-002b.
+
   test("PWD-006 the change-password page requires a session", async ({ browser }) => {
     const { context, page } = await freshPage(browser);
     await page.goto("/account/password");

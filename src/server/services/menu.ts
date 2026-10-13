@@ -22,6 +22,7 @@ import { assertCan } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
 import { type Client, type Tx, runInTx } from "@/server/services/_workflow";
 import { resolveUnit } from "@/server/services/inventory";
+import { runAfterCommit, isRootClient } from "@/server/services/afterCommit";
 import { D, money, num } from "@/domain/money";
 
 const price = z.number().nonnegative().max(1_000_000);
@@ -90,7 +91,12 @@ const itemSchema = z.object({
   station: Station.zod.default("KITCHEN"),
   posCode: z.string().trim().min(1).max(64).optional(),
   isVeg: z.boolean().default(true),
+  /** Cuisine / meal-type labels ("south-indian", "breakfast") for filtering the menu; at most 8, lower case. */
+  cuisineTags: z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9-]{0,23}$/, "A tag is letters, digits and dashes, up to 24 characters")).max(8).optional(),
 });
+
+/** Stored as one comma-separated string; an empty list clears it. */
+export const tagsToString = (tags: string[] | undefined): string | null | undefined => (tags === undefined ? undefined : [...new Set(tags)].join(",") || null);
 
 async function assertCategory(tx: Tx, ctx: AccessContext, categoryId?: string | null) {
   if (!categoryId) return;
@@ -106,11 +112,12 @@ async function assertPosCodeFree(tx: Tx, ctx: AccessContext, posCode: string | u
 
 export async function createMenuItem(ctx: AccessContext, input: z.input<typeof itemSchema>, db: Client = prisma) {
   const data = itemSchema.parse(input);
+  const { cuisineTags, ...rest } = data;
   assertMenuManager(ctx);
   return runInTx(db, async (tx) => {
     await assertCategory(tx, ctx, data.categoryId);
     await assertPosCodeFree(tx, ctx, data.posCode);
-    const item = await unique(() => tx.menuItem.create({ data: { organizationId: ctx.organizationId, ...data, price: money(data.price), taxPct: D(data.taxPct), createdById: ctx.userId === "system" ? null : ctx.userId } }), "A menu item with this name already exists");
+    const item = await unique(() => tx.menuItem.create({ data: { organizationId: ctx.organizationId, ...rest, cuisineTags: tagsToString(cuisineTags), price: money(data.price), taxPct: D(data.taxPct), createdById: ctx.userId === "system" ? null : ctx.userId } }), "A menu item with this name already exists");
     await writeAudit(tx, ctx, { action: "CREATE", entityType: "MenuItem", entityId: item.id, after: { name: data.name, price: data.price, posCode: data.posCode } });
     return item;
   });
@@ -118,13 +125,14 @@ export async function createMenuItem(ctx: AccessContext, input: z.input<typeof i
 
 export async function updateMenuItem(ctx: AccessContext, menuItemId: string, patch: Partial<z.input<typeof itemSchema>>, db: Client = prisma) {
   const data = itemSchema.partial().parse(patch);
+  const { cuisineTags, ...rest } = data;
   assertMenuManager(ctx);
   return runInTx(db, async (tx) => {
     const before = await loadItem(tx, ctx, menuItemId);
     if (data.categoryId !== undefined) await assertCategory(tx, ctx, data.categoryId);
     await assertPosCodeFree(tx, ctx, data.posCode, menuItemId);
     const updated = await unique(
-      () => tx.menuItem.update({ where: { id: menuItemId }, data: { ...data, ...(data.price !== undefined ? { price: money(data.price) } : {}), ...(data.taxPct !== undefined ? { taxPct: D(data.taxPct) } : {}) } }),
+      () => tx.menuItem.update({ where: { id: menuItemId }, data: { ...rest, ...(cuisineTags !== undefined ? { cuisineTags: tagsToString(cuisineTags) } : {}), ...(data.price !== undefined ? { price: money(data.price) } : {}), ...(data.taxPct !== undefined ? { taxPct: D(data.taxPct) } : {}) } }),
       "A menu item with this name already exists"
     );
     const priceChanged = data.price !== undefined && !D(before.price).eq(D(data.price));
@@ -137,10 +145,16 @@ export async function updateMenuItem(ctx: AccessContext, menuItemId: string, pat
 export async function setMenuItemAvailability(ctx: AccessContext, menuItemId: string, input: { active?: boolean; soldOut?: boolean }, db: Client = prisma) {
   const data = z.object({ active: z.boolean().optional(), soldOut: z.boolean().optional() }).refine((d) => d.active !== undefined || d.soldOut !== undefined, "Nothing to change").parse(input);
   assertMenuManager(ctx);
+  let changed = false;
   return runInTx(db, async (tx) => {
     const before = await loadItem(tx, ctx, menuItemId);
+    changed = (data.active !== undefined && data.active !== before.active) || (data.soldOut !== undefined && data.soldOut !== before.soldOut);
     const updated = await tx.menuItem.update({ where: { id: menuItemId }, data });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "MenuItem", entityId: menuItemId, before: { active: before.active, soldOut: before.soldOut }, after: data });
+    return updated;
+  }).then((updated) => {
+    // The ordering platforms are told after the change is committed; a platform problem never fails the change.
+    if (changed && isRootClient(db)) runAfterCommit("aggregator-item", async () => (await import("@/server/services/integrationHooks")).afterMenuAvailabilityChanged(ctx, { menuItemId, changeKey: String(updated.updatedAt.getTime()) }));
     return updated;
   });
 }
@@ -289,11 +303,13 @@ export async function setOutletMenuItem(ctx: AccessContext, input: z.input<typeo
   const data = overrideSchema.parse(input);
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "menu.manage", data.outletId);
+  let changed = false;
   return runInTx(db, async (tx) => {
     const outlet = await tx.outlet.findUnique({ where: { id: data.outletId }, select: { organizationId: true } });
     if (!outlet || outlet.organizationId !== ctx.organizationId) throw new NotFoundError("Outlet not found");
     await loadItem(tx, ctx, data.menuItemId);
     const before = await tx.outletMenuItem.findUnique({ where: { outletId_menuItemId: { outletId: data.outletId, menuItemId: data.menuItemId } } });
+    changed = (data.active !== undefined && data.active !== (before?.active ?? true)) || (data.soldOut !== undefined && data.soldOut !== (before?.soldOut ?? false));
     const patch = {
       ...(data.price !== undefined ? { price: data.price === null ? null : money(data.price) } : {}),
       ...(data.active !== undefined ? { active: data.active } : {}),
@@ -308,6 +324,9 @@ export async function setOutletMenuItem(ctx: AccessContext, input: z.input<typeo
       action: data.price !== undefined ? "PRICE_CHANGE" : "UPDATE", entityType: "OutletMenuItem", entityId: row.id, outletId: data.outletId,
       before: before ? { price: before.price === null ? null : num(before.price), active: before.active, soldOut: before.soldOut } : null, after: data,
     });
+    return row;
+  }).then((row) => {
+    if (changed && isRootClient(db)) runAfterCommit("aggregator-item", async () => (await import("@/server/services/integrationHooks")).afterMenuAvailabilityChanged(ctx, { menuItemId: data.menuItemId, outletId: data.outletId, changeKey: String(row.updatedAt.getTime()) }));
     return row;
   });
 }

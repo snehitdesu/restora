@@ -52,7 +52,8 @@ export const DECIMAL_FIELDS = {
   KotItem: { qty: "QTY" },
   PurchaseIndentLine: { qty: "QTY" },
   PurchaseOrder: { subtotal: "MONEY", tax: "MONEY", total: "MONEY" },
-  PurchaseOrderLine: { qty: "QTY", rate: "RATE", taxPct: "PCT", receivedQty: "QTY" },
+  ProcurementSettings: { autoApproveBelow: "MONEY", dualApprovalAtOrAbove: "MONEY" },
+  PurchaseOrderLine: { qty: "QTY", rate: "RATE", taxPct: "PCT", receivedQty: "QTY", requestedQty: "QTY" },
   GoodsReceiptLine: { qty: "QTY", rate: "RATE", damagedQty: "QTY" },
   PurchaseBill: { subtotal: "MONEY", tax: "MONEY", total: "MONEY", paidAmount: "MONEY" },
   PurchaseBillLine: { qty: "QTY", rate: "RATE", taxPct: "PCT" },
@@ -80,6 +81,10 @@ export const DECIMAL_FIELDS = {
   AggregatorStatementLine: { grossAmount: "MONEY", commission: "MONEY", penalty: "MONEY", adSpend: "MONEY", otherDeductions: "MONEY", netPayout: "MONEY" },
   AggregatorCharge: { amount: "MONEY" },
   UnmappedSale: { qty: "QTY" },
+  GrowthSettings: { referralMinOrderValue: "MONEY" },
+  LoyaltyTier: { minSpend: "MONEY", earnMultiplierPct: "PCT" },
+  Coupon: { value: "MONEY", maxDiscount: "MONEY", minOrderValue: "MONEY" },
+  CouponRedemption: { amount: "MONEY" },
 };
 
 /** SQLite schema source → PostgreSQL schema source. Throws on any unclassified Decimal. */

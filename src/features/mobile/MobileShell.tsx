@@ -49,7 +49,7 @@ export function useUnread(intervalMs = 30_000): number | null {
   return unread;
 }
 
-export type MobileTab<T extends string> = { value: T; label: string; icon: IconName; badge?: number | null };
+export type MobileTab<T extends string> = { value: T; label: string; icon: IconName; badge?: number | null; /** What the badge counts, for screen readers (default "unread"). */ badgeLabel?: string };
 
 export function MobileShell<T extends string>({ title, subtitle, tabs, tab, onTab, children, online }: { title: string; subtitle?: string; tabs: MobileTab<T>[]; tab: T; onTab: (t: T) => void; children: ReactNode; online: boolean }) {
   return (
@@ -82,7 +82,7 @@ export function MobileShell<T extends string>({ title, subtitle, tabs, tab, onTa
               >
                 <Icon name={t.icon} className="h-5 w-5" />
                 <span>{t.label}</span>
-                {t.badge ? <span className="absolute right-[22%] top-1.5 min-w-5 rounded-full bg-bad-500 px-1.5 text-[11px] leading-5 text-white" aria-label={`${t.badge} unread`}>{t.badge > 99 ? "99+" : t.badge}</span> : null}
+                {t.badge ? <span className="absolute right-[22%] top-1.5 min-w-5 rounded-full bg-bad-500 px-1.5 text-[11px] leading-5 text-white" aria-label={`${t.badge} ${t.badgeLabel ?? "unread"}`}>{t.badge > 99 ? "99+" : t.badge}</span> : null}
               </button>
             </li>
           ))}

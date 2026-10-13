@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { EmptyState, ErrorState, Spinner } from "@/components/ui/States";
+import { ScrollRegion } from "@/components/ui/ScrollRegion";
 
 export type Column<T> = {
   key: string;
@@ -47,7 +48,7 @@ export function DataTable<T>({
 }) {
   if (error) return <div className="rounded-lg border border-ink-200 bg-paper shadow-card"><ErrorState error={error} onRetry={onRetry} /></div>;
   return (
-    <div className="relative overflow-x-auto rounded-lg border border-ink-200 bg-paper shadow-card">
+    <ScrollRegion label={`${label} (scrolls sideways)`} className="relative rounded-lg border border-ink-200 bg-paper shadow-card">
       <table className="w-full min-w-max border-collapse text-sm" aria-label={label} aria-busy={loading || undefined}>
         <thead>
           <tr className="sticky top-0 z-10 border-b-2 border-ink-800 bg-paper-warm text-left text-[11px] font-semibold uppercase tracking-eyebrow text-ink-600">
@@ -75,7 +76,7 @@ export function DataTable<T>({
       </table>
       {rows.length === 0 && (loading ? <div className="flex justify-center p-6"><Spinner /></div> : <EmptyState title={empty} hint={typeof emptyHint === "string" ? emptyHint : undefined} action={typeof emptyHint === "string" ? undefined : emptyHint} />)}
       {loading && rows.length > 0 && <div className="pointer-events-none absolute right-2 top-2"><Spinner label="Refreshing" /></div>}
-    </div>
+    </ScrollRegion>
   );
 }
 

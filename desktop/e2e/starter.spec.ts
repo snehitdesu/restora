@@ -203,7 +203,7 @@ test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → order �
     const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     const guest = await phone.newPage();
     await guest.goto(t07Link);
-    await expect(guest.getByLabel("Table T07")).toBeVisible();
+    await expect(guest.getByLabel("Table T07").first()).toBeVisible();
     await guest.getByRole("button", { name: "Add Loaded Veg Nachos" }).click();
     await guest.getByRole("button", { name: "Add Veg Arrabita Penne" }).click();
     // Sticky cart → cart page (priced by the server) → checkout → place the order (cash at the counter is the default).

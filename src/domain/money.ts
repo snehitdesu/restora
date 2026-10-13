@@ -5,8 +5,6 @@ export type Decimalish = Prisma.Decimal | number | string;
 
 export const D = (v: Decimalish = 0): Prisma.Decimal => new Prisma.Decimal(v);
 
-export const dAdd = (a: Decimalish, b: Decimalish) => D(a).plus(D(b));
-export const dSub = (a: Decimalish, b: Decimalish) => D(a).minus(D(b));
 export const dMul = (a: Decimalish, b: Decimalish) => D(a).times(D(b));
 export const dDiv = (a: Decimalish, b: Decimalish) => {
   const denom = D(b);

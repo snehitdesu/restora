@@ -46,6 +46,7 @@ const PATHS = {
   wallet: "M4 6h15v12H4zM4 6l12-3v3M15 12h.01",
   scale: "M12 3v18M5 7h14M5 7l-3 7a3 3 0 0 0 6 0zM19 7l-3 7a3 3 0 0 0 6 0zM8 21h8",
   download: "M12 3v12M7 10l5 5 5-5M4 21h16",
+  upload: "M12 15V3M7 8l5-5 5 5M4 21h16",
   building: "M5 21V3h10v18M15 9h4v12M9 7h2M9 11h2M9 15h2M3 21h18",
   store: "M4 9l1-5h14l1 5M4 9v11h16V9M4 9h16M9 20v-6h6v6",
   grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",

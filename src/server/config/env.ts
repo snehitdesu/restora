@@ -177,7 +177,7 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
   }
 
   // --- Operational tuning ---
-  if (isSet(env.RATE_LIMIT_STORE) && !["memory", "database"].includes(env.RATE_LIMIT_STORE.trim().toLowerCase())) problems.push('RATE_LIMIT_STORE must be "memory" (one instance) or "database" (several instances)');
+  if (isSet(env.RATE_LIMIT_STORE) && !["memory", "database"].includes(env.RATE_LIMIT_STORE.trim().toLowerCase())) problems.push('RATE_LIMIT_STORE must be "memory" (one instance) or "database" (counters shared by every instance)');
   if (isSet(env.LOG_LEVEL) && !LOG_LEVELS.includes(env.LOG_LEVEL.toLowerCase())) problems.push(`LOG_LEVEL must be one of ${LOG_LEVELS.join(", ")}`);
   if (isSet(env.LOG_FORMAT) && !["json", "pretty"].includes(env.LOG_FORMAT)) problems.push('LOG_FORMAT must be "json" or "pretty"');
   for (const p of [
@@ -185,6 +185,7 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
     intProblem(env, "SLOW_REQUEST_MS", 1),
     intProblem(env, "SHUTDOWN_TIMEOUT_MS", 1000, 600_000),
     intProblem(env, "SHUTDOWN_DELAY_MS", 0, 120_000),
+    intProblem(env, "SHUTDOWN_REFUSE_GRACE_MS", 0, 60_000),
     intProblem(env, "OUTBOX_WORKER_INTERVAL_MS", 1000, 3_600_000),
     intProblem(env, "SESSION_IDLE_TIMEOUT_SECONDS", 1),
     intProblem(env, "BACKUP_MAX_AGE_HOURS", 1),
@@ -208,7 +209,6 @@ export function productionEnvWarnings(env: NodeJS.ProcessEnv = process.env): str
   if (env.ALLOW_MOCK_PROVIDERS === "true") w.push("ALLOW_MOCK_PROVIDERS=true: mock payment/POS/aggregator adapters approve anything — never on a public deployment");
   if (env.DEMO_DEPLOYMENT === "true") w.push("DEMO_DEPLOYMENT=true: sample data and simulated/test payments only; not a live restaurant");
   if (env.VERCEL === "1") w.push("VERCEL=1: in-process maintenance worker is disabled; /api/cron/worker must be invoked by Vercel Cron");
-  if (env.VERCEL === "1" && env.RATE_LIMIT_STORE?.trim().toLowerCase() !== "database") w.push('RATE_LIMIT_STORE is not "database" on Vercel: each serverless instance counts sign-in and password-reset attempts separately, so the limits are weaker than configured (apply migration 20261017100000_rate_limit_buckets, then set RATE_LIMIT_STORE=database)');
   if (env.ALLOW_MOCK_PROVIDERS === "true") {
     for (const name of WEBHOOK_SECRET_VARS) {
       const v = env[name];
@@ -226,6 +226,7 @@ export function productionEnvWarnings(env: NodeJS.ProcessEnv = process.env): str
     if (!isSet(env.PUBLIC_BASE_URL)) w.push("PUBLIC_BASE_URL is unset: table QR codes use the address the Tables screen is viewed on, which guests' phones may not reach");
     if (!isSet(env.RESEND_API_KEY)) w.push("RESEND_API_KEY is unset: password-reset emails are not sent; a manager issues the link");
     if (!isSet(env.NEXT_PUBLIC_SITE_URL)) w.push("NEXT_PUBLIC_SITE_URL is unset (it must be set when building the website too): the website's canonical links, sitemap and Open Graph URLs point at http://localhost:3000");
+    if (db.startsWith("postgres") && (env.RATE_LIMIT_STORE ?? "memory").trim().toLowerCase() !== "database") w.push("RATE_LIMIT_STORE is not \"database\": login and other limits are counted per process, so each additional instance multiplies them (set RATE_LIMIT_STORE=database when running more than one instance)");
     if (!isSet(env.INTEGRATION_SECRETS_KEY)) w.push("INTEGRATION_SECRETS_KEY is unset: integration secrets are encrypted with a key derived from AUTH_SECRET (rotating AUTH_SECRET then makes them unreadable)");
   }
   return w;

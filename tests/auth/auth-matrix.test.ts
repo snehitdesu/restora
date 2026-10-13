@@ -33,18 +33,8 @@ import { SESSION_COOKIE } from "@/constants/auth";
 import { ROLE_PERMISSIONS, type Permission } from "@/server/auth/rbac";
 import type { Role } from "@/constants/enums";
 import { POST as loginRoute } from "@/app/api/auth/login/route";
-import {
-  DatabaseRateLimitStore,
-  FallbackRateLimitStore,
-  MemoryRateLimitStore,
-  RATE_POLICIES,
-  enforceRateLimit,
-  getRateLimitStore,
-  purgeRateLimitBuckets,
-  rateLimitStoreKind,
-  resetRateLimitStores,
-  RateLimitError,
-} from "@/server/api/rateLimit";
+import { RATE_POLICIES, enforceRateLimit, getRateLimitStore, rateLimitKey, resetRateLimitStoreForTests } from "@/server/api/rateLimit";
+import { DatabaseRateLimitStore } from "@/server/api/rateLimitDb";
 import { productionEnvWarnings, validateProductionEnv } from "@/server/config/env";
 import * as Orders from "@/app/api/orders/[[...path]]/route";
 import * as Kitchen from "@/app/api/kitchen/[[...path]]/route";
@@ -272,92 +262,25 @@ describe("sign-in replaces the browser's previous session", () => {
   });
 });
 
+// Counting, windows, sweeping and the database-failure fallback are covered by tests/api/rate-limit-store.test.ts.
 describe("shared rate-limit store (RATE_LIMIT_STORE=database)", () => {
-  const store = new DatabaseRateLimitStore(prisma);
   afterEach(() => {
     delete process.env.RATE_LIMIT_STORE;
-    resetRateLimitStores();
-  });
-
-  it("counts hits atomically across concurrent callers", async () => {
-    const key = `concurrent:${RUN}`;
-    const results = await Promise.all(Array.from({ length: 40 }, () => store.hit(key, 60_000)));
-    expect(results.map((r) => r.count).sort((a, b) => a - b)).toEqual(Array.from({ length: 40 }, (_, i) => i + 1));
-  });
-
-  it("starts a new window once the old one has ended", async () => {
-    const key = `window:${RUN}`;
-    const t0 = 1_900_000_000_000;
-    expect((await store.hit(key, 1000, t0)).count).toBe(1);
-    expect((await store.hit(key, 1000, t0 + 500)).count).toBe(2);
-    const fresh = await store.hit(key, 1000, t0 + 1000);
-    expect(fresh).toEqual({ count: 1, resetAt: t0 + 2000 });
+    resetRateLimitStoreForTests();
   });
 
   it("never stores the email address or IP it counts", async () => {
-    const subject = `login-email:victim-${RUN}@example.com`;
-    await store.hit(subject, 60_000);
-    const rows = await prisma.$queryRawUnsafe<Array<{ key: string }>>('SELECT "key" FROM "RateLimitBucket"');
-    expect(rows.some((r) => r.key.includes("victim"))).toBe(false);
-    expect(rows.some((r) => r.key === DatabaseRateLimitStore.bucketKey(subject))).toBe(true);
-  });
-
-  it("purges ended windows only", async () => {
-    const t0 = 1_800_000_000_000;
-    await store.hit(`old:${RUN}`, 1000, t0);
-    await store.hit(`live:${RUN}`, 10 * 365 * 24 * 3600_000, Date.now());
-    await purgeRateLimitBuckets(prisma, t0 + 5000);
-    const keys = (await prisma.$queryRawUnsafe<Array<{ key: string }>>('SELECT "key" FROM "RateLimitBucket"')).map((r) => r.key);
-    expect(keys).not.toContain(DatabaseRateLimitStore.bucketKey(`old:${RUN}`));
-    expect(keys).toContain(DatabaseRateLimitStore.bucketKey(`live:${RUN}`));
-  });
-
-  it("database mode: the sign-in limit holds no matter which instance (memory) is asked", async () => {
-    process.env.RATE_LIMIT_STORE = "database";
-    resetRateLimitStores();
-    const email = `shared-${RUN}@example.com`;
-    for (let i = 0; i < RATE_POLICIES.loginPerEmail.limit; i++) {
-      await enforceRateLimit(RATE_POLICIES.loginPerEmail, email);
-      // A fresh "instance": its own empty memory store. The count lives in the database.
-      resetRateLimitStores();
-    }
-    await expect(enforceRateLimit(RATE_POLICIES.loginPerEmail, email)).rejects.toBeInstanceOf(RateLimitError);
-    // Guest throttles are not shared: they stay in this process's memory.
-    await getRateLimitStore().reset();
-    const before = await prisma.$queryRawUnsafe<Array<{ n: number | bigint }>>('SELECT COUNT(*) AS n FROM "RateLimitBucket"');
-    await enforceRateLimit(RATE_POLICIES.guestReadPerIp, `10.1.1.${RUN.length}`);
-    const after = await prisma.$queryRawUnsafe<Array<{ n: number | bigint }>>('SELECT COUNT(*) AS n FROM "RateLimitBucket"');
-    expect(Number(after[0].n)).toBe(Number(before[0].n));
-  });
-
-  it("falls back to per-process counting when the database cannot count (logged, never fails open silently)", async () => {
-    const broken = { $queryRaw: async () => { throw new Error("no such table: RateLimitBucket"); }, $executeRaw: async () => 0 } as never;
-    const fallback = new MemoryRateLimitStore();
-    const s = new FallbackRateLimitStore(new DatabaseRateLimitStore(broken), fallback);
-    const errors: unknown[] = [];
-    const orig = console.error;
-    console.error = (...a: unknown[]) => errors.push(a);
-    try {
-      for (let i = 1; i <= 3; i++) expect((await s.hit("k", 60_000, 1000 + i)).count).toBe(i);
-    } finally {
-      console.error = orig;
-    }
-    expect(errors.length).toBe(1); // at most once a minute
-  });
-
-  it.each([
-    [undefined, "memory"],
-    ["", "memory"],
-    ["memory", "memory"],
-    ["MEMORY", "memory"],
-    ["database", "database"],
-    [" Database ", "database"],
-  ] as const)("RATE_LIMIT_STORE=%j selects %s", (value, kind) => {
-    expect(rateLimitStoreKind((value === undefined ? {} : { RATE_LIMIT_STORE: value }) as NodeJS.ProcessEnv)).toBe(kind);
-  });
-
-  it.each(["redis", "memcached", "db"])("RATE_LIMIT_STORE=%s is refused (not implemented)", (value) => {
-    expect(() => rateLimitStoreKind({ RATE_LIMIT_STORE: value } as unknown as NodeJS.ProcessEnv)).toThrow(/not implemented/);
+    process.env.RATE_LIMIT_STORE = " Database "; // as validated: case and spaces do not matter
+    resetRateLimitStoreForTests();
+    expect(getRateLimitStore()).toBeInstanceOf(DatabaseRateLimitStore);
+    const email = `victim-${RUN}@example.com`;
+    const ip = `198.51.100.${RUN.length % 250}`;
+    await enforceRateLimit(RATE_POLICIES.loginPerEmail, email);
+    await enforceRateLimit(RATE_POLICIES.loginPerIp, ip);
+    const keys = (await prisma.rateLimitWindow.findMany({ select: { key: true } })).map((r) => r.key);
+    expect(keys.some((k) => k.includes("victim") || k.includes(ip))).toBe(false);
+    expect(keys).toContain(rateLimitKey(RATE_POLICIES.loginPerEmail, email));
+    expect(keys).toContain(rateLimitKey(RATE_POLICIES.loginPerIp, ip));
   });
 
   it("production: database is accepted, unknown stores refused; Vercel without it is warned", () => {

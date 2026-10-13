@@ -100,6 +100,7 @@ let delivery: PasswordLinkDelivery | null = null;
 export function setPasswordLinkDelivery(fn: PasswordLinkDelivery | null): void {
   delivery = fn;
 }
+/** Whether a reset link can be delivered out of band (Resend registered). */
 export function passwordLinkDeliveryConfigured(): boolean {
   return delivery !== null;
 }
