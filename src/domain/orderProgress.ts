@@ -49,6 +49,9 @@ export function guestTracker(order: { status: string; kots: KotLike[] }): GuestT
   return { step: 0, confirmed: true }; // every live ticket NEW: sent to the kitchen, not yet accepted
 }
 
+/** Guest caption for a QR order held back until the guest's own online payment is confirmed. */
+export const GUEST_AWAITING_PAYMENT_LABEL = "Waiting for your online payment";
+
 export const FULFILMENT_LABEL: Record<FulfilmentStage, string> = {
   AWAITING_ACCEPTANCE: "Waiting for the restaurant to accept",
   SENT_TO_KITCHEN: "Sent to the kitchen",

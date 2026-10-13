@@ -689,7 +689,15 @@ export async function countOrders(db: PrismaClient, ctx: AccessContext, input: {
  * leaves nothing behind (no half-created orders, no duplicated lines).
  * Items are priced server-side by addOrderItem (menu items) exactly as usual.
  */
-export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db: Client = prisma) {
+export type PlacedOrderHook = (tx: Prisma.TransactionClient, order: { id: string; total: Prisma.Decimal }) => Promise<void>;
+
+/**
+ * `afterCreate` runs inside the order's transaction, only when the order is
+ * created (never on a replay): records that must exist exactly when the order
+ * does (the guest flow's audit row and staff notification) commit or roll back
+ * with it.
+ */
+export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db: Client = prisma, opts: { afterCreate?: PlacedOrderHook } = {}) {
   const data = placeSchema.parse(input);
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "order.create", data.outletId);
@@ -710,7 +718,9 @@ export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db:
       const order = await createOrderTx(ctx, orderInput, hash, tx);
       for (const item of items) await addOrderItem(ctx, order.id, item as AddItemInput, tx);
       if (submit) await submitOrder(ctx, order.id, tx);
-      return { ...(await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: placedInclude })), replayed: false };
+      const placed = await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: placedInclude });
+      if (opts.afterCreate) await opts.afterCreate(tx, placed);
+      return { ...placed, replayed: false };
     }, NEW_ORDER_TX);
   } catch (e) {
     if (data.idempotencyKey && (e as { code?: string })?.code === "P2002") {

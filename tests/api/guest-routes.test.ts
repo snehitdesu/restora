@@ -126,3 +126,16 @@ describe("guest API", () => {
     await store.reset(k);
   });
 });
+
+describe("guest checkout total guard over HTTP", () => {
+  it("a stale shown total gets 409 PriceChanged with the current total; nothing is created", async () => {
+    const before = await prisma.order.count({ where: { organizationId: orgId } });
+    const res = await call(Guest, "POST", `t/${token}/orders`, { origin: ORIGIN, headers: { "idempotency-key": `ga-${RUN}-pc1` }, body: { items: [{ menuItemId: dish, qty: 1 }], paymentMethod: "CASH", expectedTotal: "100.00" } });
+    expect(res.status).toBe(409);
+    expect(res.json.error).toMatchObject({ code: "PriceChanged", details: { total: "105.00" } });
+    expect(await prisma.order.count({ where: { organizationId: orgId } })).toBe(before);
+    const ok = await call(Guest, "POST", `t/${token}/orders`, { origin: ORIGIN, headers: { "idempotency-key": `ga-${RUN}-pc1` }, body: { items: [{ menuItemId: dish, qty: 1 }], paymentMethod: "CASH", expectedTotal: "105.00" } });
+    expect(ok.status).toBe(200);
+    await prisma.order.update({ where: { id: ok.json.data.orderId }, data: { status: "CANCELLED" } });
+  });
+});
