@@ -34,7 +34,8 @@ const NONEXISTENT_USER_HASH = "$2a$10$YBd5Bj/nMWBkx6MYoOJi2e4baZLzex5ZEwOVslUAbO
 export async function loginWithPassword(
   db: PrismaClient,
   input: LoginInput,
-  meta: { ip?: string; userAgent?: string } = {}
+  meta: { ip?: string; userAgent?: string } = {},
+  opts: { replacesToken?: string | null } = {}
 ): Promise<LoginResult> {
   const { email, password } = loginSchema.parse(input);
 
@@ -48,9 +49,12 @@ export async function loginWithPassword(
   if (!user.active) throw new UnauthorizedError("Account is inactive");
 
   const session = await createSession(db, user.id, meta);
+  // The browser's previous session (same or another account) is ended, not just
+  // overwritten in the cookie jar: a copied old cookie must not stay usable.
+  const replaced = opts.replacesToken ? await revokeToken(db, opts.replacesToken) : false;
   await db.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
   await db.auditLog.create({
-    data: { organizationId: user.organizationId, actorId: user.id, action: "LOGIN", entityType: "User", entityId: user.id, ip: meta.ip, userAgent: meta.userAgent },
+    data: { organizationId: user.organizationId, actorId: user.id, action: "LOGIN", entityType: "User", entityId: user.id, ip: meta.ip, userAgent: meta.userAgent, ...(replaced ? { after: JSON.stringify({ replacedSession: true }) } : {}) },
   });
 
   return {

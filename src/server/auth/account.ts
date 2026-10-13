@@ -12,6 +12,7 @@ import { hashPassword, verifyPassword } from "@/server/auth/password";
 import { hashToken } from "@/server/auth/session";
 import { runInTx, type Tx } from "@/server/services/_workflow";
 import { issuePasswordToken, retireUserTokens, findUsablePasswordToken, consumePasswordToken, INVALID_TOKEN_MESSAGE } from "@/server/auth/passwordTokens";
+import { resendPasswordDelivery } from "@/server/auth/passwordResetMail";
 
 type Meta = { ip?: string; userAgent?: string };
 
@@ -24,13 +25,15 @@ export function assertPasswordPolicy(password: string, ctx: { email?: string; na
   if (problems.length) throw new ValidationError(problems[0], { fieldErrors: { password: problems } });
 }
 
-async function audit(tx: Tx, row: { organizationId: string; actorId: string | null; action: string; entityId: string; after?: unknown } & Meta) {
-  await tx.auditLog.create({
+async function audit(tx: Tx, row: { organizationId: string; actorId: string | null; action: string; entityId: string; after?: unknown } & Meta): Promise<string> {
+  const created = await tx.auditLog.create({
     data: {
       organizationId: row.organizationId, actorId: row.actorId, action: row.action, entityType: "User", entityId: row.entityId,
       after: row.after === undefined ? null : JSON.stringify(row.after), ip: row.ip, userAgent: row.userAgent,
     },
+    select: { id: true },
   });
+  return created.id;
 }
 
 // ---------------- Complete a setup / reset link ----------------
@@ -69,10 +72,28 @@ export const RESET_ACCEPTED_MESSAGE =
   "If an active account exists for that email, a reset link will be sent to it. If nothing arrives, ask your manager to issue a password link.";
 
 /**
- * Out-of-band delivery of a reset link (email/SMS). No provider is integrated
- * yet; until one is registered the request is recorded (audit) and NO token is
- * created — a link nobody can receive would only widen the attack surface.
- * Staff can always get a link from a manager (staff `password-link`).
+ * The response when this deployment has no reset email at all. Whether email is
+ * set up is a property of the deployment, not of any account, so saying so
+ * reveals nothing about who has an account — and promising a link that cannot
+ * be sent would leave the person waiting for nothing.
+ */
+export const RESET_MANAGER_MESSAGE =
+  "Password reset by email is not set up for this workspace, so no email was sent. Ask your owner or manager to issue a password link from Staff.";
+
+export type ResetDelivery = "email" | "manager";
+
+/** What the forgot-password page may promise. Same answer for every email address. */
+export function resetRequestOutcome(): { delivery: ResetDelivery; message: string } {
+  registerPasswordResetDelivery();
+  return delivery ? { delivery: "email", message: RESET_ACCEPTED_MESSAGE } : { delivery: "manager", message: RESET_MANAGER_MESSAGE };
+}
+
+/**
+ * Out-of-band delivery of a reset link. Resend is registered when
+ * RESEND_API_KEY, RESEND_FROM and PUBLIC_BASE_URL are all set. Until then the
+ * request is recorded and NO token is created — a link nobody can receive
+ * would only widen the attack surface. A manager can still issue a link
+ * (staff `password-link`).
  */
 export type PasswordLinkDelivery = (msg: { to: string; name: string; token: string; expiresAt: Date }) => Promise<void>;
 let delivery: PasswordLinkDelivery | null = null;
@@ -84,25 +105,54 @@ export function passwordLinkDeliveryConfigured(): boolean {
 }
 
 /**
+ * Install the Resend sender when RESEND_API_KEY, RESEND_FROM and PUBLIC_BASE_URL
+ * are set. Called from server startup and again on each reset request so a
+ * separate serverless bundle still has the sender. An already registered
+ * function (tests, or an earlier call) is left in place.
+ */
+export function registerPasswordResetDelivery(): void {
+  if (delivery) return;
+  const send = resendPasswordDelivery();
+  if (send) setPasswordLinkDelivery(send);
+}
+
+/**
  * Always resolves the same way whether or not the account exists (no account
- * enumeration). Delivery failures are logged without the token.
+ * enumeration). Delivery failures are logged without the token. The HTTP route
+ * runs this after its response (server/api/afterResponse.ts), so the response
+ * time does not depend on whether an account exists or an email was sent.
  */
 export async function requestPasswordReset(db: PrismaClient, input: z.input<typeof resetRequestSchema>, meta: Meta = {}): Promise<void> {
+  registerPasswordResetDelivery();
   const email = resetRequestSchema.parse(input).email.toLowerCase().trim();
   const user = await db.user.findUnique({ where: { email } });
   if (!user || !user.active) return;
   const send = delivery;
   const issued = await runInTx(db, async (tx) => {
     const t = send ? await issuePasswordToken(tx, { organizationId: user.organizationId, userId: user.id, purpose: "RESET", createdById: null }) : null;
-    await audit(tx, { organizationId: user.organizationId, actorId: null, action: "PASSWORD_RESET_REQUEST", entityId: user.id, after: { delivered: Boolean(t), expiresAt: t?.expiresAt }, ...meta });
-    return t;
+    // Delivered stays false until Resend accepts the message. A token that was
+    // issued and then rejected is retired below and must not look sent.
+    const auditId = await audit(tx, { organizationId: user.organizationId, actorId: null, action: "PASSWORD_RESET_REQUEST", entityId: user.id, after: { delivered: false, expiresAt: t?.expiresAt ?? null }, ...meta });
+    return { token: t, auditId };
   });
-  if (!issued || !send) return;
+  if (!issued.token || !send) return;
   try {
-    await send({ to: user.email, name: user.name, token: issued.token, expiresAt: issued.expiresAt });
+    await send({ to: user.email, name: user.name, token: issued.token.token, expiresAt: issued.token.expiresAt });
   } catch (e) {
-    log.error("password reset delivery failed", { event: "password_reset_delivery_failed", userId: user.id, error: e });
+    log.error("password reset delivery failed", { event: "password_reset_delivery_failed", userId: user.id, error: e instanceof Error ? e.name : "Error" });
+    // Only the link that was not delivered: a concurrent request may already have
+    // issued (and delivered) a newer one, which must keep working.
+    await db.passwordToken.updateMany({ where: { tokenHash: hashToken(issued.token.token), usedAt: null }, data: { usedAt: new Date() } }).catch((err) => {
+      log.error("password reset token could not be retired after a failed delivery", { event: "password_reset_retire_failed", userId: user.id, error: err instanceof Error ? err.name : "Error" });
+    });
+    return;
   }
+  await db.auditLog.update({
+    where: { id: issued.auditId },
+    data: { after: JSON.stringify({ delivered: true, expiresAt: issued.token.expiresAt }) },
+  }).catch((e) => {
+    log.error("password reset audit could not record delivery", { event: "password_reset_audit_failed", userId: user.id, error: e instanceof Error ? e.name : "Error" });
+  });
 }
 
 // ---------------- Authenticated change ----------------

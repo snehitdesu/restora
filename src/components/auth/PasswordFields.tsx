@@ -18,8 +18,8 @@ export function PasswordInput({ id, label, value, onChange, autoComplete, hint }
   );
 }
 
-export function FormAlert({ tone = "error", children }: { tone?: "error" | "success"; children: React.ReactNode }) {
-  const cls = tone === "error" ? "border-bad-100 bg-bad-50 text-bad-700" : "border-ok-100 bg-ok-50 text-ok-700";
+export function FormAlert({ tone = "error", children }: { tone?: "error" | "success" | "info"; children: React.ReactNode }) {
+  const cls = tone === "error" ? "border-bad-100 bg-bad-50 text-bad-700" : tone === "info" ? "border-info-100 bg-info-50 text-info-700" : "border-ok-100 bg-ok-50 text-ok-700";
   return (
     <p role={tone === "error" ? "alert" : "status"} className={`rounded-md border px-3 py-2 text-sm ${cls}`}>
       {children}

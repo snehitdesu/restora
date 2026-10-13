@@ -141,20 +141,23 @@ test.describe.serial("account provisioning and password lifecycle", () => {
     await Promise.all([staff.context.close(), user.context.close()]);
   });
 
-  test("PWD-005 forgot-password gives the same answer for known and unknown emails", async ({ browser }) => {
-    const messages: string[] = [];
+  test("PWD-005 without reset email, forgot-password says so instead of promising a link; the API answers the same for known and unknown emails", async ({ browser, request }) => {
+    // This E2E deployment has no RESEND_* settings: nothing can be emailed.
+    const { context, page } = await freshPage(browser);
+    await page.goto("/login");
+    await page.getByRole("link", { name: "Forgot password?" }).click();
+    await expect(page.getByRole("status")).toContainText("Password reset by email is not set up for this workspace, so no email was sent.");
+    await expect(page.getByRole("button", { name: "Request reset link" })).toHaveCount(0);
+    await expect(page.getByText(/a reset link will be sent/)).toHaveCount(0);
+    await context.close();
+    const answers: string[] = [];
     for (const address of [email, `nobody-${RUN}@example.test`]) {
-      const { context, page } = await freshPage(browser);
-      await page.goto("/login");
-      await page.getByRole("link", { name: "Forgot password?" }).click();
-      await page.getByLabel("Email").fill(address);
-      await page.getByRole("button", { name: "Request reset link" }).click();
-      const status = page.getByRole("status").filter({ hasText: "If an active account exists" });
-      await expect(status).toBeVisible();
-      messages.push(await status.innerText());
-      await context.close();
+      const res = await request.post("/api/auth/password/reset", { data: { email: address } });
+      expect(res.status()).toBe(202);
+      answers.push(await res.text());
     }
-    expect(messages[0]).toBe(messages[1]);
+    expect(answers[0]).toBe(answers[1]);
+    expect(JSON.parse(answers[0]).data.delivery).toBe("manager");
   });
 
   test("PWD-006 the change-password page requires a session", async ({ browser }) => {

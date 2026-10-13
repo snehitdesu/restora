@@ -8,7 +8,7 @@ import { FormAlert, inputClass } from "@/components/auth/PasswordFields";
 
 export function ForgotPasswordForm() {
   const [email, setEmail] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ text: string; delivery: "email" | "manager" } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -18,8 +18,8 @@ export function ForgotPasswordForm() {
     setBusy(true);
     setError(null);
     try {
-      const res = await api<{ message: string }>("/api/auth/password/reset", { method: "POST", body: { email } });
-      setMessage(res.message);
+      const res = await api<{ message: string; delivery: "email" | "manager" }>("/api/auth/password/reset", { method: "POST", body: { email } });
+      setMessage({ text: res.message, delivery: res.delivery });
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -30,7 +30,7 @@ export function ForgotPasswordForm() {
   return (
     <div className="space-y-4">
       {message ? (
-        <FormAlert tone="success">{message}</FormAlert>
+        <FormAlert tone={message.delivery === "email" ? "success" : "info"}>{message.text}</FormAlert>
       ) : (
         <form onSubmit={submit} className="space-y-4" noValidate>
           <div>
