@@ -84,11 +84,9 @@ function createDb(user: UserRow | null) {
         audits.push(row);
         return { id: row.id };
       },
-      update: async ({ where, data }: { where: { id: string }; data: { after: string } }) => {
-        const row = audits.find((a) => a.id === where.id);
-        if (!row) throw new Error("missing audit");
-        row.after = data.after;
-        return row;
+      // Like the database (append-only triggers on AuditLog): history is never rewritten.
+      update: async () => {
+        throw new Error("AuditLog is append-only: UPDATE is not allowed");
       },
     },
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
@@ -149,9 +147,11 @@ describe("Resend password-reset delivery", () => {
     expect(tokens[0].tokenHash).toBe(hashToken(token!));
     expect(tokens[0].usedAt).toBeNull();
     expect(Math.abs(tokens[0].expiresAt.getTime() - Date.now() - PASSWORD_TOKEN_TTL_MS.RESET)).toBeLessThan(5_000);
-    expect(JSON.parse(audits[0].after)).toMatchObject({ delivered: true });
-    expect(JSON.stringify(audits[0])).not.toContain(token!);
-    expect(JSON.stringify(audits[0])).not.toContain(API_KEY);
+    // The request is recorded when it is made; the delivery is a second row (the audit log is append-only).
+    expect(audits.map((a) => a.action)).toEqual(["PASSWORD_RESET_REQUEST", "PASSWORD_RESET_DELIVERED"]);
+    expect(JSON.parse(audits[1].after)).toMatchObject({ delivered: true });
+    expect(JSON.stringify(audits)).not.toContain(token!);
+    expect(JSON.stringify(audits)).not.toContain(API_KEY);
   });
 
   it("does not send or issue a token when Resend is not configured", async () => {
@@ -274,7 +274,8 @@ describe("Resend password-reset delivery", () => {
     expect(seen).toEqual(["gia@example.com"]);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(tokens[0]?.usedAt).toBeNull();
-    expect(JSON.parse(audits[0].after)).toMatchObject({ delivered: true });
+    expect(audits.map((a) => a.action)).toEqual(["PASSWORD_RESET_REQUEST", "PASSWORD_RESET_DELIVERED"]);
+    expect(JSON.parse(audits[1].after)).toMatchObject({ delivered: true });
   });
 
   it("rejects an expired reset token and accepts a token only once", async () => {

@@ -61,6 +61,8 @@ function quote(c: Call) {
   return {
     lines: [{ index: 0, ok: true, menuItemId: "i-dosa", name: "Masala Dosa", unitPrice: "120.00", modifiers: [], modifiersPerUnit: "0.00", taxPct: "5", qty: 2, lineTotal: "240.00" }],
     subtotal: sub.toFixed(2), tax: tax.toFixed(2), taxes: [{ ratePct: "5", amount: tax.toFixed(2) }], total: (sub - discount + tax).toFixed(2), allAvailable: true, ordering: { open: true, message: null }, discount: discount.toFixed(2),
+    // what placing the order is priced at (the coupon is applied once the order exists)
+    totalBeforeDiscount: (sub + Math.round(sub * 5) / 100).toFixed(2),
     ...(code ? { coupon: good ? { ok: true, code, name: "Welcome", discount: "24.00" } : { ok: false, message: "This code can't be used here." } } : {}),
   };
 }
@@ -133,7 +135,11 @@ describe("checkout: referral and offers", () => {
     await waitFor(() => expect(navigate).toHaveBeenCalled());
     const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/orders"))!;
     expect(post.body).toMatchObject({ customer: { phone: "9876543210" }, couponCode: "WELCOME10", referralCode: "RF7K2M9Q", marketingOptIn: true });
-    expect(JSON.stringify(post.body)).not.toMatch(/discount|price|total/i); // the server prices the coupon
+    // The server prices the coupon: nothing the client sends carries its value or any price. The one total in the
+    // body is the price guard (refused with 409 if it differs, never used as a price), and it is the pre-coupon total.
+    const { expectedTotal, ...rest } = post.body as Record<string, unknown>;
+    expect(JSON.stringify(rest)).not.toMatch(/discount|price|total/i);
+    expect(expectedTotal).toBe("252.00"); // 240 + 5% GST, not the discounted 226.80
     // Used: nothing is kept for the next order.
     expect(loadReferral()).toBeNull();
     expect(loadCoupon(TOKEN)).toBeNull();

@@ -302,8 +302,11 @@ describe("password routes", () => {
     release();
     await settleAfterCommit();
     expect(sent).toEqual([`routeslow-${RUN}@pw.test`]);
-    const audit = await prisma.auditLog.findFirstOrThrow({ where: { entityId: id, action: "PASSWORD_RESET_REQUEST" } });
-    expect(JSON.parse(audit.after!)).toMatchObject({ delivered: true });
+    // The request row was written before the send; the delivery is its own row (the audit log is append-only).
+    const request = await prisma.auditLog.findFirstOrThrow({ where: { entityId: id, action: "PASSWORD_RESET_REQUEST" } });
+    expect(JSON.parse(request.after!)).toMatchObject({ delivered: false });
+    const delivered = await prisma.auditLog.findFirstOrThrow({ where: { entityId: id, action: "PASSWORD_RESET_DELIVERED" } });
+    expect(JSON.parse(delivered.after!)).toMatchObject({ delivered: true });
   });
 
   it("reset: work that fails after the response (database down) is logged and never escapes", async () => {

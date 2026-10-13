@@ -288,6 +288,8 @@ export const AuditAction = makeEnum([
   "PASSWORD_LINK",
   "PASSWORD_SET",
   "PASSWORD_RESET_REQUEST",
+  // a reset link accepted by the mail provider (a separate row: the audit log is append-only)
+  "PASSWORD_RESET_DELIVERED",
   "PASSWORD_CHANGE",
   // background export lifecycle ("EXPORT" = export completed)
   "EXPORT_REQUESTED",

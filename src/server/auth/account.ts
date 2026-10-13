@@ -131,10 +131,10 @@ export async function requestPasswordReset(db: PrismaClient, input: z.input<type
   const send = delivery;
   const issued = await runInTx(db, async (tx) => {
     const t = send ? await issuePasswordToken(tx, { organizationId: user.organizationId, userId: user.id, purpose: "RESET", createdById: null }) : null;
-    // Delivered stays false until Resend accepts the message. A token that was
-    // issued and then rejected is retired below and must not look sent.
-    const auditId = await audit(tx, { organizationId: user.organizationId, actorId: null, action: "PASSWORD_RESET_REQUEST", entityId: user.id, after: { delivered: false, expiresAt: t?.expiresAt ?? null }, ...meta });
-    return { token: t, auditId };
+    // The request row says delivered: false; a PASSWORD_RESET_DELIVERED row follows once Resend
+    // accepts the message. A token that was issued and then rejected is retired below.
+    await audit(tx, { organizationId: user.organizationId, actorId: null, action: "PASSWORD_RESET_REQUEST", entityId: user.id, after: { delivered: false, expiresAt: t?.expiresAt ?? null }, ...meta });
+    return { token: t };
   });
   if (!issued.token || !send) return;
   try {
@@ -148,10 +148,8 @@ export async function requestPasswordReset(db: PrismaClient, input: z.input<type
     });
     return;
   }
-  await db.auditLog.update({
-    where: { id: issued.auditId },
-    data: { after: JSON.stringify({ delivered: true, expiresAt: issued.token.expiresAt }) },
-  }).catch((e) => {
+  // The audit log is append-only (database triggers): the delivery is recorded as its own row.
+  await audit(db as unknown as Tx, { organizationId: user.organizationId, actorId: null, action: "PASSWORD_RESET_DELIVERED", entityId: user.id, after: { delivered: true, expiresAt: issued.token.expiresAt }, ...meta }).catch((e) => {
     log.error("password reset audit could not record delivery", { event: "password_reset_audit_failed", userId: user.id, error: e instanceof Error ? e.name : "Error" });
   });
 }

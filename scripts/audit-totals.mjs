@@ -5,7 +5,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 const FILE = "docs/master-feature-audit.md";
 const ORDER = ["IMPLEMENTED + VERIFIED", "IMPLEMENTED + NOT EXTERNALLY VERIFIED", "PARTIAL", "NOT BUILT", "INTENTIONALLY DEFERRED"];
 
-const text = readFileSync(FILE, "utf8");
+// A Windows checkout (core.autocrlf) has CRLF line ends: count on LF, write back what was there.
+const raw = readFileSync(FILE, "utf8");
+const eol = raw.includes("\r\n") ? "\r\n" : "\n";
+const text = raw.replace(/\r\n/g, "\n");
 const counts = Object.fromEntries(ORDER.map((s) => [s, 0]));
 const ids = new Set();
 for (const line of text.split("\n")) {
@@ -22,7 +25,7 @@ const re = /\| Status \| Rows \|\n\|---\|---\|\n(?:\|.*\n)+?\| \*\*Total\*\* \| 
 if (!re.test(text)) throw new Error("Totals table not found");
 const next = text.replace(re, table);
 if (process.argv.includes("--write")) {
-  writeFileSync(FILE, next);
+  writeFileSync(FILE, next.replace(/\n/g, eol));
   console.log(table);
 } else if (next !== text) {
   console.error(`The Totals table is stale. Counted:\n${table}`);

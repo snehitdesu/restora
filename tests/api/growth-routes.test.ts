@@ -240,6 +240,24 @@ describe("R3. the guest journey", () => {
     expect(await prisma.couponRedemption.count({ where: { organizationId: orgId } })).toBe(usesBefore); // a quote counts nothing
   });
 
+  it("R3 checkout's price guard with a coupon: the quote's totalBeforeDiscount places the order; the discounted total is refused (409), nothing created", async () => {
+    const code = `GUARD${RUN}`.toUpperCase().slice(0, 20);
+    expect((await staff("POST", "coupons", "manager", { code, name: "Guard", kind: "FIXED", value: 20, minOrderValue: 150 })).status).toBe(200);
+    const items = [{ menuItemId: dish, qty: 2 }];
+    const q = await guestCall("POST", `t/${token}/quote`, { body: { items, couponCode: code } });
+    expect(q.json.data).toMatchObject({ total: "189.00", discount: "20.00", totalBeforeDiscount: "210.00" }); // 200 + 5%; with the coupon 180 + 5%
+    const before = await prisma.order.count({ where: { organizationId: orgId } });
+    // The discounted total is not what placing the order is priced at: refused before anything exists.
+    const wrong = await guestCall("POST", `t/${token}/orders`, { key: `gg-${RUN}-1`, body: { items, couponCode: code, expectedTotal: q.json.data.total } });
+    expect(wrong.status).toBe(409);
+    expect(await prisma.order.count({ where: { organizationId: orgId } })).toBe(before);
+    // What checkout sends: the guard passes, the coupon is applied after the order exists.
+    const placed = await guestCall("POST", `t/${token}/orders`, { key: `gg-${RUN}-2`, body: { items, couponCode: code, expectedTotal: q.json.data.totalBeforeDiscount } });
+    expect(placed.status).toBe(200);
+    expect(placed.json.data.coupon).toMatchObject({ applied: true, discount: "20.00" });
+    expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: placed.json.data.orderId } })).total)).toBe(189);
+  });
+
   it("R3 order with code + referral + offers opt-in, paid online: discount, redemption, consent, loyalty and the referral reward all follow the server", async () => {
     const code = `ORDER${RUN}`.toUpperCase().slice(0, 20);
     expect((await staff("POST", "coupons", "manager", { code, name: "Order", kind: "PERCENT", value: 10, maxDiscount: 30 })).status).toBe(200);

@@ -23,6 +23,16 @@ export function normalizePhone(raw: string): string {
   const india = /^(?:\+?91|0)?([6-9]\d{9})$/.exec(compact);
   return india ? india[1] : compact;
 }
+/**
+ * The price guard: the total placing the order is priced at, i.e. before any coupon (the coupon is
+ * applied once the order exists). A quote with a discount but without that figure sends no guard
+ * rather than the discounted total, which the server would always refuse.
+ */
+function guardTotal(quote: { total: string; discount?: string; totalBeforeDiscount?: string }): { expectedTotal?: string } {
+  if (quote.totalBeforeDiscount) return { expectedTotal: quote.totalBeforeDiscount };
+  return Number(quote.discount ?? 0) > 0 ? {} : { expectedTotal: quote.total };
+}
+
 export const phoneValid = (raw: string) => !raw.trim() || /^\+?\d{10,15}$/.test(normalizePhone(raw));
 
 /**
@@ -74,7 +84,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
         // the server prices the order itself and refuses (409, nothing created) if its price differs.
         body: {
           items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod,
-          ...(quote ? { expectedTotal: quote.totalBeforeDiscount ?? quote.total } : {}),
+          ...(quote ? guardTotal(quote) : {}),
           ...(coupon ? { couponCode: coupon } : {}), ...(referralCode ? { referralCode } : {}), ...(marketingOptIn ? { marketingOptIn } : {}),
         },
       })
