@@ -8,7 +8,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import { KOTStatus, KOT_TRANSITIONS, canTransition } from "@/constants/enums";
 import { prisma } from "@/server/db/client";
 import { runInTx } from "@/server/services/_workflow";
-import { type AccessContext, ValidationError, NotFoundError, assertOutletAccess } from "@/server/db/scope";
+import { type AccessContext, ConflictError, ValidationError, NotFoundError, assertOutletAccess } from "@/server/db/scope";
 import { assertCan, can } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
 import { createNotificationTx } from "@/server/services/notifications";
@@ -75,8 +75,26 @@ export async function createKOTsForOrder(tx: Tx, ctx: AccessContext, orderId: st
 }
 
 /**
+ * Lifecycle stamp written by the transition that reaches each state. KOT_TRANSITIONS
+ * is linear (NEW -> ACCEPTED -> PREPARING -> READY -> SERVED), so each stamp has
+ * exactly one transition that can set it. CANCELLED carries no stamp.
+ */
+export const KOT_STAMP: Partial<Record<KOTStatus, "acceptedAt" | "startedAt" | "readyAt" | "servedAt">> = {
+  ACCEPTED: "acceptedAt",
+  PREPARING: "startedAt",
+  READY: "readyAt",
+  SERVED: "servedAt",
+};
+
+/**
  * KDS status change (audited). When every live KOT of an order is READY, an
  * ORDER_READY notification is raised for the outlet (deduplicated).
+ *
+ * The transition's stamp (KOT_STAMP) is set with the status, in the same
+ * statement, from the server clock (stored as UTC), and only when still empty:
+ * a retried or duplicate request never overwrites it, a refused transition
+ * never writes it. The write is a compare-and-set on the status that was read,
+ * so two concurrent requests cannot both apply the move.
  */
 export async function updateKOTStatus(ctx: AccessContext, kotId: string, to: KOTStatus, db: Client = prisma) {
   KOTStatus.zod.parse(to);
@@ -93,7 +111,18 @@ export async function updateKOTStatus(ctx: AccessContext, kotId: string, to: KOT
     if (!canTransition(KOT_TRANSITIONS, kot.status as KOTStatus, to)) {
       throw new ValidationError(`Cannot move KOT from ${kot.status} to ${to}`);
     }
-    const updated = await tx.kot.update({ where: { id: kotId }, data: { status: to } });
+    const stamp = KOT_STAMP[to];
+    const moved = await tx.kot.updateMany({
+      where: { id: kotId, status: kot.status },
+      data: { status: to, ...(stamp && kot[stamp] === null ? { [stamp]: new Date() } : {}) },
+    });
+    if (moved.count !== 1) {
+      // Another request moved the ticket between our read and this write.
+      const now = await tx.kot.findUnique({ where: { id: kotId } });
+      if (now?.status === to) return now; // the same move already happened: no-op, as above
+      throw new ConflictError(`KOT changed to ${now?.status ?? "deleted"} while moving it to ${to}; refresh and try again`);
+    }
+    const updated = await tx.kot.findUniqueOrThrow({ where: { id: kotId } });
     await tx.kotItem.updateMany({ where: { kotId }, data: { status: to } });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Kot", entityId: kotId, outletId: kot.outletId, before: { status: kot.status }, after: { status: to } });
     if (to === "READY") {
