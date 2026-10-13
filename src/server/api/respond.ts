@@ -5,7 +5,7 @@
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { Prisma } from "@prisma/client";
-import { isDatabaseUnavailable, isSerializationConflict } from "@/server/db/conflict";
+import { isDatabaseBusy, isDatabaseUnavailable, isSerializationConflict } from "@/server/db/conflict";
 import { log } from "@/server/observability/log";
 
 type WithStatus = { status?: number; message?: string; name?: string; details?: unknown; retryAfterSeconds?: number };
@@ -25,8 +25,8 @@ export function fail(error: unknown) {
   // Serialization conflicts that outlived runInTx's retries (a burst of simultaneous writes on the
   // same hot rows/index pages): transient — the request changed nothing and is safe to repeat
   // (creates are idempotency-keyed), so tell the client to retry instead of reporting a server fault.
-  if (isRetryableConflict(error)) {
-    log.warn("transaction conflict outlived retries", { event: "tx_conflict_exhausted" });
+  if (isRetryableConflict(error) || isDatabaseBusy(error)) {
+    log.warn("transaction conflict outlived retries", { event: isDatabaseBusy(error) ? "db_busy" : "tx_conflict_exhausted" });
     return NextResponse.json({ ok: false, error: { code: "Busy", message: "Too many simultaneous updates — please retry" } }, { status: 503, headers: { "Retry-After": "1" } });
   }
   // Database unreachable / restarting: transient — the app reconnects on its own (Phase 12 restart drill).

@@ -18,6 +18,8 @@
  * The full variable reference is docs/production-infrastructure.md §2.
  */
 
+import { resendPasswordProblems } from "@/server/auth/passwordResetMail";
+
 /** Public, well-known development placeholder for AUTH_SECRET (safe to reference). */
 export const DEV_AUTH_SECRET_PLACEHOLDER = "dev-only-insecure-secret-change-me-please-32chars-min";
 
@@ -155,6 +157,10 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
   // --- The demo seed wipes data and creates public-password accounts ---
   if (env.ALLOW_DEMO_SEED === "true") problems.push("ALLOW_DEMO_SEED must not be 'true' in production");
 
+  // Password-reset email is optional. A partial Resend setup must not boot:
+  // it would look configured while no message can be accepted.
+  for (const p of resendPasswordProblems(env)) problems.push(p);
+
   // --- Secrets that are optional but must be strong when set ---
   if (isSet(env.INTEGRATION_SECRETS_KEY) && env.INTEGRATION_SECRETS_KEY.length < MIN_AUTH_SECRET_LENGTH) {
     problems.push(`INTEGRATION_SECRETS_KEY must be at least ${MIN_AUTH_SECRET_LENGTH} characters when set`);
@@ -171,7 +177,7 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
   }
 
   // --- Operational tuning ---
-  if (isSet(env.RATE_LIMIT_STORE) && env.RATE_LIMIT_STORE.toLowerCase() !== "memory") problems.push('RATE_LIMIT_STORE must be "memory" (no shared store is implemented)');
+  if (isSet(env.RATE_LIMIT_STORE) && !["memory", "database"].includes(env.RATE_LIMIT_STORE.trim().toLowerCase())) problems.push('RATE_LIMIT_STORE must be "memory" (one instance) or "database" (several instances)');
   if (isSet(env.LOG_LEVEL) && !LOG_LEVELS.includes(env.LOG_LEVEL.toLowerCase())) problems.push(`LOG_LEVEL must be one of ${LOG_LEVELS.join(", ")}`);
   if (isSet(env.LOG_FORMAT) && !["json", "pretty"].includes(env.LOG_FORMAT)) problems.push('LOG_FORMAT must be "json" or "pretty"');
   for (const p of [
@@ -182,6 +188,7 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
     intProblem(env, "OUTBOX_WORKER_INTERVAL_MS", 1000, 3_600_000),
     intProblem(env, "SESSION_IDLE_TIMEOUT_SECONDS", 1),
     intProblem(env, "BACKUP_MAX_AGE_HOURS", 1),
+    intProblem(env, "GUEST_MAX_UNPAID_ORDERS_PER_TABLE", 1, 50),
     intProblem(env, "ALERT_THROTTLE_SECONDS", 1),
   ]) if (p) problems.push(p);
 
@@ -201,6 +208,7 @@ export function productionEnvWarnings(env: NodeJS.ProcessEnv = process.env): str
   if (env.ALLOW_MOCK_PROVIDERS === "true") w.push("ALLOW_MOCK_PROVIDERS=true: mock payment/POS/aggregator adapters approve anything — never on a public deployment");
   if (env.DEMO_DEPLOYMENT === "true") w.push("DEMO_DEPLOYMENT=true: sample data and simulated/test payments only; not a live restaurant");
   if (env.VERCEL === "1") w.push("VERCEL=1: in-process maintenance worker is disabled; /api/cron/worker must be invoked by Vercel Cron");
+  if (env.VERCEL === "1" && env.RATE_LIMIT_STORE?.trim().toLowerCase() !== "database") w.push('RATE_LIMIT_STORE is not "database" on Vercel: each serverless instance counts sign-in and password-reset attempts separately, so the limits are weaker than configured (apply migration 20261017100000_rate_limit_buckets, then set RATE_LIMIT_STORE=database)');
   if (env.ALLOW_MOCK_PROVIDERS === "true") {
     for (const name of WEBHOOK_SECRET_VARS) {
       const v = env[name];
@@ -216,6 +224,7 @@ export function productionEnvWarnings(env: NodeJS.ProcessEnv = process.env): str
     if (!isSet(env.METRICS_TOKEN)) w.push("METRICS_TOKEN is unset: /api/health/metrics is disabled");
     if (!isSet(env.ALERT_WEBHOOK_URL)) w.push("ALERT_WEBHOOK_URL is unset: alerts are written to the log only");
     if (!isSet(env.PUBLIC_BASE_URL)) w.push("PUBLIC_BASE_URL is unset: table QR codes use the address the Tables screen is viewed on, which guests' phones may not reach");
+    if (!isSet(env.RESEND_API_KEY)) w.push("RESEND_API_KEY is unset: password-reset emails are not sent; a manager issues the link");
     if (!isSet(env.NEXT_PUBLIC_SITE_URL)) w.push("NEXT_PUBLIC_SITE_URL is unset (it must be set when building the website too): the website's canonical links, sitemap and Open Graph URLs point at http://localhost:3000");
     if (!isSet(env.INTEGRATION_SECRETS_KEY)) w.push("INTEGRATION_SECRETS_KEY is unset: integration secrets are encrypted with a key derived from AUTH_SECRET (rotating AUTH_SECRET then makes them unreadable)");
   }

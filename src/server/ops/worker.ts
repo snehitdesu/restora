@@ -38,6 +38,7 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
 import { purgeExpiredSessions } from "@/server/auth/session";
+import { purgeRateLimitBuckets } from "@/server/api/rateLimit";
 import { deliverMessage } from "@/server/services/messaging";
 import { pushAggregatorStatus } from "@/server/services/aggregatorSync";
 import { deliverAccountingSync, recoverInterruptedAccountingSync } from "@/server/services/accountingSync";
@@ -132,12 +133,18 @@ export async function recoverStuckWork(db: PrismaClient = prisma, now = new Date
   return { stuckDeliveries, stuckPrints: prints.count, staleExports, stuckWebhooks };
 }
 
-/** 3a. Delete expired sessions and long-expired password links. */
+/** 3a. Delete expired sessions, long-expired password links and ended rate-limit windows. */
 export async function housekeeping(db: PrismaClient = prisma, now = new Date()) {
   const sessions = await purgeExpiredSessions(db);
   const tokens = await db.passwordToken.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600_000) } } });
-  if (sessions || tokens.count) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count });
-  return { sessions, passwordTokens: tokens.count };
+  // The table only matters with RATE_LIMIT_STORE=database; a database that has not
+  // applied its migration yet must not stop the rest of housekeeping.
+  const rateLimitBuckets = await purgeRateLimitBuckets(db, now.getTime()).catch((e) => {
+    log.warn("rate-limit buckets were not purged", { event: "housekeeping_rate_limit_skipped", error: e instanceof Error ? e.name : "Error" });
+    return 0;
+  });
+  if (sessions || tokens.count || rateLimitBuckets) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count, rateLimitBuckets });
+  return { sessions, passwordTokens: tokens.count, rateLimitBuckets };
 }
 
 export type BackupStatus = { lastSuccessAt?: string; lastFailureAt?: string; lastError?: string; lastFile?: string };

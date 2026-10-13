@@ -2256,3 +2256,16 @@ model JobRun {
   detail     String?
   @@unique([name, scopeKey, runDate])
 }
+
+/// Shared fixed-window counters for the security rate limits when
+/// RATE_LIMIT_STORE=database (several app instances, e.g. serverless). `key`
+/// is a SHA-256 of policy + subject, so no email address or IP is stored.
+/// `resetAt` is epoch milliseconds. Written only with raw SQL
+/// (server/api/rateLimit.ts) as one atomic upsert.
+model RateLimitBucket {
+  key     String @id
+  count   Int    @default(0)
+  resetAt BigInt
+
+  @@index([resetAt])
+}
