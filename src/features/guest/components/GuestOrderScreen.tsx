@@ -7,7 +7,7 @@ import { newIdempotencyKey } from "@/lib/idempotency";
 import { orderKeyFor, rememberedOrders } from "@/features/guest/session";
 import { BillView } from "@/features/billing/BillView";
 import type { GuestOrderView } from "@/server/services/guestOrdering";
-import { GUEST_TRACKER_STEPS } from "@/domain/orderProgress";
+import { GUEST_AWAITING_PAYMENT_LABEL, GUEST_TRACKER_STEPS } from "@/domain/orderProgress";
 import { formatMoney } from "@/lib/format";
 import { openRazorpayCheckout, type RazorpaySuccess } from "@/features/guest/razorpay";
 import { guestOnlinePaymentCopy } from "@/features/guest/paymentCopy";
@@ -241,7 +241,7 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
             <span>{paid ? "Paid ✓" : bill.paymentStatus === "CANCELLED" ? "Cancelled" : bill.paymentStatus === "REFUNDED" ? "Refunded" : view.pendingPaymentId ? "Payment pending" : "Unpaid"}</span>
           </div>
           <p className="sf-stage-caption">
-            Status: <span data-testid="order-stage" role="status" aria-live="polite">{view.fulfilmentLabel}</span>
+            Status: <span data-testid="order-stage" role="status" aria-live="polite">{status.caption ?? view.fulfilmentLabel}</span>
           </p>
           {loadError && <p className="sf-stage-caption">Connection problem — showing the last known status.</p>}
         </section>
@@ -342,14 +342,15 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
   );
 }
 
-type StatusCopy = { tone: "brand" | "waiting" | "ready" | "cancelled"; icon: SfIconName | "check"; anim?: "check" | "pulse"; title: string; text: string };
+/** `caption` replaces the server's stage label when the page knows more (the guest is paying online right now). */
+type StatusCopy = { tone: "brand" | "waiting" | "ready" | "cancelled"; icon: SfIconName | "check"; anim?: "check" | "pulse"; title: string; text: string; caption?: string };
 
 function statusCopy(view: GuestOrderView, wantsOnline: boolean, due: number): StatusCopy {
   const t = view.tracker;
   const table = view.bill.table ? ` at Table ${view.bill.table}` : "";
   if (t.step < 0) return { tone: "cancelled", icon: "x", title: "Order cancelled", text: "This order was cancelled. Please ask the staff if you need help." };
   if (!t.confirmed) {
-    if (wantsOnline && view.canPay && due > 0) return { tone: "waiting", icon: "card", anim: "pulse", title: "Complete your payment", text: "Your order goes to the kitchen as soon as your payment is confirmed." };
+    if (wantsOnline && view.canPay && due > 0) return { tone: "waiting", icon: "card", anim: "pulse", title: "Complete your payment", text: "Your order goes to the kitchen as soon as your payment is confirmed.", caption: GUEST_AWAITING_PAYMENT_LABEL };
     return {
       tone: "waiting",
       icon: "check",

@@ -97,7 +97,13 @@ type StorefrontValue = {
   toast: string | null;
   showToast: (msg: string) => void;
   online: boolean;
+  /** The server's last quote, shared by the cart and checkout pages (use useServerQuote). */
+  quoteState: QuoteState;
+  runQuote: () => Promise<void>;
+  dismissRepriced: () => void;
 };
+
+type QuoteState = { quote: (Quote & { sig: string; at: number }) | null; loading: boolean; error: string | null; repriced: string[] };
 
 const Ctx = createContext<StorefrontValue | null>(null);
 
@@ -167,84 +173,49 @@ export function StorefrontProvider({ token, initial, children }: { token: string
     toastTimer.current = window.setTimeout(() => setToast(null), 2200);
   }, []);
 
+  // Handlers below are stable across cart changes (they read the latest cart / menu
+  // from refs), so the memoized menu rows do not re-render when another line changes.
+  const cartLines = useRef(cart.lines);
+  cartLines.current = cart.lines;
+  const menu = useRef(data.menu);
+  menu.current = data.menu;
+
   const quickAdd = useCallback(
     (item: MenuItemDTO) => {
       if (item.effectiveSoldOut) return;
-      if (cart.lines.length >= GUEST_MAX_LINES && !cart.lines.some((l) => l.menuItemId === item.id && !l.variantId && !l.modifierOptionIds.length && !l.notes)) {
+      const lines = cartLines.current;
+      if (lines.length >= GUEST_MAX_LINES && !lines.some((l) => l.menuItemId === item.id && !l.variantId && !l.modifierOptionIds.length && !l.notes)) {
         showToast(`An order can have up to ${GUEST_MAX_LINES} different items`);
         return;
       }
       dispatch({ type: "add", line: { menuItemId: item.id, name: item.name, modifierOptionIds: [], modifierLabels: [], unitPrice: item.effectivePrice, modifiersPerUnit: 0, taxPct: Number(item.taxPct), qty: 1 } });
       showToast(`Added ${item.name}`);
     },
-    [cart.lines, showToast]
+    [showToast]
   );
+  const openItem = useCallback((item: MenuItemDTO) => setSheet({ item }), []);
+  const editLine = useCallback((line: CartLine) => {
+    const item = menu.current.find((i) => i.id === line.menuItemId);
+    if (item) setSheet({ item, editing: line });
+  }, []);
+  const closeSheet = useCallback(() => setSheet(null), []);
 
-  const value: StorefrontValue = {
-    token,
-    data,
-    brand,
-    base,
-    cart,
-    cartReady,
-    dispatch,
-    count: cartItemCount(cart),
-    estimate: estimateTotals(cart.lines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }))),
-    sheet,
-    openItem: (item) => setSheet({ item }),
-    editLine: (line) => {
-      const item = data.menu.find((i) => i.id === line.menuItemId);
-      if (item) setSheet({ item, editing: line });
-    },
-    closeSheet: () => setSheet(null),
-    quickAdd,
-    refreshMenu,
-    toast,
-    showToast,
-    online,
-  };
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
-}
-
-// ---------------- server quote ----------------
-
-export type QuoteLine =
-  | { index: number; ok: true; menuItemId: string; name: string; unitPrice: string; modifiers: Array<{ name: string; priceDelta: string }>; modifiersPerUnit: string; taxPct: string; qty: number; lineTotal: string }
-  | { index: number; ok: false; menuItemId: string; reason: string };
-export type Quote = { lines: QuoteLine[]; subtotal: string; tax: string; taxes: Array<{ ratePct: string; amount: string }>; total: string; allAvailable: boolean; ordering: { open: boolean; message: string | null } };
-
-const itemsOf = (lines: CartLine[]) => lines.map((l) => ({ menuItemId: l.menuItemId, variantId: l.variantId, modifierOptionIds: l.modifierOptionIds.length ? l.modifierOptionIds : undefined, qty: l.qty }));
-
-/**
- * The cart priced by the server. Re-fetched (debounced) whenever the lines
- * change. When the restaurant changed a price, the cart line takes the
- * server's price and `repriced` lists what changed so the page can say so.
- */
-export function useServerQuote() {
-  const { token, cart, cartReady, dispatch } = useStorefront();
-  const [quote, setQuote] = useState<(Quote & { sig: string }) | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [repriced, setRepriced] = useState<string[]>([]);
-  const signature = JSON.stringify(itemsOf(cart.lines));
-  const seq = useRef(0);
-  const linesRef = useRef(cart.lines);
-  linesRef.current = cart.lines;
-
-  const run = useCallback(async () => {
-    const lines = linesRef.current;
+  // The server quote lives here, not in each page, so cart → checkout → cart does not
+  // re-price an unchanged cart (the order is priced again by the server when placed).
+  const [quoteState, setQuoteState] = useState<QuoteState>({ quote: null, loading: false, error: null, repriced: [] });
+  const quoteSeq = useRef(0);
+  const runQuote = useCallback(async () => {
+    const lines = cartLines.current;
     const sig = JSON.stringify(itemsOf(lines));
-    const mine = ++seq.current;
+    const mine = ++quoteSeq.current;
     if (!lines.length) {
-      setQuote(null);
-      setLoading(false);
+      setQuoteState((s) => ({ ...s, quote: null, loading: false }));
       return;
     }
-    setLoading(true);
+    setQuoteState((s) => ({ ...s, loading: true }));
     try {
       const q = await request<Quote>(`/api/qr/t/${encodeURIComponent(token)}/quote`, { method: "POST", body: { items: itemsOf(lines) } });
-      if (mine !== seq.current) return;
-      setError(null);
+      if (mine !== quoteSeq.current) return;
       const changes: Array<{ key: string; unitPrice: number; modifiersPerUnit: number; taxPct: number }> = [];
       const names: string[] = [];
       q.lines.forEach((ql) => {
@@ -258,32 +229,82 @@ export function useServerQuote() {
           names.push(l.name);
         }
       });
-      if (changes.length) {
-        dispatch({ type: "reprice", prices: changes });
-        setRepriced(names);
-      }
+      if (changes.length) dispatch({ type: "reprice", prices: changes });
       // Re-pricing does not change the signature (it is items / sizes / add-ons / quantities only).
-      setQuote({ ...q, sig });
+      setQuoteState((s) => ({ quote: { ...q, sig, at: Date.now() }, loading: false, error: null, repriced: names.length ? names : s.repriced }));
     } catch (e) {
-      if (mine !== seq.current) return;
-      setError(e instanceof Error ? e.message : "Could not check your cart");
-    } finally {
-      if (mine === seq.current) setLoading(false);
+      if (mine !== quoteSeq.current) return;
+      setQuoteState((s) => ({ ...s, loading: false, error: e instanceof Error ? e.message : "Could not check your cart" }));
     }
-  }, [token, dispatch]);
+  }, [token]);
+  const dismissRepriced = useCallback(() => setQuoteState((s) => ({ ...s, repriced: [] })), []);
+
+  const value: StorefrontValue = {
+    token,
+    data,
+    brand,
+    base,
+    cart,
+    cartReady,
+    dispatch,
+    count: cartItemCount(cart),
+    estimate: estimateTotals(cart.lines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }))),
+    sheet,
+    openItem,
+    editLine,
+    closeSheet,
+    quickAdd,
+    refreshMenu,
+    toast,
+    showToast,
+    online,
+    quoteState,
+    runQuote,
+    dismissRepriced,
+  };
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+// ---------------- server quote ----------------
+
+export type QuoteLine =
+  | { index: number; ok: true; menuItemId: string; name: string; unitPrice: string; modifiers: Array<{ name: string; priceDelta: string }>; modifiersPerUnit: string; taxPct: string; qty: number; lineTotal: string }
+  | { index: number; ok: false; menuItemId: string; reason: string };
+export type Quote = { lines: QuoteLine[]; subtotal: string; tax: string; taxes: Array<{ ratePct: string; amount: string }>; total: string; allAvailable: boolean; ordering: { open: boolean; message: string | null } };
+
+const itemsOf = (lines: CartLine[]) => lines.map((l) => ({ menuItemId: l.menuItemId, variantId: l.variantId, modifierOptionIds: l.modifierOptionIds.length ? l.modifierOptionIds : undefined, qty: l.qty }));
+
+/** How long the cart and checkout pages reuse the server's answer for an unchanged cart. */
+export const QUOTE_REUSE_MS = 30_000;
+
+/**
+ * The cart priced by the server. Re-fetched whenever the lines change
+ * (debounced), and when a page opens without a recent answer for exactly this
+ * cart. When the restaurant changed a price, the cart line takes the server's
+ * price and `repriced` lists what changed so the page can say so.
+ */
+export function useServerQuote() {
+  const { cart, cartReady, quoteState, runQuote, dismissRepriced } = useStorefront();
+  const { quote, loading, error, repriced } = quoteState;
+  const signature = JSON.stringify(itemsOf(cart.lines));
+  const opened = useRef(false);
 
   useEffect(() => {
     if (!cartReady) return;
-    const id = window.setTimeout(() => void run(), 250);
+    const first = !opened.current;
+    opened.current = true;
+    // Coming from the cart (or back): the provider already holds the answer for this exact cart.
+    if (quote && quote.sig === signature && Date.now() - quote.at < QUOTE_REUSE_MS) return;
+    const id = window.setTimeout(() => void runQuote(), first ? 0 : 250);
     return () => window.clearTimeout(id);
-    // signature captures every priced field of the lines
+    // signature captures every priced field of the lines; the cached quote is read when they change
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature, cartReady, run]);
+  }, [signature, cartReady, runQuote]);
 
   /** The server's answer for exactly the current cart (null while the cart changed and is being re-checked). */
   const current = quote && quote.sig === signature ? quote : null;
   /** Quote line for cart line `index` (null while unknown). */
   const forLine = (index: number): QuoteLine | null => current?.lines.find((l) => l.index === index) ?? null;
   const unavailable = current ? current.lines.filter((l): l is Extract<QuoteLine, { ok: false }> => !l.ok) : [];
-  return { quote: current, loading: loading || (cart.lines.length > 0 && !current && !error), error, repriced, dismissRepriced: () => setRepriced([]), forLine, unavailable, recheck: run };
+  return { quote: current, loading: loading || (cart.lines.length > 0 && !current && !error), error, repriced, dismissRepriced, forLine, unavailable, recheck: runQuote };
 }

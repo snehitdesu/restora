@@ -216,7 +216,7 @@ export function GuestCartScreen() {
                   {loading || !quote ? "Checking your cart…" : closed ? "Ordering is closed" : "Remove unavailable items to continue"}
                 </button>
               ) : (
-                <Link href={`${base}/checkout`} className="sf-btn sf-btn-primary sf-btn-lg sf-btn-block">
+                <Link prefetch href={`${base}/checkout`} className="sf-btn sf-btn-primary sf-btn-lg sf-btn-block">
                   Proceed to checkout · {formatMoney(quote!.total)}
                 </Link>
               )}

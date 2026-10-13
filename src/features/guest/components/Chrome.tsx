@@ -28,7 +28,15 @@ export function LogoMark({ name, code }: { name: string; code: boolean }) {
   );
 }
 
-/** Sticky top bar: restaurant, table, this device's orders. */
+/**
+ * Sticky top bar: restaurant, table, this device's orders.
+ *
+ * Links INTO the cart and checkout use `prefetch`: those pages hold no data of
+ * their own (menu and cart live in the /t/[token] layout) and cost the server
+ * only the table lookup, so a full prefetch makes the tap instant. Links back to
+ * the menu do not: measured, prefetching them saved no request and added work
+ * to the heaviest page's mount.
+ */
 export function TopBar({ onMyOrders }: { onMyOrders?: () => void }) {
   const { data, brand, base, token } = useStorefront();
   const [mine, setMine] = useState(0);
@@ -81,7 +89,7 @@ export function CartBar() {
   if (!cartReady || count === 0) return null;
   return (
     <div className="sf-cartbar">
-      <Link href={`${base}/cart`} className={`sf-cartbar-inner${bump ? " sf-bump" : ""}`} aria-label={`View cart: ${count} ${count === 1 ? "item" : "items"}, ${formatMoney(estimate.total)}`}>
+      <Link prefetch href={`${base}/cart`} className={`sf-cartbar-inner${bump ? " sf-bump" : ""}`} aria-label={`View cart: ${count} ${count === 1 ? "item" : "items"}, ${formatMoney(estimate.total)}`}>
         <SfIcon name="cart" className="sf-cartbar-icon" />
         <span className="sf-cartbar-text">
           <b>

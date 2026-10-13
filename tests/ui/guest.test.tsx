@@ -10,7 +10,7 @@
 import "@testing-library/jest-dom/vitest";
 import type { ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, within, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, within, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GuestMenuScreen } from "@/features/guest/components/GuestMenuScreen";
 import { GuestCartScreen } from "@/features/guest/components/GuestCartScreen";
@@ -24,7 +24,7 @@ import { loadCart, saveCart, submissionKey, clearSubmission, rememberOrder, reme
 import { cartReducer, emptyCart, type CartLine } from "@/features/pos/cart";
 import type { Bill } from "@/server/services/bill";
 
-vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: ReactNode }) => <a href={href} {...rest}>{children}</a> }));
+vi.mock("next/link", () => ({ default: ({ href, children, prefetch: _prefetch, ...rest }: { href: string; children: ReactNode; prefetch?: boolean }) => <a href={href} {...rest}>{children}</a> }));
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: any };
 let calls: Call[] = [];
@@ -125,6 +125,51 @@ describe("guest storefront — menu", () => {
     expect(saved.map((l) => [l.menuItemId, l.variantId, l.modifierOptionIds, l.qty])).toEqual([["i-dosa", undefined, [], 2], ["i-biryani", "v-large", ["o-hot", "o-raita"], 2]]);
   });
 
+  it("a tapped category keeps the highlight while the page scrolls past the others, then follows the reader again", async () => {
+    const user = userEvent.setup();
+    handler = () => ({ data: menuData() });
+    type Entry = { target: Element; isIntersecting: boolean; boundingClientRect: { top: number } };
+    let report: (entries: Entry[]) => void = () => {};
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(cb: (e: Entry[]) => void) {
+          // the reveal observer is not created for a classic storefront: this is the category observer
+          report = cb;
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    );
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    inStore(<GuestMenuScreen />);
+    const tabs = screen.getByRole("navigation", { name: "Menu categories" });
+    const tab = (name: string) => within(tabs).getByRole("button", { name });
+    const passing = (id: string) => act(() => report([{ target: document.getElementById(`cat-${id}`)!, isIntersecting: true, boundingClientRect: { top: 140 } }]));
+
+    await user.click(tab("Mains"));
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    expect(scrolled).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    window.dispatchEvent(new Event("scroll"));
+    passing("c1"); // the smooth scroll passes "Tiffin" on its way
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    expect(tab("Tiffin")).not.toHaveAttribute("aria-current");
+
+    await new Promise((r) => setTimeout(r, 200)); // the page stopped scrolling
+    passing("c1"); // the guest now scrolls back up by hand
+    expect(tab("Tiffin")).toHaveAttribute("aria-current", "true");
+
+    // touching the screen mid-jump hands the highlight back to the reader at once
+    await user.click(tab("Mains"));
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    window.dispatchEvent(new Event("touchstart"));
+    passing("c1");
+    expect(tab("Tiffin")).toHaveAttribute("aria-current", "true");
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
   it("explains when ordering is closed and only shows facts the restaurant entered", () => {
     handler = () => ({ data: menuData() });
     const data = { ...menuData(), ordering: { open: false, message: "We're closed right now — ordering opens at 9:00 AM. You can still browse the menu." } };
@@ -207,6 +252,9 @@ describe("guest storefront — checkout", () => {
     expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
     await user.type(screen.getByLabelText(/Your name/), "Ananya");
     await user.type(screen.getByLabelText(/Phone/), "+91 98765-43210");
+    // Cash (the default) promises what the server does: straight to the kitchen, paid at the counter.
+    expect(screen.getByRole("radio", { name: /^Cash/ })).toBeChecked();
+    expect(screen.getByText("Your order goes to the kitchen as soon as you place it. Pay at the counter whenever you're ready.")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Simulated online payment/ })).toBeInTheDocument();
     expect(screen.getByText("Simulated payment — no real money is charged.")).toBeInTheDocument();
     expect(screen.queryByText(/Razorpay/)).toBeNull();
@@ -219,10 +267,36 @@ describe("guest storefront — checkout", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0].url).toBe(`/api/qr/t/${TOKEN}/orders`);
     expect(posts[0].headers["Idempotency-Key"]).toMatch(/^qr-/);
-    expect(posts[0].body).toEqual({ items: [{ menuItemId: "i-dosa", qty: 2 }], notes: "no onion", customer: { name: "Ananya", phone: "9876543210" }, paymentMethod: "ONLINE" });
-    expect(JSON.stringify(posts[0].body)).not.toMatch(/price|total|tax/i);
+    // The shown total travels only as a guard (the server refuses on a mismatch); no price or tax is ever sent.
+    expect(posts[0].body).toEqual({ items: [{ menuItemId: "i-dosa", qty: 2 }], notes: "no onion", customer: { name: "Ananya", phone: "9876543210" }, paymentMethod: "ONLINE", expectedTotal: "252.00" });
+    expect(JSON.stringify({ ...posts[0].body, expectedTotal: undefined })).not.toMatch(/price|total|tax/i);
     expect(rememberedOrders()).toEqual([expect.objectContaining({ orderId: "cmord1", key: "key-abc", token: TOKEN })]);
     expect(loadCart(TOKEN).lines).toHaveLength(0);
+  });
+
+  it("cart → checkout (client navigation, same storefront) reuses the server quote for the unchanged cart; a change re-prices", async () => {
+    const user = userEvent.setup();
+    seedCart([line({ qty: 2 })]);
+    handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: menuData() });
+    const page = (ui: ReactNode) => (
+      <StorefrontProvider token={TOKEN} initial={menuData()}>
+        {ui}
+        <StorefrontOverlays />
+      </StorefrontProvider>
+    );
+    const quotes = () => calls.filter((c) => c.url.endsWith("/quote")).length;
+    const { rerender } = render(page(<GuestCartScreen />));
+    await screen.findByRole("link", { name: /^Proceed to checkout/ });
+    expect(quotes()).toBe(1);
+    // The /t/[token] layout (and its provider) stays mounted; only the page changes.
+    rerender(page(<GuestCheckoutScreen navigate={vi.fn()} />));
+    expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled(); // at once: no second request
+    expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
+    rerender(page(<GuestCartScreen />));
+    expect(quotes()).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Increase Masala Dosa" }));
+    await waitFor(() => expect(quotes()).toBe(2)); // a changed cart is priced again
+    await screen.findByRole("link", { name: /^Proceed to checkout · ₹378\.00/ });
   });
 
   it("shows the server's refusal, refreshes the menu and re-checks the cart; a retry reuses the same idempotency key", async () => {
@@ -245,6 +319,33 @@ describe("guest storefront — checkout", () => {
     const keys = calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders")).map((c) => c.headers["Idempotency-Key"]);
     expect(keys[0]).toBe(keys[1]);
     expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("CASH");
+  });
+
+  it("a price that changed after the quote: shows the new total, re-prices the cart, places nothing until the guest confirms", async () => {
+    const user = userEvent.setup();
+    seedCart([line({})]);
+    let price = "120.00";
+    let posted = 0;
+    handler = (c) => {
+      if (c.url.endsWith("/quote")) return { data: quoteOf((c.body.items as Array<{ menuItemId: string; qty: number }>).map((i) => ({ ok: true as const, menuItemId: i.menuItemId, name: "Masala Dosa", unitPrice: price, qty: i.qty }))) };
+      if (c.method === "POST") {
+        posted++;
+        if (c.body.expectedTotal !== "136.50") return { status: 409, error: { code: "PriceChanged", message: "Prices changed since you opened checkout. Check the new total, then place your order again.", details: { total: "136.50" } } as never };
+        return { data: { orderId: "o3", ref: "R3", accessKey: "k3" } };
+      }
+      return { data: menuData() };
+    };
+    const navigate = vi.fn();
+    inStore(<GuestCheckoutScreen navigate={navigate} />);
+    await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹126.00"));
+    price = "130.00"; // the café changes the price while the guest is on this page
+    await user.click(screen.getByRole("button", { name: "Place order" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Prices changed since you opened checkout. Check the new total, then place your order again. New total: ₹136.50.");
+    expect(navigate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹136.50"));
+    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(posted).toBe(2);
   });
 
   it("names Razorpay only for test mode, and says no real money is charged", async () => {
@@ -394,6 +495,8 @@ describe("guest order page", () => {
     const { unmount } = render(<GuestOrderScreen orderId="cmord5" />);
     expect(await screen.findByRole("region", { name: "Test payment gateway" })).toBeInTheDocument(); // opened without a tap
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Complete your payment");
+    // The caption agrees with the headline: the order waits for this payment, not for the restaurant.
+    expect(screen.getByTestId("order-stage")).toHaveTextContent("Waiting for your online payment");
     expect(window.location.hash).toBe("#k=key-5"); // one-shot flags removed
     expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(1);
     unmount();
