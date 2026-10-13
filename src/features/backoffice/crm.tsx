@@ -7,7 +7,7 @@
  * for them. Loyalty changes go through the loyalty service (loyalty.manage).
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useState } from "react";
 import { api } from "@/lib/api/client";
 import { useQuery, usePaged } from "@/lib/hooks/useApi";
@@ -66,7 +66,7 @@ function CustomerDialog({ open, onClose, onDone, customer }: { open: boolean; on
 // ============================================================
 
 export function CustomersScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can } = useShell();
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -191,7 +191,7 @@ export function CustomerDetail({ id }: { id: string }) {
 // ============================================================
 
 export function SegmentsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const [segment, setSegment] = useState("");
   const list = usePaged<SegmentRow & { id: string }>("/api/customers/segments", undefined, 100);
   // Segment membership comes from the server; this only filters the loaded page.

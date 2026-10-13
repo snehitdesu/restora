@@ -10,7 +10,7 @@
  * hides what would be refused; the API decides.
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useMemo, useState } from "react";
 import { api, ApiError } from "@/lib/api/client";
 import { useQuery } from "@/lib/hooks/useApi";
@@ -141,7 +141,7 @@ function StarterMenuOffer({ outletId, onDone }: { outletId: string; onDone: () =
 }
 
 export function MenuItemsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { outletId, outlet } = useShell();
   const { orgManage } = useMenuAuthority();
   const [categoryId, setCategoryId] = useState("");

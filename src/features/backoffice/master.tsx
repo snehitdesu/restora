@@ -11,7 +11,7 @@
  * details arrive already masked for users without vendor.manage.
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useState } from "react";
 import { api } from "@/lib/api/client";
 import { usePaged, useQuery } from "@/lib/hooks/useApi";
@@ -148,7 +148,7 @@ function CategoryDialog({ categories, onClose, onDone }: { categories: MaterialC
 }
 
 export function MaterialsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { master } = useMasterAuthority();
   const [tab, setTab] = useState<"materials" | "categories">("materials");
   const [search, setSearch] = useState("");
@@ -363,7 +363,7 @@ function VendorDialog({ vendor, onClose, onDone }: { vendor?: VendorRow; onClose
 }
 
 export function VendorsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { vendor } = useMasterAuthority();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");

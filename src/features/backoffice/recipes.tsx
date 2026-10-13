@@ -11,7 +11,7 @@
  * checks and unit conversion all happen on the server.
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api/client";
 import { usePaged, useQuery } from "@/lib/hooks/useApi";
@@ -117,7 +117,7 @@ function UnitSelect({ units, value, onChange, empty, id, label }: { units: UnitR
 }
 
 export function RecipesScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { manage } = useRecipeAuthority();
   const [outputType, setOutputType] = useState("");
   const [search, setSearch] = useState("");

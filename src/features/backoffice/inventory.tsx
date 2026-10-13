@@ -9,7 +9,7 @@
  * unit.
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api/client";
 import { createKeyedSubmitter } from "@/lib/idempotency";
@@ -103,7 +103,7 @@ function DepartmentSelect({ depts, value, onChange, empty = "—", required }: {
 type StockView = "all" | "low" | "negative";
 
 export function StockScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { outletId, can } = useShell();
   const showCost = useCanSeeCost();
   const [dialog, setDialog] = useState<null | "opening" | "adjust">(null);
@@ -424,7 +424,7 @@ function CreateTransferDialog({ open, onClose, onDone }: { open: boolean; onClos
 }
 
 export function TransfersScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const outletName = useOutletName();
   const [open, setOpen] = useState(false);
@@ -566,7 +566,7 @@ function CreateIssueDialog({ open, onClose, onDone }: { open: boolean; onClose: 
 }
 
 export function IssuesScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const depts = useDepartments(outletId);
   const [open, setOpen] = useState(false);
@@ -632,7 +632,7 @@ function CreateCountDialog({ open, onClose, onDone }: { open: boolean; onClose: 
 }
 
 export function StockCountsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const depts = useDepartments(outletId);
   const [open, setOpen] = useState(false);
@@ -797,7 +797,7 @@ function CreateWastageDialog({ open, onClose, onDone }: { open: boolean; onClose
 }
 
 export function WastageScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet } = useShell();
   const showCost = useCanSeeCost();
   const [open, setOpen] = useState(false);
@@ -891,7 +891,7 @@ function CreateBatchDialog({ open, onClose, onDone }: { open: boolean; onClose: 
 }
 
 export function ProductionScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const materials = useMaterials();
   const depts = useDepartments(outletId);

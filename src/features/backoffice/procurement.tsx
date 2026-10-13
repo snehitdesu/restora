@@ -8,7 +8,7 @@
  * outlet and re-authorized server-side.
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api/client";
 import { useQuery, usePaged } from "@/lib/hooks/useApi";
@@ -160,7 +160,7 @@ const poFields: LineField[] = [
 
 function CreatePODialog({ open, onClose, onDone, initialLines, indentId }: { open: boolean; onClose: () => void; onDone?: (id: string) => void; initialLines?: LineDraft[]; indentId?: string }) {
   const [submitKeyed] = useState(() => createKeyedSubmitter("po"));
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const outletId = useOutletId();
   const materials = useMaterials(open);
   const vendors = useVendors(open);
@@ -216,7 +216,7 @@ export function PurchaseOrdersScreen() {
 }
 
 export function PurchaseOrderDetail({ id }: { id: string }) {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet } = useShell();
   const q = useDoc<PO>(`/api/procurement/purchase-orders/${id}`);
   const materials = useMaterials();
@@ -315,7 +315,7 @@ function CreateGRNDialog({ open, onClose, onDone, fromPo }: { open: boolean; onC
 }
 
 export function GRNsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet } = useShell();
   const vendors = useVendors();
   const [open, setOpen] = useState(false);
@@ -331,7 +331,7 @@ export function GRNsScreen() {
 }
 
 export function GRNDetail({ id }: { id: string }) {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet } = useShell();
   const q = useDoc<GRN>(`/api/procurement/grns/${id}`);
   const materials = useMaterials();
@@ -410,7 +410,7 @@ function CreateBillDialog({ open, onClose, onDone, fromGrn }: { open: boolean; o
 }
 
 export function BillsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet } = useShell();
   const vendors = useVendors();
   const [open, setOpen] = useState(false);

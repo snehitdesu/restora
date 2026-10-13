@@ -9,7 +9,7 @@
  *    further hidden when the user lacks the permission. The server re-checks
  *    both on every call; this only avoids offering dead buttons.
  */
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useState, type ReactNode } from "react";
 import { usePaged } from "@/lib/hooks/useApi";
 import { useShell } from "@/lib/shellContext";
@@ -45,7 +45,7 @@ export function DocumentList<T extends Doc>({
   outletScoped?: boolean;
 }) {
   const { outletId } = useShell();
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const [status, setStatus] = useState("");
   const [vendorId, setVendorId] = useState("");
   const [range, setRange] = useState<DateRange>({ from: "", to: "" });
