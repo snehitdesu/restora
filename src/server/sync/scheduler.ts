@@ -9,6 +9,7 @@
  */
 import { prisma } from "@/server/db/client";
 import { log } from "@/server/observability/log";
+import { desktopSync } from "@/server/sync/desktopDb";
 import { runSyncCycle } from "@/server/sync/runner";
 
 const MIN_MS = 1_000;
@@ -35,7 +36,7 @@ export function startCloudSync(): () => Promise<void> {
     if (stopped) return;
     let delay = base;
     try {
-      const link = await prisma.cloudLink.findFirst({ select: { organizationId: true } });
+      const link = await desktopSync(prisma).cloudLink.findFirst({ select: { organizationId: true } });
       if (!link) delay = 15_000; // not linked: look again in a while
       else {
         const r = await runSyncCycle(prisma, link.organizationId);

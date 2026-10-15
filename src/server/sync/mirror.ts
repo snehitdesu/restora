@@ -19,6 +19,7 @@ import { writeAudit } from "@/server/audit/log";
 import { createNotificationTx } from "@/server/services/notifications";
 import { nextKotNumber } from "@/server/services/kot";
 import { runInTx } from "@/server/services/_workflow";
+import { desktopSync } from "@/server/sync/desktopDb";
 
 type Tx = Prisma.TransactionClient;
 export type MirrorTarget = { organizationId: string; localOutletId: string; cloudOutletId: string };
@@ -73,7 +74,7 @@ export async function mirrorOrder(db: PrismaClient, t: MirrorTarget, wire: WireO
   } catch (e) {
     // Two cycles raced on the same new order: the loser's insert hit the unique index. The winner's row is complete.
     if (isUnique(e)) {
-      const map = await db.cloudRecordMap.findUnique({ where: { organizationId_kind_cloudId: { organizationId: t.organizationId, kind: "ORDER", cloudId: wire.id } } });
+      const map = await desktopSync(db).cloudRecordMap.findUnique({ where: { organizationId_kind_cloudId: { organizationId: t.organizationId, kind: "ORDER", cloudId: wire.id } } });
       if (map?.revision === packRevision(wire)) return { action: "unchanged", localOrderId: localId, issues: JSON.parse(map.issues ?? "[]") };
       return runInTx(db, (tx) => mirrorTx(tx, t, wire, localId));
     }
@@ -82,7 +83,7 @@ export async function mirrorOrder(db: PrismaClient, t: MirrorTarget, wire: WireO
 }
 
 async function mirrorTx(tx: Tx, t: MirrorTarget, wire: WireOrder, localId: string): Promise<MirrorResult> {
-  const map = await tx.cloudRecordMap.findUnique({ where: { organizationId_kind_cloudId: { organizationId: t.organizationId, kind: "ORDER", cloudId: wire.id } } });
+  const map = await desktopSync(tx).cloudRecordMap.findUnique({ where: { organizationId_kind_cloudId: { organizationId: t.organizationId, kind: "ORDER", cloudId: wire.id } } });
   const incoming = packRevision(wire);
   if (map?.revision === incoming) return { action: "unchanged", localOrderId: map.localId, issues: JSON.parse(map.issues ?? "[]") };
   if (map?.revision && map.revision.split("|")[0] > wire.updatedAt) return { action: "stale", localOrderId: map.localId, issues: JSON.parse(map.issues ?? "[]") };
@@ -117,7 +118,7 @@ async function mirrorTx(tx: Tx, t: MirrorTarget, wire: WireOrder, localId: strin
   if (stale.length) {
     await tx.kotItem.deleteMany({ where: { orderItemId: { in: stale } } });
     await tx.orderItem.deleteMany({ where: { id: { in: stale } } });
-    await tx.cloudRecordMap.deleteMany({ where: { organizationId: t.organizationId, kind: "ORDER_ITEM", localId: { in: stale } } });
+    await desktopSync(tx).cloudRecordMap.deleteMany({ where: { organizationId: t.organizationId, kind: "ORDER_ITEM", localId: { in: stale } } });
   }
   const knownItems = new Set(existingItems.map((i) => i.id));
   for (const i of wire.items) {
@@ -190,13 +191,13 @@ async function mirrorTx(tx: Tx, t: MirrorTarget, wire: WireOrder, localId: strin
     ...wire.payments.map((p) => ["PAYMENT", p.id, mirrorId("PAYMENT", p.id, t.organizationId)] as [string, string, string]),
   ];
   for (const [kind, cloudId, mapped] of mappings) {
-    await tx.cloudRecordMap.upsert({
+    await desktopSync(tx).cloudRecordMap.upsert({
       where: { organizationId_kind_cloudId: { organizationId: t.organizationId, kind, cloudId } },
       create: { organizationId: t.organizationId, kind, cloudId, localId: mapped },
       update: {},
     });
   }
-  await tx.cloudRecordMap.upsert({
+  await desktopSync(tx).cloudRecordMap.upsert({
     where: { organizationId_kind_cloudId: { organizationId: t.organizationId, kind: "ORDER", cloudId: wire.id } },
     create: { organizationId: t.organizationId, kind: "ORDER", cloudId: wire.id, localId, revision: incoming, issues: JSON.stringify(issues) },
     update: { revision: incoming, issues: JSON.stringify(issues) },

@@ -15,6 +15,7 @@ import { writeAudit } from "@/server/audit/log";
 import { type AccessContext, ConflictError, NotFoundError, ValidationError } from "@/server/db/scope";
 import { decryptSecret, encryptSecret } from "@/server/integrations/secrets";
 import { CloudAuthError, CloudClient, CloudHttpError, CloudOfflineError, normalizeBaseUrl, type Transport } from "@/server/sync/cloudClient";
+import { desktopSync } from "@/server/sync/desktopDb";
 import type { WireOutlet } from "@/lib/sync/wire";
 
 export const connectSchema = z
@@ -55,7 +56,7 @@ export type SyncStatusView = {
 };
 
 export async function getLink(db: PrismaClient, organizationId: string) {
-  return db.cloudLink.findUnique({ where: { organizationId } });
+  return desktopSync(db).cloudLink.findUnique({ where: { organizationId } });
 }
 
 export function readToken(link: { tokenCipher: string | null }): string | null {
@@ -71,10 +72,11 @@ export function readToken(link: { tokenCipher: string | null }): string | null {
 export async function syncStatus(db: PrismaClient, organizationId: string, now = new Date()): Promise<SyncStatusView> {
   const link = await getLink(db, organizationId);
   if (!link) return { state: "UNLINKED", baseUrl: null, cloudOutletCode: null, userEmail: null, lastSuccessAt: null, lastAttemptAt: null, lastError: null, staleSeconds: null, pendingOps: 0, conflictOps: 0, ordersWithIssues: 0 };
+  const desk = desktopSync(db);
   const [pendingOps, conflictOps, maps] = await Promise.all([
-    db.syncOperation.count({ where: { organizationId, status: "PENDING" } }),
-    db.syncOperation.count({ where: { organizationId, status: { in: ["CONFLICT", "REJECTED"] } } }),
-    db.cloudRecordMap.count({ where: { organizationId, kind: "ORDER", issues: { not: "[]" } } }),
+    desk.syncOperation.count({ where: { organizationId, status: "PENDING" } }),
+    desk.syncOperation.count({ where: { organizationId, status: { in: ["CONFLICT", "REJECTED"] } } }),
+    desk.cloudRecordMap.count({ where: { organizationId, kind: "ORDER", issues: { not: "[]" } } }),
   ]);
   const failing = link.lastError !== null && (!link.lastSuccessAt || (link.lastAttemptAt ?? now) >= link.lastSuccessAt);
   const state: SyncState = link.status === "AUTH_REQUIRED" || !readToken(link) ? "AUTH_REQUIRED" : failing ? "OFFLINE" : "ONLINE";
@@ -146,7 +148,7 @@ export async function connectCloud(ctx: AccessContext, input: ConnectInput, db: 
     await abandon();
     throw new ValidationError("This computer cannot protect cloud credentials. Pair again after the operating system key store is available.");
   }
-  await db.cloudLink.upsert({
+  await desktopSync(db).cloudLink.upsert({
     where: { organizationId: ctx.organizationId },
     create: { organizationId: ctx.organizationId, baseUrl, cloudOutletId: cloudOutlet.id, cloudOutletCode: cloudOutlet.code, localOutletId: localOutlet.id, userEmail: issued.userEmail, tokenCipher, status: "LINKED" },
     // Re-pairing to the same outlet keeps the feed position and the queue; pointing elsewhere starts the feed afresh.
@@ -167,12 +169,13 @@ export async function disconnectCloud(ctx: AccessContext, db: PrismaClient, opts
   assertCan(ctx, "integration.manage");
   const link = await getLink(db, ctx.organizationId);
   if (!link) throw new NotFoundError("This computer is not linked to a cloud");
-  const pending = await db.syncOperation.count({ where: { organizationId: ctx.organizationId, status: "PENDING" } });
+  const desk = desktopSync(db);
+  const pending = await desk.syncOperation.count({ where: { organizationId: ctx.organizationId, status: "PENDING" } });
   if (pending && !opts.discardPending) throw new ConflictError(`${pending} action${pending === 1 ? " is" : "s are"} still waiting to reach the cloud. Reconnect and let them send, or discard them.`);
   const token = readToken(link);
   if (token) await new CloudClient({ baseUrl: link.baseUrl, token, transport: opts.transport }).revokeSelf();
-  if (pending) await db.syncOperation.updateMany({ where: { organizationId: ctx.organizationId, status: "PENDING" }, data: { status: "REJECTED", lastError: "Discarded when the cloud link was removed", completedAt: new Date() } });
-  await db.cloudLink.delete({ where: { organizationId: ctx.organizationId } });
+  if (pending) await desk.syncOperation.updateMany({ where: { organizationId: ctx.organizationId, status: "PENDING" }, data: { status: "REJECTED", lastError: "Discarded when the cloud link was removed", completedAt: new Date() } });
+  await desk.cloudLink.delete({ where: { organizationId: ctx.organizationId } });
   await db.$transaction(async (tx) => {
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "CloudLink", entityId: ctx.organizationId, outletId: link.localOutletId, before: { baseUrl: link.baseUrl, cloudOutlet: link.cloudOutletCode }, after: { linked: false, discardedOperations: pending } });
   });

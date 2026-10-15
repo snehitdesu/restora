@@ -17,6 +17,7 @@ import type { PrismaClient } from "@prisma/client";
 import { ConflictError, NotFoundError } from "@/server/db/scope";
 import { log } from "@/server/observability/log";
 import { CloudAuthError, CloudClient, CloudHttpError, CloudUnavailableError, isTransientCloudError, type Transport } from "@/server/sync/cloudClient";
+import { desktopSync } from "@/server/sync/desktopDb";
 import { getLink, readToken } from "@/server/sync/link";
 import { mirrorOrder, type MirrorTarget } from "@/server/sync/mirror";
 import type { SyncOpInput, SyncOpResult, WireFeed } from "@/lib/sync/wire";
@@ -65,7 +66,7 @@ async function cycle(db: PrismaClient, organizationId: string, deps: SyncDeps): 
   const client = new CloudClient({ baseUrl: link.baseUrl, token, transport: deps.transport });
   const target: MirrorTarget = { organizationId, localOutletId: link.localOutletId, cloudOutletId: link.cloudOutletId };
   const now = deps.now ?? (() => new Date());
-  await db.cloudLink.update({ where: { organizationId }, data: { lastAttemptAt: now() } });
+  await desktopSync(db).cloudLink.update({ where: { organizationId }, data: { lastAttemptAt: now() } });
   try {
     const sent = await drainOutbox(db, client, target, now);
     result.opsDone = sent.done;
@@ -73,16 +74,16 @@ async function cycle(db: PrismaClient, organizationId: string, deps: SyncDeps): 
     const pulled = await pullFeed(db, client, target, link.cursor);
     result.imported = pulled.imported;
     result.updated = pulled.updated;
-    await db.cloudLink.update({ where: { organizationId }, data: { lastSuccessAt: now(), lastError: null, status: "LINKED", ...(pulled.cursor ? { cursor: pulled.cursor } : {}) } });
+    await desktopSync(db).cloudLink.update({ where: { organizationId }, data: { lastSuccessAt: now(), lastError: null, status: "LINKED", ...(pulled.cursor ? { cursor: pulled.cursor } : {}) } });
     return result;
   } catch (e) {
     if (e instanceof CloudAuthError || (e instanceof CloudHttpError && (e.status === 401 || e.status === 403))) {
-      await db.cloudLink.update({ where: { organizationId }, data: { status: "AUTH_REQUIRED", lastError: "The cloud ended this sign-in. Sign in again to resume." } });
+      await desktopSync(db).cloudLink.update({ where: { organizationId }, data: { status: "AUTH_REQUIRED", lastError: "The cloud ended this sign-in. Sign in again to resume." } });
       log.warn("cloud sync: session ended by the cloud", { event: "cloud_sync_auth" });
       return { ...result, state: "AUTH_REQUIRED", error: "The cloud ended this sign-in" };
     }
     const message = safeMessage(e);
-    await db.cloudLink.update({ where: { organizationId }, data: { lastError: message } });
+    await desktopSync(db).cloudLink.update({ where: { organizationId }, data: { lastError: message } });
     if (!isTransientCloudError(e)) log.error("cloud sync cycle failed", { event: "cloud_sync_failed", error: message });
     return { ...result, state: "OFFLINE", error: message };
   }
@@ -123,9 +124,9 @@ async function pullFeed(db: PrismaClient, client: CloudClient, target: MirrorTar
 /** Queue a staff action on a mirrored order. Durable before anything is sent; an identical action already waiting is reused. */
 export async function enqueueOperation(db: PrismaClient, input: { organizationId: string; localOrderId: string; cloudOrderId: string; action: SyncOpInput["action"]; payload: Record<string, string>; createdById?: string }): Promise<{ id: string; created: boolean }> {
   const payload = JSON.stringify(input.payload);
-  const dup = await db.syncOperation.findFirst({ where: { organizationId: input.organizationId, localOrderId: input.localOrderId, action: input.action, payload, status: "PENDING" }, select: { id: true } });
+  const dup = await desktopSync(db).syncOperation.findFirst({ where: { organizationId: input.organizationId, localOrderId: input.localOrderId, action: input.action, payload, status: "PENDING" }, select: { id: true } });
   if (dup) return { id: dup.id, created: false };
-  const op = await db.syncOperation.create({ data: { id: randomUUID(), organizationId: input.organizationId, localOrderId: input.localOrderId, cloudOrderId: input.cloudOrderId, action: input.action, payload, createdById: input.createdById } });
+  const op = await desktopSync(db).syncOperation.create({ data: { id: randomUUID(), organizationId: input.organizationId, localOrderId: input.localOrderId, cloudOrderId: input.cloudOrderId, action: input.action, payload, createdById: input.createdById } });
   return { id: op.id, created: true };
 }
 
@@ -139,34 +140,34 @@ export type SendOutcome = { sent: boolean; status: "DONE" | "CONFLICT" | "REJECT
 
 /** Send one queued action. Compare-and-set claim so an overlapping sender never posts the same attempt twice. */
 export async function sendOperation(db: PrismaClient, client: CloudClient, target: MirrorTarget, opId: string, now: () => Date = () => new Date()): Promise<SendOutcome> {
-  const op = await db.syncOperation.findUnique({ where: { id: opId } });
+  const op = await desktopSync(db).syncOperation.findUnique({ where: { id: opId } });
   if (!op || op.status !== "PENDING") return { sent: false, status: (op?.status as SendOutcome["status"]) ?? "PENDING" };
-  const claimed = await db.syncOperation.updateMany({ where: { id: opId, status: "PENDING", attempts: op.attempts }, data: { attempts: op.attempts + 1, nextAttemptAt: new Date(now().getTime() + opBackoffMs(op.attempts + 1)) } });
+  const claimed = await desktopSync(db).syncOperation.updateMany({ where: { id: opId, status: "PENDING", attempts: op.attempts }, data: { attempts: op.attempts + 1, nextAttemptAt: new Date(now().getTime() + opBackoffMs(op.attempts + 1)) } });
   if (claimed.count !== 1) return { sent: false, status: "PENDING" };
   try {
     const res = await client.post<SyncOpResult>("/api/sync/ops", toWireInput(op));
     const status = res.outcome === "CONFLICT" ? "CONFLICT" : "DONE";
-    await db.syncOperation.update({ where: { id: opId }, data: { status, outcome: res.outcome, lastError: res.detail, completedAt: now() } });
+    await desktopSync(db).syncOperation.update({ where: { id: opId }, data: { status, outcome: res.outcome, lastError: res.detail, completedAt: now() } });
     await mirrorOrder(db, target, res.order).catch((e) => log.error("cloud sync: could not mirror an order after an action", { event: "cloud_sync_mirror_failed", error: e }));
     return { sent: true, status, outcome: res.outcome, detail: res.detail };
   } catch (e) {
     if (e instanceof CloudAuthError) {
       // Not the operation's fault: leave it queued and make it due as soon as the operator signs in again.
-      await db.syncOperation.update({ where: { id: opId }, data: { attempts: op.attempts, nextAttemptAt: now(), lastError: "Waiting for the cloud sign-in" } });
+      await desktopSync(db).syncOperation.update({ where: { id: opId }, data: { attempts: op.attempts, nextAttemptAt: now(), lastError: "Waiting for the cloud sign-in" } });
       throw e;
     }
     if (isTransientCloudError(e)) {
-      await db.syncOperation.update({ where: { id: opId }, data: { lastError: safeMessage(e) } });
+      await desktopSync(db).syncOperation.update({ where: { id: opId }, data: { lastError: safeMessage(e) } });
       throw e;
     }
     // The cloud understood the request and refused it for good (not allowed, order unknown, invalid): never retried.
-    await db.syncOperation.update({ where: { id: opId }, data: { status: "REJECTED", lastError: safeMessage(e), completedAt: now() } });
+    await desktopSync(db).syncOperation.update({ where: { id: opId }, data: { status: "REJECTED", lastError: safeMessage(e), completedAt: now() } });
     return { sent: true, status: "REJECTED", detail: safeMessage(e) };
   }
 }
 
 async function drainOutbox(db: PrismaClient, client: CloudClient, target: MirrorTarget, now: () => Date) {
-  const due = await db.syncOperation.findMany({ where: { organizationId: target.organizationId, status: "PENDING", nextAttemptAt: { lte: now() } }, orderBy: { createdAt: "asc" }, take: OPS_PER_CYCLE, select: { id: true } });
+  const due = await desktopSync(db).syncOperation.findMany({ where: { organizationId: target.organizationId, status: "PENDING", nextAttemptAt: { lte: now() } }, orderBy: { createdAt: "asc" }, take: OPS_PER_CYCLE, select: { id: true } });
   let done = 0;
   let conflict = 0;
   for (const { id } of due) {
@@ -182,22 +183,22 @@ async function drainOutbox(db: PrismaClient, client: CloudClient, target: Mirror
 
 /** "Retry now": make every waiting action due immediately and run a cycle. */
 export async function retryNow(db: PrismaClient, organizationId: string, deps: SyncDeps = {}): Promise<CycleResult> {
-  await db.syncOperation.updateMany({ where: { organizationId, status: "PENDING" }, data: { nextAttemptAt: new Date() } });
+  await desktopSync(db).syncOperation.updateMany({ where: { organizationId, status: "PENDING" }, data: { nextAttemptAt: new Date() } });
   return runSyncCycle(db, organizationId, deps);
 }
 
 /** A person dismisses a conflicted / rejected action after looking at it (the cloud's state is already mirrored). */
 export async function dismissOperation(db: PrismaClient, organizationId: string, opId: string): Promise<void> {
-  const op = await db.syncOperation.findUnique({ where: { id: opId } });
+  const op = await desktopSync(db).syncOperation.findUnique({ where: { id: opId } });
   if (!op || op.organizationId !== organizationId) throw new NotFoundError("Action not found");
   if (op.status !== "CONFLICT" && op.status !== "REJECTED") throw new ConflictError("Only an action that needs attention can be dismissed");
-  await db.syncOperation.update({ where: { id: opId }, data: { status: "RESOLVED" } });
+  await desktopSync(db).syncOperation.update({ where: { id: opId }, data: { status: "RESOLVED" } });
 }
 
 export type OperationView = { id: string; localOrderId: string; action: string; status: string; outcome: string | null; detail: string | null; attempts: number; createdAt: string; completedAt: string | null; ref: string };
 
 export async function listOperations(db: PrismaClient, organizationId: string, opts: { attention?: boolean; take?: number } = {}): Promise<OperationView[]> {
-  const rows = await db.syncOperation.findMany({
+  const rows = await desktopSync(db).syncOperation.findMany({
     where: { organizationId, status: opts.attention ? { in: ["PENDING", "CONFLICT", "REJECTED"] } : undefined },
     orderBy: { createdAt: "desc" },
     take: Math.min(opts.take ?? 50, 200),

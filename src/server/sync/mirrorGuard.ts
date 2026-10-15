@@ -25,6 +25,7 @@ import type { WireOrder } from "@/lib/sync/wire";
 import { CloudAuthError, CloudClient, CloudHttpError, CloudOfflineError, CloudUnavailableError, isTransientCloudError } from "@/server/sync/cloudClient";
 import { getLink, readToken } from "@/server/sync/link";
 import { mirrorOrder, type MirrorTarget } from "@/server/sync/mirror";
+import { desktopSync } from "@/server/sync/desktopDb";
 import { enqueueOperation, sendOperation } from "@/server/sync/runner";
 import { getOrder } from "@/server/services/orders";
 
@@ -60,7 +61,7 @@ function isPaymentsApi(a: GuardInput): boolean {
 const REFUSAL = "This is an online QR order managed in the cloud. On this computer you can accept it and move its kitchen tickets along; take payment here while connected; change, discount, cancel or refund it on the hosted POS.";
 
 export const mirroredBy = (db: PrismaClient, organizationId: string, kind: string, localId: string) =>
-  db.cloudRecordMap.findFirst({ where: { organizationId, kind, localId } });
+  desktopSync(db).cloudRecordMap.findFirst({ where: { organizationId, kind, localId } });
 
 async function connection(db: PrismaClient, organizationId: string) {
   const link = await getLink(db, organizationId);
@@ -152,7 +153,7 @@ async function kotStatusMirrored(db: PrismaClient, ctx: AccessContext, map: MapR
   if (!kot) throw new NotFoundError("KOT not found");
   if (!(to === "SERVED" && can(ctx, "kot.serve", kot.outletId))) assertCan(ctx, "kot.update", kot.outletId);
   // Actions already waiting for this ticket count: the next step is judged from where the queue will leave it.
-  const waiting = await db.syncOperation.findMany({ where: { organizationId: ctx.organizationId, localOrderId: kot.orderId, action: "KOT_STATUS", status: "PENDING" }, orderBy: { createdAt: "asc" }, select: { payload: true } });
+  const waiting = await desktopSync(db).syncOperation.findMany({ where: { organizationId: ctx.organizationId, localOrderId: kot.orderId, action: "KOT_STATUS", status: "PENDING" }, orderBy: { createdAt: "asc" }, select: { payload: true } });
   let effective = kot.status;
   for (const w of waiting) {
     const p = JSON.parse(w.payload) as { kotId?: string; to?: string };

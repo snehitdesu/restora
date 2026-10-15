@@ -13,6 +13,7 @@ import { getGuestOrder } from "@/server/services/guestOrdering";
 import { rotateTableQr } from "@/server/services/masterData";
 import { decryptSecret } from "@/server/integrations/secrets";
 import { CloudClient, CloudOfflineError, setCloudTransportForTests } from "@/server/sync/cloudClient";
+import { desktopSync } from "@/server/sync/desktopDb";
 import { connectCloud, disconnectCloud, syncStatus } from "@/server/sync/link";
 import { createPairing } from "@/server/sync/device";
 import { dismissOperation, listOperations, retryNow, runSyncCycle } from "@/server/sync/runner";
@@ -55,7 +56,8 @@ afterAll(async () => {
 });
 
 const ownerCtx = (u: { id: string }) => buildAccessContext(prisma, u.id);
-const link = () => prisma.cloudLink.findUniqueOrThrow({ where: { organizationId: desk.orgId } });
+const ddb = desktopSync(prisma);
+const link = () => ddb.cloudLink.findUniqueOrThrow({ where: { organizationId: desk.orgId } });
 const status = () => syncStatus(prisma, desk.orgId);
 
 /** A guest order on a fresh cloud table (a table holds at most three unaccepted orders). */
@@ -86,7 +88,7 @@ describe("sign-in to the cloud (scenario 8)", () => {
     fc.offline = true;
     await expect(connectCloud(owner, { baseUrl: CLOUD_ORIGIN, email: syncUser.email, password: PASSWORD }, prisma, fc.transport)).rejects.toThrow(/Could not reach/);
     fc.offline = false;
-    expect(await prisma.cloudLink.count({ where: { organizationId: desk.orgId } })).toBe(0);
+    expect(await ddb.cloudLink.count({ where: { organizationId: desk.orgId } })).toBe(0);
   });
 
   it("links one cloud outlet to the local outlet and stores only an encrypted session token", async () => {
@@ -138,7 +140,7 @@ describe("mirroring a QR order (scenarios 3, 4, 5, 6, 7, 14)", () => {
     expect(o.kots).toHaveLength(0);
     expect(await prisma.notification.count({ where: { organizationId: desk.orgId, type: "NEW_ORDER", body: { contains: placed.ref } } })).toBe(1);
     // traceability: every cloud record has a stable mapping
-    const maps = await prisma.cloudRecordMap.findMany({ where: { organizationId: desk.orgId } });
+    const maps = await ddb.cloudRecordMap.findMany({ where: { organizationId: desk.orgId } });
     expect(maps.find((m) => m.kind === "ORDER" && m.cloudId === placed.orderId)?.localId).toBe(o.id);
     expect(maps.filter((m) => m.kind === "ORDER_ITEM")).toHaveLength(2);
   });
@@ -147,7 +149,7 @@ describe("mirroring a QR order (scenarios 3, 4, 5, 6, 7, 14)", () => {
     const placed = await guestOrder();
     await cycle();
     await cycle();
-    await prisma.cloudLink.update({ where: { organizationId: desk.orgId }, data: { cursor: null } }); // "restart" with the feed position lost
+    await ddb.cloudLink.update({ where: { organizationId: desk.orgId }, data: { cursor: null } }); // "restart" with the feed position lost
     const again = await cycle();
     expect(again.imported).toBe(0);
     expect(await prisma.order.count({ where: { organizationId: desk.orgId, externalRef: placed.orderId } })).toBe(1);
@@ -371,7 +373,7 @@ describe("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
     expect(res.json.data.sync.state).toBe("QUEUED");
     expect((await localOrder(placed.orderId)).status).toBe("OPEN"); // not accepted until the cloud says so
     expect((await submit(placed.orderId)).json.data.sync.state).toBe("QUEUED");
-    expect(await prisma.syncOperation.count({ where: { organizationId: desk.orgId, cloudOrderId: placed.orderId, status: "PENDING" } })).toBe(1);
+    expect(await ddb.syncOperation.count({ where: { organizationId: desk.orgId, cloudOrderId: placed.orderId, status: "PENDING" } })).toBe(1);
     const off = await cycle();
     expect(off.state).toBe("OFFLINE");
     const st = await status();
@@ -433,9 +435,9 @@ describe("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
     const res = await submit(placed.orderId);
     expect(res.json.data.sync.state).toBe("QUEUED"); // the desktop cannot know the cloud already did it
     expect((await cloudOrder(placed.orderId)).status).toBe("SENT");
-    const [op] = await prisma.syncOperation.findMany({ where: { cloudOrderId: placed.orderId } });
+    const [op] = await ddb.syncOperation.findMany({ where: { cloudOrderId: placed.orderId } });
     await retryNow(prisma, desk.orgId); // same operation id is sent again
-    expect((await prisma.syncOperation.findUniqueOrThrow({ where: { id: op.id } })).status).toBe("DONE");
+    expect((await ddb.syncOperation.findUniqueOrThrow({ where: { id: op.id } })).status).toBe("DONE");
     expect((await cloudOrder(placed.orderId)).kots).toHaveLength(1);
     expect(await prisma.syncOpReceipt.count({ where: { organizationId: cloud.orgId, opId: op.id } })).toBe(1);
     expect((await localOrder(placed.orderId)).status).toBe("SENT");
@@ -450,7 +452,7 @@ describe("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
     for (const status of ["ACCEPTED", "PREPARING"]) {
       expect((await call(Kitchen, "POST", `kots/${kotId}/status`, { session: deskKitchen.session, body: { status } })).json.data.sync.state).toBe("QUEUED");
     }
-    expect(await prisma.syncOperation.count({ where: { cloudOrderId: placed.orderId, status: "PENDING" } })).toBe(2);
+    expect(await ddb.syncOperation.count({ where: { cloudOrderId: placed.orderId, status: "PENDING" } })).toBe(2);
     fc.offline = false;
     await retryNow(prisma, desk.orgId);
     expect((await cloudOrder(placed.orderId)).kots[0].status).toBe("PREPARING");
@@ -557,8 +559,8 @@ describe("scope, privacy and the control API (scenarios 10, 20)", () => {
     await expect(disconnectCloud(ctx, prisma, { transport: fc.transport })).rejects.toMatchObject({ status: 409 });
     const st = await disconnectCloud(ctx, prisma, { discardPending: true, transport: fc.transport });
     expect(st.state).toBe("UNLINKED");
-    expect(await prisma.cloudLink.count({ where: { organizationId: desk.orgId } })).toBe(0);
-    expect(await prisma.syncOperation.count({ where: { organizationId: desk.orgId, status: "PENDING" } })).toBe(0);
+    expect(await ddb.cloudLink.count({ where: { organizationId: desk.orgId } })).toBe(0);
+    expect(await ddb.syncOperation.count({ where: { organizationId: desk.orgId, status: "PENDING" } })).toBe(0);
     expect((await cycle()).state).toBe("UNLINKED");
     expect(await prisma.session.count({ where: { userId: syncUser.id, revokedAt: null } })).toBeGreaterThanOrEqual(0);
   });
