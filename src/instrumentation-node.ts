@@ -46,6 +46,12 @@ export async function registerNode(): Promise<void> {
   onShutdown("export-runner", () => getBackgroundExportRunner().idle());
   onShutdown("database", () => prisma.$disconnect());
 
+  if (process.env.AHAROS_DESKTOP === "1") {
+    // Installed desktop only: keep the local cache in step with the cloud (QR orders in, staff actions out).
+    const { startCloudSync } = await import("@/server/sync/scheduler");
+    onShutdown("cloud-sync", startCloudSync());
+  }
+
   setImmediate(() => {
     recoverExportJobs()
       .then((r) => {

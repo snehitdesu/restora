@@ -101,6 +101,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/settings/outlets", label: "Outlets", icon: "store", anyOf: ["org.manage", "outlet.manage"], section: "Admin", description: "Outlets" },
   { href: "/settings/purchasing", label: "Purchasing rules", icon: "sliders", permission: "org.manage", section: "Admin", description: "Who approves a purchase order, by its size: automatic below one amount, two approvers above another" },
   { href: "/settings/integrations", label: "Integrations", icon: "swap", permission: "integration.manage", section: "Admin", description: "Payment gateway, ordering platforms, messaging, accounting export" },
+  { href: "/settings/cloud-sync", label: "Cloud sync", icon: "swap", permission: "outlet.manage", section: "Admin", description: "Link the desktop POS to the hosted restaurant, or pair a desktop from the hosted POS" },
   { href: "/settings/printers", label: "Printers & drawer", icon: "receipt", anyOf: ["outlet.manage", "payment.take"], section: "Admin", description: "Receipt / kitchen printers and the cash drawer" },
   { href: "/settings/departments", label: "Departments", icon: "grid", permission: "master.view", section: "Admin", description: "Outlet departments" },
   { href: "/audit", label: "Audit log", icon: "shield", permission: "audit.view", section: "Admin", description: "Who changed what" },

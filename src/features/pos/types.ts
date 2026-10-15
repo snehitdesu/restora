@@ -54,4 +54,6 @@ export type OrderDTO = {
   items: OrderItemDTO[];
   payments?: PaymentDTO[];
   kots?: Array<{ id: string; number: number; status: string }>;
+  /** Desktop only: outcome of a cloud-mirrored action (not present on counter sales). */
+  sync?: { state: string; outcome?: string; detail?: string; opId?: string };
 };

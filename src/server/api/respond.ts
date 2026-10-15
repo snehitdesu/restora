@@ -7,6 +7,7 @@ import { ZodError } from "zod";
 import { Prisma } from "@prisma/client";
 import { isDatabaseBusy, isDatabaseUnavailable, isSerializationConflict } from "@/server/db/conflict";
 import { log } from "@/server/observability/log";
+import { CloudAuthError, CloudOfflineError, CloudUnavailableError } from "@/server/sync/cloudClient";
 
 type WithStatus = { status?: number; message?: string; name?: string; details?: unknown; retryAfterSeconds?: number };
 
@@ -34,12 +35,19 @@ export function fail(error: unknown) {
     log.warn("database unavailable", { event: "db_unavailable" });
     return NextResponse.json({ ok: false, error: { code: "Unavailable", message: "The system is reconnecting to its database — please retry in a moment" } }, { status: 503, headers: { "Retry-After": "2" } });
   }
+  if (error instanceof CloudAuthError) {
+    return NextResponse.json({ ok: false, error: { code: "UnauthorizedError", message: error.message || "The cloud session is no longer valid" } }, { status: 401 });
+  }
+  if (error instanceof CloudOfflineError || error instanceof CloudUnavailableError) {
+    log.warn("cloud unavailable", { event: "cloud_unavailable" });
+    return NextResponse.json({ ok: false, error: { code: error.name, message: error.message } }, { status: 503, headers: { "Retry-After": "2" } });
+  }
   const e = (error ?? {}) as WithStatus;
   const status = typeof e.status === "number" ? e.status : 500;
-  // Only surface safe messages; hide internals on 500.
-  const message = status >= 500 ? "Internal server error" : e.message || "Request failed";
+  // Only surface safe messages; hide internals on 5xx except a declared 503 (still a client-visible retry).
+  const message = status >= 500 && status !== 503 ? "Internal server error" : e.message || "Request failed";
   // Full detail (scrubbed, with stack) goes to the server log under the request id; the client gets a generic message.
-  if (status >= 500) log.error("unhandled API error", { event: "api_error", status, error });
+  if (status >= 500 && status !== 503) log.error("unhandled API error", { event: "api_error", status, error });
   const headers = typeof e.retryAfterSeconds === "number" ? { "Retry-After": String(e.retryAfterSeconds) } : undefined;
   return NextResponse.json({ ok: false, error: { code: e.name ?? "Error", message, details: status < 500 ? e.details : undefined } }, { status, headers });
 }

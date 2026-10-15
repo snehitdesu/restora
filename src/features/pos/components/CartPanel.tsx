@@ -84,6 +84,8 @@ export function CartPanel({ state, dispatch, tables, running, onPickTable, onPic
           <p className="flex items-center gap-2 text-xs text-ink-500">
             Running order <span className="font-mono">#{running.id.slice(-6).toUpperCase()}</span> <Badge tone="info">{running.status}</Badge>
             {running.source === "QR" && <Badge tone={running.status === "OPEN" ? "warn" : "neutral"}>{running.status === "OPEN" ? "QR · awaiting acceptance" : "QR"}</Badge>}
+            {running.sync?.state === "QUEUED" && <Badge tone="warn">Waiting for cloud</Badge>}
+            {running.sync?.state === "CONFLICT" && <Badge tone="bad">Cloud conflict</Badge>}
             <a href={`/pos/bill/${running.id}`} className="ml-auto font-medium text-brand-700 hover:underline">Bill</a>
           </p>
         )}

@@ -24,7 +24,7 @@ import { isDraining } from "@/server/ops/lifecycle";
  * BOTH prisma/migrations (SQLite) and prisma/postgres/migrations —
  * tests/ops/infrastructure.test.ts fails the build otherwise.
  */
-export const EXPECTED_MIGRATION = "20261021100000_append_only_rate_limit";
+export const EXPECTED_MIGRATION = "20261022100000_cloud_sync";
 
 export type CheckState = "up" | "down";
 export type MigrationState = "ok" | "pending" | "failed" | "unknown";

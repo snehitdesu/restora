@@ -1,4 +1,4 @@
-import { securityHeaders as buildSecurityHeaders } from "./src/server/config/securityHeaders.mjs";
+import { securityHeaders as buildSecurityHeaders, QR_SCANNER_PATH, SCANNER_PERMISSIONS_POLICY } from "./src/server/config/securityHeaders.mjs";
 
 // Development keeps 'unsafe-eval' + ws: (HMR) in the CSP; production adds HSTS.
 const securityHeaders = buildSecurityHeaders({ dev: process.env.NODE_ENV !== "production" });
@@ -29,6 +29,8 @@ const nextConfig = {
       { source: "/:path*", headers: securityHeaders },
       // Later rules override the same header keys for matching paths.
       { source: "/o/:path*", headers: checkoutHeaders },
+      // The staff QR scanner may use the camera (same origin); everywhere else keeps camera=().
+      { source: QR_SCANNER_PATH, headers: [{ key: "Permissions-Policy", value: SCANNER_PERMISSIONS_POLICY }] },
       // API responses carry tenant data: never cache them in shared caches.
       { source: "/api/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] },
     ];

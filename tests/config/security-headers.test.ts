@@ -4,7 +4,7 @@
  * really serves it on every route.
  */
 import { describe, it, expect } from "vitest";
-import { contentSecurityPolicy, securityHeaders, PERMISSIONS_POLICY } from "@/server/config/securityHeaders.mjs";
+import { contentSecurityPolicy, securityHeaders, PERMISSIONS_POLICY, QR_SCANNER_PATH, SCANNER_PERMISSIONS_POLICY } from "@/server/config/securityHeaders.mjs";
 import nextConfig from "../../next.config.mjs";
 
 const asMap = (h: { key: string; value: string }[]) => Object.fromEntries(h.map((x) => [x.key, x.value]));
@@ -87,5 +87,18 @@ describe("security headers", () => {
     // The rest of the app (back office, POS, guest menu, API) keeps the strict policy.
     expect(asMap(rules[all].headers)["Content-Security-Policy"]).not.toContain("razorpay");
     expect(rules.filter((r) => JSON.stringify(r.headers).includes("razorpay")).map((r) => r.source)).toEqual(["/o/:path*"]);
+  });
+
+  it("the camera is allowed for this origin on the staff QR scanner page only", async () => {
+    expect(SCANNER_PERMISSIONS_POLICY).toContain("camera=(self)");
+    expect(SCANNER_PERMISSIONS_POLICY.replace("camera=(self)", "camera=()")).toBe(PERMISSIONS_POLICY); // nothing else loosened
+    const rules = await nextConfig.headers!();
+    const all = rules.findIndex((r) => r.source === "/:path*");
+    const scanner = rules.findIndex((r) => r.source === QR_SCANNER_PATH);
+    expect(QR_SCANNER_PATH).toBe("/tables/scan");
+    expect(scanner).toBeGreaterThan(all); // later rules override the same keys
+    expect(rules[scanner].headers).toEqual([{ key: "Permissions-Policy", value: SCANNER_PERMISSIONS_POLICY }]);
+    expect(rules.filter((r) => JSON.stringify(r.headers).includes("camera=(self)")).map((r) => r.source)).toEqual([QR_SCANNER_PATH]);
+    expect(asMap(rules[all].headers)["Permissions-Policy"]).toContain("camera=()");
   });
 });

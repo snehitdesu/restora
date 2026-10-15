@@ -2639,3 +2639,138 @@ model RateLimitWindow {
 
   @@index([resetAt])
 }
+
+// ============================================================
+// CLOUD SYNC (desktop <-> cloud).
+// Cloud (PostgreSQL): SyncOpReceipt, DevicePairing, CloudDevice.
+// Desktop SQLite only (stripped from prisma/postgres/schema.prisma): CloudLink, CloudRecordMap, SyncOperation.
+// PostgreSQL is authoritative for shared QR orders; the desktop's SQLite is a cache plus a durable outbox.
+// ============================================================
+
+/// Cloud side: one row per applied sync operation, so a desktop retry (same opId) returns the original outcome and
+/// never applies the action, or creates a KOT, a second time.
+model SyncOpReceipt {
+  id             String   @id @default(cuid())
+  organizationId String
+  outletId       String
+  /// Client-generated operation id (UUID), unique per organization.
+  opId           String
+  action         String // ACCEPT | KOT_STATUS
+  orderId        String
+  /// APPLIED | ALREADY (the same intent had already happened) | SUPERSEDED (the order has moved on) | CONFLICT (cannot be applied)
+  outcome        String
+  detail         String?
+  actorId        String?
+  /// Who on the desktop took the action (the device authenticates as itself; this keeps the person at the till).
+  actorLabel     String?
+  createdAt      DateTime @default(now())
+
+  @@unique([organizationId, opId])
+  @@index([orderId])
+}
+
+/// Cloud side: short-lived, single-use pairing challenge created by an authenticated staff member.
+/// Only the SHA-256 of the code is stored; the plaintext is shown once and never written back.
+model DevicePairing {
+  id             String    @id @default(cuid())
+  organizationId String
+  outletId       String
+  createdById    String
+  codeHash       String    @unique
+  expiresAt      DateTime
+  usedAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([organizationId, expiresAt])
+}
+
+/// Cloud side: a revocable desktop identity. The raw device credential is issued once; only its SHA-256 is kept.
+model CloudDevice {
+  id             String    @id @default(cuid())
+  organizationId String
+  outletId       String
+  enrolledById   String
+  name           String
+  /// Optional per-install id from the desktop shell, so re-pairing the same machine replaces the previous credential.
+  installId      String?
+  tokenHash      String    @unique
+  /// ACTIVE | REVOKED | EXPIRED
+  status         String    @default("ACTIVE")
+  expiresAt      DateTime
+  lastSeenAt     DateTime?
+  revokedAt      DateTime?
+  revokedById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([organizationId, installId])
+  @@index([organizationId, status])
+  @@index([expiresAt])
+}
+
+/// Desktop side: the single link from this installation to a cloud outlet. The device credential is stored only
+/// encrypted (AES-256-GCM under a key derived from the install secret, itself OS-protected); the password is never stored.
+model CloudLink {
+  id              String    @id @default(cuid())
+  organizationId  String    @unique
+  baseUrl         String
+  cloudOutletId   String
+  cloudOutletCode String
+  localOutletId   String
+  userEmail       String
+  tokenCipher     String?
+  /// LINKED | AUTH_REQUIRED (the cloud refused the device: pair or sign in again)
+  status          String    @default("LINKED")
+  /// Feed position: "<updatedAt ISO>|<cloud order id>" of the last order fully mirrored.
+  cursor          String?
+  lastAttemptAt   DateTime?
+  lastSuccessAt   DateTime?
+  lastError       String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+/// Desktop side: stable cloud <-> local identity of mirrored records. A cloud id is never assumed to equal a local id.
+model CloudRecordMap {
+  id             String   @id @default(cuid())
+  organizationId String
+  /// ORDER | ORDER_ITEM | KOT | PAYMENT
+  kind           String
+  cloudId        String
+  localId        String
+  /// Hash of the cloud state last mirrored (skip unchanged orders).
+  revision       String?
+  /// JSON array of mapping problems found on import (unknown table / dish / add-on): such an order cannot be accepted here.
+  issues         String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, kind, cloudId])
+  @@unique([organizationId, kind, localId])
+}
+
+/// Desktop side: durable outbox of staff actions on mirrored orders. `id` is the operation id sent to the cloud.
+model SyncOperation {
+  id             String    @id
+  organizationId String
+  localOrderId   String
+  cloudOrderId   String
+  /// ACCEPT | KOT_STATUS
+  action         String
+  /// JSON: the action's arguments (cloud KOT id and target status for KOT_STATUS).
+  payload        String
+  /// PENDING | DONE | CONFLICT (the cloud could not apply it) | REJECTED (permanently refused) | RESOLVED (a person dismissed it)
+  status         String    @default("PENDING")
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime  @default(now())
+  /// The cloud's answer: APPLIED | ALREADY | SUPERSEDED | CONFLICT.
+  outcome        String?
+  lastError      String?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  completedAt    DateTime?
+
+  @@index([organizationId, status, nextAttemptAt])
+  @@index([localOrderId])
+}

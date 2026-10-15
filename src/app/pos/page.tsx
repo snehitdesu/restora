@@ -4,6 +4,7 @@ import { ForbiddenPage } from "@/components/ui/States";
 import { ToastProvider } from "@/components/ui/Toast";
 import { ReauthProvider } from "@/components/auth/ReauthProvider";
 import { PosScreen } from "@/features/pos/components/PosScreen";
+import { CloudSyncBadge } from "@/features/pos/components/CloudSyncBadge";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "POS — RESTORA" };
@@ -15,7 +16,7 @@ export default async function PosPage() {
     <ToastProvider>
       <ReauthProvider>
       <div className="flex h-screen flex-col overflow-hidden bg-ink-100">
-        <OperatorBar shell={shell} title="POS" />
+        <OperatorBar shell={shell} title="POS">{shell.desktop ? <CloudSyncBadge /> : null}</OperatorBar>
         {!shell.outletId ? (
           <ForbiddenPage title="No outlet" reason="You don't have access to any active outlet." />
         ) : !has.has("order.create") ? (

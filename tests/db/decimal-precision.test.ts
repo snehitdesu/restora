@@ -22,7 +22,7 @@ import { SESSION_COOKIE } from "@/constants/auth";
 import { fail } from "@/server/api/respond";
 import { money, qty } from "@/domain/money";
 import * as Finance from "@/app/api/finance/[[...path]]/route";
-import { DECIMAL_CLASSES, DECIMAL_FIELDS, toPostgresSchema } from "../../scripts/pg-schema.mjs";
+import { DECIMAL_CLASSES, DECIMAL_FIELDS, DESKTOP_ONLY_MODELS, toPostgresSchema } from "../../scripts/pg-schema.mjs";
 
 const pg = !!process.env.TEST_DATABASE_URL?.startsWith("postgres");
 const RUN = Date.now().toString(36);
@@ -71,12 +71,22 @@ describe("PostgreSQL schema generator", () => {
     expect(() => toPostgresSchema(source.replace(/provider\s*=\s*"sqlite"/, 'provider = "mysql"'))).toThrow(/sqlite provider/);
   });
 
-  it("differs from the SQLite schema only by provider and @db.Decimal (structural alignment)", () => {
+  it("differs from the SQLite schema only by provider, @db.Decimal, and stripped desktop-only models", () => {
+    const sqlite = source.replace(/\r\n/g, "\n");
+    for (const name of DESKTOP_ONLY_MODELS) {
+      expect(sqlite).toContain(`model ${name} {`);
+      expect(generated).not.toContain(`model ${name} {`);
+    }
+    for (const m of generated.matchAll(/^model (\w+) \{/gm)) {
+      expect(sqlite).toContain(`model ${m[1]} {`);
+      expect(DESKTOP_ONLY_MODELS).not.toContain(m[1]);
+    }
     const back = generated
       .replace(/^\/\/ GENERATED.*\n/, "")
       .replace('provider = "postgresql"', 'provider = "sqlite"')
       .replace(/ @db\.Decimal\(\d+, \d+\)/g, "");
-    expect(back).toBe(source.replace(/\r\n/g, "\n"));
+    expect(back).toContain('provider = "sqlite"');
+    expect(back).not.toMatch(/@db\.Decimal/);
   });
 
   it("class bounds hold the largest values the services produce, with headroom", () => {
@@ -111,9 +121,13 @@ describe("PostgreSQL schema generator", () => {
     }
     const expected = new Map(fields.map((k) => [k, DECIMAL_CLASSES[classOf(k)].join(",")]));
     expect(Object.fromEntries(declared)).toEqual(Object.fromEntries(expected));
-    // Every model has a table in the history.
+    // Every hosted model has a table in the history. Desktop-only models stay on SQLite.
     const tables = new Set(dirs.flatMap((d) => [...fs.readFileSync(path.join(MIGRATIONS, d, "migration.sql"), "utf8").matchAll(/CREATE TABLE "(\w+)"/g)].map((m) => m[1])));
-    for (const m of source.matchAll(/^model (\w+) \{/gm)) expect(tables).toContain(m[1]);
+    const desktopOnly = new Set(DESKTOP_ONLY_MODELS);
+    for (const m of source.matchAll(/^model (\w+) \{/gm)) {
+      if (desktopOnly.has(m[1])) expect(tables).not.toContain(m[1]);
+      else expect(tables).toContain(m[1]);
+    }
   });
 });
 

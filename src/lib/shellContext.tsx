@@ -15,6 +15,7 @@ export type ShellCtx = {
   outletId: string | null;
   outlet: ShellOutlet | null;
   orgWide: boolean;
+  desktop: boolean;
   can: (p: Permission) => boolean;
 };
 
@@ -29,6 +30,7 @@ export function ShellProvider({ shell, children }: { shell: ShellData; children:
       outletId: shell.outletId,
       outlet: shell.outlets.find((o) => o.id === shell.outletId) ?? null,
       orgWide: shell.orgWide,
+      desktop: shell.desktop,
       can: (p) => perms.has(p),
     };
   }, [shell]);

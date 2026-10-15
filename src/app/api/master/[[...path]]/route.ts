@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { prisma } from "@/server/db/client";
 import { createRouter, outletQuery } from "@/server/api/router";
+import { RATE_POLICIES } from "@/server/api/rateLimit";
+import { scanTableQr } from "@/server/qr/scan";
 import {
   createUnit, updateUnit, listUnits, createUnitConversion, createMaterialCategory,
   createMaterial, updateMaterial, listMaterials, getMaterial,
@@ -73,4 +75,6 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
   { method: "POST", path: "tables/:id/status", handler: ({ ctx, params, body }) => setTableStatus(ctx, params.id, z.object({ status: z.string() }).parse(body).status) },
   { method: "POST", path: "tables/:id/qr", handler: ({ ctx, params }) => rotateTableQr(ctx, params.id) },
   { method: "POST", path: "tables/:id/qr/revoke", handler: ({ ctx, params }) => revokeTableQr(ctx, params.id) },
+  // staff QR scanner: read-only check of what a scanned table QR opens (POST so the token never sits in a URL or access log)
+  { method: "POST", path: "table-qr/scan", rateLimit: RATE_POLICIES.qrScanPerUser, handler: ({ ctx, body, req }) => scanTableQr(ctx, body, { requestOrigin: req.nextUrl.origin }) },
 ]);

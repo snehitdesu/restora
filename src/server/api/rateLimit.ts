@@ -71,6 +71,10 @@ export const RATE_POLICIES = {
   search: { name: "search", limit: 240, windowMs: 60_000 },
   // Calls that reach an external provider or device (test connection / test print / test message).
   integrationAction: { name: "integration-action", limit: 30, windowMs: 60_000 },
+  // Staff table-QR scanner checks (per user): a person checks a handful of codes; a loop guessing tokens is not a person.
+  qrScanPerUser: { name: "qr-scan-user", limit: 60, windowMs: 60_000 },
+  // Desktop sync: a feed poll every few seconds plus queued actions; one device per signed-in user.
+  syncPerUser: { name: "sync-user", limit: 300, windowMs: 60_000 },
   // Guest QR ordering (anonymous). Guests behind restaurant Wi-Fi share one IP,
   // so per-IP limits are generous; order placement is also capped per table.
   guestReadPerIp: { name: "guest-read-ip", limit: 600, windowMs: 60_000 },

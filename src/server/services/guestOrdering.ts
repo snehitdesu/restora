@@ -29,6 +29,7 @@ import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/client";
+import { isGuestTableToken } from "@/lib/qr/tableQrUrl";
 import { systemContext } from "@/server/auth/context";
 import { type AccessContext, NotFoundError, ValidationError } from "@/server/db/scope";
 import { DEV_AUTH_SECRET_PLACEHOLDER } from "@/server/config/env";
@@ -78,12 +79,8 @@ function keyMatches(orderId: string, key: string | null | undefined): boolean {
 
 // ---------------- table resolution ----------------
 
-/** URL-safe table token. The QR generator and resolveTable share this rule. */
-export const GUEST_TABLE_TOKEN_RE = /^[A-Za-z0-9_-]{6,64}$/;
-
-export function isGuestTableToken(token: unknown): token is string {
-  return typeof token === "string" && GUEST_TABLE_TOKEN_RE.test(token);
-}
+// The token rule lives with the scanner's URL parser (pure, client-safe); re-exported for existing callers.
+export { GUEST_TABLE_TOKEN_RE, isGuestTableToken } from "@/lib/qr/tableQrUrl";
 
 // One message for every failure: no oracle for which tables/outlets exist.
 const BAD_QR = "This table QR code is not valid. Please ask the staff for help.";
@@ -95,18 +92,37 @@ export type GuestTable = {
   restaurantName: string;
 };
 
-export async function resolveTable(token: string, db: PrismaClient = prisma): Promise<GuestTable> {
-  if (!isGuestTableToken(token)) throw new NotFoundError(BAD_QR);
+/**
+ * The one table-token lookup. `inactive`: the table exists but its outlet or
+ * organization is switched off. Guests never see the difference (resolveTable
+ * throws the same error for both); the staff QR scanner reports it.
+ */
+export type TableTokenLookup =
+  | { status: "not_found" }
+  | { status: "inactive"; table: { id: string; code: string; organizationId: string; outletId: string }; outletName: string; restaurantName: string }
+  | { status: "ok"; guest: GuestTable };
+
+export async function lookupTableToken(token: string, db: PrismaClient = prisma): Promise<TableTokenLookup> {
+  if (!isGuestTableToken(token)) return { status: "not_found" };
   const table = await db.restaurantTable.findUnique({ where: { qrToken: token }, select: { id: true, code: true, organizationId: true, outletId: true } });
-  if (!table) throw new NotFoundError(BAD_QR);
+  if (!table) return { status: "not_found" };
   const outlet = await db.outlet.findUnique({
     where: { id: table.outletId },
     select: { id: true, organizationId: true, name: true, address: true, phone: true, currency: true, timezone: true, openTime: true, closeTime: true, active: true, organization: { select: { name: true, legalName: true, active: true } } },
   });
-  if (!outlet || !outlet.active || !outlet.organization.active || outlet.organizationId !== table.organizationId) throw new NotFoundError(BAD_QR);
-  const { active: _a, organization, ...o } = outlet;
+  if (!outlet || outlet.organizationId !== table.organizationId) return { status: "not_found" };
+  const restaurantName = outlet.organization.legalName || outlet.organization.name;
+  if (!outlet.active || !outlet.organization.active) return { status: "inactive", table, outletName: outlet.name, restaurantName };
+  const { active: _a, organization: _org, ...o } = outlet;
   void _a;
-  return { ctx: systemContext(outlet.organizationId, [outlet.id]), table: { id: table.id, code: table.code }, outlet: o, restaurantName: organization.legalName || organization.name };
+  void _org;
+  return { status: "ok", guest: { ctx: systemContext(outlet.organizationId, [outlet.id]), table: { id: table.id, code: table.code }, outlet: o, restaurantName } };
+}
+
+export async function resolveTable(token: string, db: PrismaClient = prisma): Promise<GuestTable> {
+  const found = await lookupTableToken(token, db);
+  if (found.status !== "ok") throw new NotFoundError(BAD_QR);
+  return found.guest;
 }
 
 // ---------------- payment availability ----------------
