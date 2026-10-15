@@ -16,16 +16,19 @@ export function safeNext(next: string | null | undefined): string {
 
 export function LoginForm({ next }: { next?: string }) {
   const router = useRouter();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [missing, setMissing] = useState<{ email?: boolean; password?: boolean }>({});
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  async function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (busy) return;
+    // Read what is in the fields, not React state: text typed before the page finished
+    // hydrating never reached an onChange handler but is still on screen.
+    const entered = new FormData(e.currentTarget);
+    const email = String(entered.get("email") ?? "");
+    const password = String(entered.get("password") ?? "");
     // The button stays actionable; empty fields are explained instead of silently disabling it.
     const need = { email: !email.trim(), password: !password };
     if (need.email || need.password) {
@@ -61,7 +64,9 @@ export function LoginForm({ next }: { next?: string }) {
   }
 
   return (
-    <form onSubmit={submit} className="space-y-5" noValidate>
+    // method="post": if the form is submitted before hydration (slow device), the browser must not put the
+    // credentials in the URL (history, proxies, Referer) — a POST to /login just re-renders this page.
+    <form method="post" onSubmit={submit} className="space-y-5" noValidate>
       <div>
         <label htmlFor="email" className={authLabel}>Email</label>
         <input
@@ -72,8 +77,7 @@ export function LoginForm({ next }: { next?: string }) {
           autoFocus
           required
           placeholder="you@restaurant.com"
-          value={email}
-          onChange={(e) => (setEmail(e.target.value), missing.email && setMissing((m) => ({ ...m, email: false })))}
+          onChange={() => missing.email && setMissing((m) => ({ ...m, email: false }))}
           aria-invalid={missing.email || undefined}
           aria-describedby={missing.email ? "email-missing" : undefined}
           className={authInput}
@@ -89,8 +93,7 @@ export function LoginForm({ next }: { next?: string }) {
             type={showPassword ? "text" : "password"}
             autoComplete="current-password"
             required
-            value={password}
-            onChange={(e) => (setPassword(e.target.value), missing.password && setMissing((m) => ({ ...m, password: false })))}
+            onChange={() => missing.password && setMissing((m) => ({ ...m, password: false }))}
             aria-invalid={missing.password || undefined}
             aria-describedby={missing.password ? "password-missing" : undefined}
             className={`${authInput} !mt-0 pr-16`}

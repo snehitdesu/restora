@@ -67,6 +67,9 @@ export const PERMISSIONS = [
   "customer.view",
   "customer.manage",
   "loyalty.manage",
+  // Group 6: coupons, tiers, referrals, campaigns, feedback handling, lifecycle settings (growth.view: read-only reports).
+  "growth.view",
+  "growth.manage",
   "reservation.manage",
   // analytics / ops
   "reports.view",
@@ -133,6 +136,8 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "customer.view",
     "customer.manage",
     "loyalty.manage",
+    "growth.view",
+    "growth.manage",
     "reservation.manage",
     "reports.view",
     "anomaly.view",

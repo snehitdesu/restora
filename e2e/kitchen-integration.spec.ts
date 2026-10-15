@@ -6,9 +6,9 @@
  *          exactly one KOT → the chef's KDS shows it → Accept / Start / Ready /
  *          Served → the customer's status follows. A replayed confirmation
  *          changes nothing (one order, one payment, one KOT).
- *   CK-002 CASH chosen at checkout: the order waits for the restaurant (no KOT,
- *          nothing on the KDS) → the cashier accepts it at the POS → one KOT →
- *          chef → served → cash at the POS → paid once.
+ *   CK-002 CASH chosen at checkout: placing the order sends it to the kitchen
+ *          (one KOT, in the same transaction; a refresh never re-dispatches) and
+ *          it stays unpaid → chef → served → cash at the POS → paid once.
  *
  * Every record is read back from the database and must point at the same
  * order, organization, outlet and table that the QR token resolves to, and
@@ -16,7 +16,7 @@
  * ticket: the KDS lists live KOTs; there is no separate ticket table.)
  */
 import { test, expect, type Browser, type Page } from "@playwright/test";
-import { statePath, outletByCode, openPos, toast, sessionFor, apiAs, apiData, e2eDb, CENTRAL, ROLES } from "./helpers";
+import { statePath, outletByCode, openPos, sessionFor, apiAs, apiData, e2eDb, CENTRAL, ROLES } from "./helpers";
 
 test.use({ storageState: statePath("cashier") });
 const BASE = `http://localhost:${Number(process.env.E2E_PORT ?? 3210)}`;
@@ -43,7 +43,7 @@ async function order(g: Page, token: string, dish: string, method: "CASH" | "ONL
   await g.waitForURL(/\/cart$/);
   await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await g.waitForURL(/\/checkout$/);
-  await g.getByRole("radio", { name: method === "ONLINE" ? /Pay online/ : /^Cash/ }).check();
+  await g.getByRole("radio", { name: method === "ONLINE" ? /Pay online|Simulated online payment/ : /^Cash/ }).check();
   await g.getByRole("button", { name: /^Place order/ }).click();
   await g.waitForURL(/\/o\/[^/#]+#k=/);
   const url = new URL(g.url());
@@ -142,40 +142,34 @@ test.describe("customer website → order → payment → KOT → kitchen", () =
     await guest.context.close();
   });
 
-  test("CK-002 cash: waits for the restaurant (no KOT) → POS accepts → one KOT → chef → served → cash taken once", async ({ page, browser }) => {
+  test("CK-002 cash: straight to the kitchen at placement (one KOT, unpaid) → chef → served → cash taken once at the POS", async ({ page, browser }) => {
     const outlet = await outletByCode(page.request, CENTRAL);
     const { tableId, token } = await qrTable(outlet.id, "F5");
     const guest = await guestPhone(browser);
     const g = guest.page;
     const { orderId } = await order(g, token, "Masala Chai", "CASH");
-    await expect(g.getByTestId("order-stage")).toHaveText("Waiting for the restaurant to accept");
+    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
 
-    // Not accepted yet: no KOT, and the chef's KDS does not list it.
+    // Dispatched in the order's own transaction (existing submitOrder routing): one KOT, nothing paid.
     let o = await records(orderId);
-    expect(o).toMatchObject({ status: "OPEN", source: "QR", tableId, outletId: outlet.id });
+    expect(o).toMatchObject({ status: "SENT", source: "QR", tableId, outletId: outlet.id, paidAt: null });
     expect(o.payments).toHaveLength(0);
-    expect(o.kots).toHaveLength(0);
-    const kitchen = await sessionFor(browser, "kitchen");
-    await kitchen.page.goto("/kitchen");
-    await expect(kitchen.page.getByRole("article", { name: /Table F5 · QR$/ })).toHaveCount(0);
-
-    // The cashier accepts it at the POS → the existing submitOrder → one KOT.
-    await openPos(page);
-    const openOrders = page.getByRole("button", { name: /^Open orders, \d+ new QR order/ });
-    await expect(openOrders).toBeVisible({ timeout: 20_000 });
-    await openOrders.click();
-    await page.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${orderId.slice(-6).toUpperCase()}.*Table F5.*New QR order`) }).click();
-    await page.getByRole("button", { name: "Send to kitchen" }).click();
-    await expect(toast(page, `Order #${orderId.slice(-6).toUpperCase()} accepted and sent to kitchen`)).toBeVisible();
-    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen", { timeout: 15_000 });
-    o = await records(orderId);
-    expect(o.status).toBe("SENT");
     expect(o.kots).toHaveLength(1);
     expect(o.kots[0]).toMatchObject({ orderId, status: "NEW", outletId: o.outletId });
+    expect(o.kots[0].items.map((i) => [i.name, Number(i.qty)])).toEqual([["Masala Chai", 1]]);
+    // A refresh of the confirmation shows the persisted state and never dispatches again.
+    await g.reload();
+    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
+    expect((await records(orderId)).kots).toHaveLength(1);
 
+    const kitchen = await sessionFor(browser, "kitchen");
     await chefCooks(kitchen.page, o.kots[0].number, "F5", g);
 
-    // Cash at the counter, once.
+    // The POS lists it with the outlet's unpaid orders; cash at the counter, once.
+    await openPos(page);
+    await page.getByRole("button", { name: /^Open orders/ }).click();
+    await page.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${orderId.slice(-6).toUpperCase()}.*Table F5`) }).click();
+    await expect(g.getByTestId("bill-payment-status")).toHaveText("Unpaid");
     await page.getByRole("button", { name: "Pay", exact: true }).click();
     const pay = page.getByRole("dialog", { name: "Take payment" });
     await pay.getByLabel("Cash received").fill(String(Number(o.total)));

@@ -191,10 +191,12 @@ export function TablesScreen() {
   return (
     <>
       <PageHeader title="Floors & tables" subtitle={`Seating at ${outlet?.name ?? "this outlet"}`}
-        actions={manage && (
+        actions={(
           <>
-            <Button onClick={() => setDialog({ kind: "floor" })}><Icon name="plus" /> New floor</Button>
-            <Button variant="primary" onClick={() => setDialog({ kind: "table" })}><Icon name="plus" /> New table</Button>
+            {/* A full page load, not a client navigation: the camera is allowed only by /tables/scan's own Permissions-Policy header. */}
+            <a href="/tables/scan" className="inline-flex items-center justify-center gap-2 rounded-md border border-ink-300 bg-paper px-3 py-2 text-sm font-semibold text-ink-900 hover:bg-ink-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500"><Icon name="qr" /> Scan QR</a>
+            {manage && <Button onClick={() => setDialog({ kind: "floor" })}><Icon name="plus" /> New floor</Button>}
+            {manage && <Button variant="primary" onClick={() => setDialog({ kind: "table" })}><Icon name="plus" /> New table</Button>}
           </>
         )} />
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">

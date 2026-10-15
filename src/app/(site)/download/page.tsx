@@ -3,6 +3,7 @@ import Link from "next/link";
 import { PlatformDownload } from "@/site/components/PlatformDownload";
 import { TARGETS, downloadState, formatSize, release, type TargetKey } from "@/site/release";
 import { WEB_APP_PATH } from "@/site/config";
+import { ScrollRegion } from "@/components/ui/ScrollRegion";
 
 export const metadata: Metadata = {
   title: "Download",
@@ -108,7 +109,7 @@ export default async function DownloadPage({ searchParams }: { searchParams: Pro
           </div>
           <p className="s-body mt-6 max-w-3xl">This is a release candidate. The Windows installer is not code-signed yet, so Windows SmartScreen may warn before it runs. Check the file against its SHA-256 checksum below.</p>
           {built.length > 0 ? (
-            <div className="mt-10 overflow-x-auto">
+            <ScrollRegion label="Release files and checksums (scrolls sideways)" className="mt-10">
               <table className="w-full min-w-[40rem] text-left text-[0.9375rem]">
                 <caption className="sr-only">Release files and checksums</caption>
                 <thead className="text-sm text-[color:var(--s-muted)]">
@@ -133,7 +134,7 @@ export default async function DownloadPage({ searchParams }: { searchParams: Pro
                   })}
                 </tbody>
               </table>
-            </div>
+            </ScrollRegion>
           ) : (
             <p className="s-body mt-8">No desktop build has been recorded for this release yet.</p>
           )}

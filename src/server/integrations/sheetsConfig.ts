@@ -7,7 +7,6 @@ import { z } from "zod";
 import { ValidationError } from "@/server/db/scope";
 import { SPREADSHEET_ID } from "@/integrations/sheets";
 
-export const SHEETS_PROVIDERS = ["google_sheets", "mock"] as const;
 export const sheetsConfigSchema = z.object({ spreadsheetId: z.string().trim().regex(SPREADSHEET_ID, "The spreadsheet id from its address (docs.google.com/spreadsheets/d/<id>)") }).passthrough();
 export const sheetsCredsSchema = z.object({ clientEmail: z.string().trim().email().max(200), privateKey: z.string().min(50).max(5000) });
 

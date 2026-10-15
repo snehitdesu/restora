@@ -10,7 +10,7 @@
 import "@testing-library/jest-dom/vitest";
 import type { ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, within, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, within, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GuestMenuScreen } from "@/features/guest/components/GuestMenuScreen";
 import { GuestCartScreen } from "@/features/guest/components/GuestCartScreen";
@@ -24,7 +24,7 @@ import { loadCart, saveCart, submissionKey, clearSubmission, rememberOrder, reme
 import { cartReducer, emptyCart, type CartLine } from "@/features/pos/cart";
 import type { Bill } from "@/server/services/bill";
 
-vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: ReactNode }) => <a href={href} {...rest}>{children}</a> }));
+vi.mock("next/link", () => ({ default: ({ href, children, prefetch: _prefetch, ...rest }: { href: string; children: ReactNode; prefetch?: boolean }) => <a href={href} {...rest}>{children}</a> }));
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: any };
 let calls: Call[] = [];
@@ -125,6 +125,51 @@ describe("guest storefront — menu", () => {
     expect(saved.map((l) => [l.menuItemId, l.variantId, l.modifierOptionIds, l.qty])).toEqual([["i-dosa", undefined, [], 2], ["i-biryani", "v-large", ["o-hot", "o-raita"], 2]]);
   });
 
+  it("a tapped category keeps the highlight while the page scrolls past the others, then follows the reader again", async () => {
+    const user = userEvent.setup();
+    handler = () => ({ data: menuData() });
+    type Entry = { target: Element; isIntersecting: boolean; boundingClientRect: { top: number } };
+    let report: (entries: Entry[]) => void = () => {};
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(cb: (e: Entry[]) => void) {
+          // the reveal observer is not created for a classic storefront: this is the category observer
+          report = cb;
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    );
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    inStore(<GuestMenuScreen />);
+    const tabs = screen.getByRole("navigation", { name: "Menu categories" });
+    const tab = (name: string) => within(tabs).getByRole("button", { name });
+    const passing = (id: string) => act(() => report([{ target: document.getElementById(`cat-${id}`)!, isIntersecting: true, boundingClientRect: { top: 140 } }]));
+
+    await user.click(tab("Mains"));
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    expect(scrolled).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    window.dispatchEvent(new Event("scroll"));
+    passing("c1"); // the smooth scroll passes "Tiffin" on its way
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    expect(tab("Tiffin")).not.toHaveAttribute("aria-current");
+
+    await new Promise((r) => setTimeout(r, 200)); // the page stopped scrolling
+    passing("c1"); // the guest now scrolls back up by hand
+    expect(tab("Tiffin")).toHaveAttribute("aria-current", "true");
+
+    // touching the screen mid-jump hands the highlight back to the reader at once
+    await user.click(tab("Mains"));
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    window.dispatchEvent(new Event("touchstart"));
+    passing("c1");
+    expect(tab("Tiffin")).toHaveAttribute("aria-current", "true");
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
   it("explains when ordering is closed and only shows facts the restaurant entered", () => {
     handler = () => ({ data: menuData() });
     const data = { ...menuData(), ordering: { open: false, message: "We're closed right now — ordering opens at 9:00 AM. You can still browse the menu." } };
@@ -207,6 +252,9 @@ describe("guest storefront — checkout", () => {
     expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
     await user.type(screen.getByLabelText(/Your name/), "Ananya");
     await user.type(screen.getByLabelText(/Phone/), "+91 98765-43210");
+    // Cash (the default) promises what the server does: straight to the kitchen, paid at the counter.
+    expect(screen.getByRole("radio", { name: /^Cash/ })).toBeChecked();
+    expect(screen.getByText("Your order goes to the kitchen as soon as you place it. Pay at the counter whenever you're ready.")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Simulated online payment/ })).toBeInTheDocument();
     expect(screen.getByText("Simulated payment — no real money is charged.")).toBeInTheDocument();
     expect(screen.queryByText(/Razorpay/)).toBeNull();
@@ -219,10 +267,36 @@ describe("guest storefront — checkout", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0].url).toBe(`/api/qr/t/${TOKEN}/orders`);
     expect(posts[0].headers["Idempotency-Key"]).toMatch(/^qr-/);
-    expect(posts[0].body).toEqual({ items: [{ menuItemId: "i-dosa", qty: 2 }], notes: "no onion", customer: { name: "Ananya", phone: "9876543210" }, paymentMethod: "ONLINE" });
-    expect(JSON.stringify(posts[0].body)).not.toMatch(/price|total|tax/i);
+    // The shown total travels only as a guard (the server refuses on a mismatch); no price or tax is ever sent.
+    expect(posts[0].body).toEqual({ items: [{ menuItemId: "i-dosa", qty: 2 }], notes: "no onion", customer: { name: "Ananya", phone: "9876543210" }, paymentMethod: "ONLINE", expectedTotal: "252.00" });
+    expect(JSON.stringify({ ...posts[0].body, expectedTotal: undefined })).not.toMatch(/price|total|tax/i);
     expect(rememberedOrders()).toEqual([expect.objectContaining({ orderId: "cmord1", key: "key-abc", token: TOKEN })]);
     expect(loadCart(TOKEN).lines).toHaveLength(0);
+  });
+
+  it("cart → checkout (client navigation, same storefront) reuses the server quote for the unchanged cart; a change re-prices", async () => {
+    const user = userEvent.setup();
+    seedCart([line({ qty: 2 })]);
+    handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: menuData() });
+    const page = (ui: ReactNode) => (
+      <StorefrontProvider token={TOKEN} initial={menuData()}>
+        {ui}
+        <StorefrontOverlays />
+      </StorefrontProvider>
+    );
+    const quotes = () => calls.filter((c) => c.url.endsWith("/quote")).length;
+    const { rerender } = render(page(<GuestCartScreen />));
+    await screen.findByRole("link", { name: /^Proceed to checkout/ });
+    expect(quotes()).toBe(1);
+    // The /t/[token] layout (and its provider) stays mounted; only the page changes.
+    rerender(page(<GuestCheckoutScreen navigate={vi.fn()} />));
+    expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled(); // at once: no second request
+    expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
+    rerender(page(<GuestCartScreen />));
+    expect(quotes()).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Increase Masala Dosa" }));
+    await waitFor(() => expect(quotes()).toBe(2)); // a changed cart is priced again
+    await screen.findByRole("link", { name: /^Proceed to checkout · ₹378\.00/ });
   });
 
   it("shows the server's refusal, refreshes the menu and re-checks the cart; a retry reuses the same idempotency key", async () => {
@@ -245,6 +319,33 @@ describe("guest storefront — checkout", () => {
     const keys = calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders")).map((c) => c.headers["Idempotency-Key"]);
     expect(keys[0]).toBe(keys[1]);
     expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("CASH");
+  });
+
+  it("a price that changed after the quote: shows the new total, re-prices the cart, places nothing until the guest confirms", async () => {
+    const user = userEvent.setup();
+    seedCart([line({})]);
+    let price = "120.00";
+    let posted = 0;
+    handler = (c) => {
+      if (c.url.endsWith("/quote")) return { data: quoteOf((c.body.items as Array<{ menuItemId: string; qty: number }>).map((i) => ({ ok: true as const, menuItemId: i.menuItemId, name: "Masala Dosa", unitPrice: price, qty: i.qty }))) };
+      if (c.method === "POST") {
+        posted++;
+        if (c.body.expectedTotal !== "136.50") return { status: 409, error: { code: "PriceChanged", message: "Prices changed since you opened checkout. Check the new total, then place your order again.", details: { total: "136.50" } } as never };
+        return { data: { orderId: "o3", ref: "R3", accessKey: "k3" } };
+      }
+      return { data: menuData() };
+    };
+    const navigate = vi.fn();
+    inStore(<GuestCheckoutScreen navigate={navigate} />);
+    await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹126.00"));
+    price = "130.00"; // the café changes the price while the guest is on this page
+    await user.click(screen.getByRole("button", { name: "Place order" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Prices changed since you opened checkout. Check the new total, then place your order again. New total: ₹136.50.");
+    expect(navigate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹136.50"));
+    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(posted).toBe(2);
   });
 
   it("names Razorpay only for test mode, and says no real money is charged", async () => {
@@ -286,7 +387,7 @@ describe("guest order page", () => {
   it("authenticates with the key from the URL fragment and pays through the server (decline, then approve)", async () => {
     const user = userEvent.setup();
     window.history.replaceState(null, "", "/o/cmord1#k=key-abc");
-    const view = (over: object = {}) => ({ orderId: "cmord1", ref: "ORD001", status: "SENT", fulfilment: "PREPARING", fulfilmentLabel: "Being prepared", tracker: { step: 2, confirmed: true }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, ...over });
+    const view = (over: object = {}) => ({ orderId: "cmord1", ref: "ORD001", status: "SENT", fulfilment: "PREPARING", fulfilmentLabel: "Being prepared", tracker: { step: 2, confirmed: true }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     let confirms = 0;
     handler = (c) => {
       if (c.url.endsWith("/payments/confirm")) {
@@ -336,7 +437,7 @@ describe("guest order page", () => {
     });
     afterEach(() => { delete window.Razorpay; });
 
-    const rzpView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, ...over });
+    const rzpView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     const started = { paymentId: "payR", amount: "462.00", provider: "razorpay", mode: "SANDBOX", testMode: false, checkout: { provider: "razorpay", mode: "SANDBOX", keyId: "rzp_test_PUBLIC", orderId: "order_R1", amount: 46200, currency: "INR" } };
 
     it("opens Checkout with the server's key, gateway order and amount; the signed response is verified by the server", async () => {
@@ -389,11 +490,13 @@ describe("guest order page", () => {
 
   it("live tracker follows the kitchen; checkout's \"pay online\" opens the payment once and is not replayed by a refresh", async () => {
     window.history.replaceState(null, "", "/o/cmord5#k=key-5&new=1&pay=1");
-    const v = (over: object = {}) => ({ orderId: "cmord5", ref: "ORD005", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, ...over });
+    const v = (over: object = {}) => ({ orderId: "cmord5", ref: "ORD005", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     handler = (c) => (c.url.endsWith("/payments") ? { data: { paymentId: "p5", amount: "630.00", provider: "mock", testMode: true } } : { data: v() });
     const { unmount } = render(<GuestOrderScreen orderId="cmord5" />);
     expect(await screen.findByRole("region", { name: "Test payment gateway" })).toBeInTheDocument(); // opened without a tap
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Complete your payment");
+    // The caption agrees with the headline: the order waits for this payment, not for the restaurant.
+    expect(screen.getByTestId("order-stage")).toHaveTextContent("Waiting for your online payment");
     expect(window.location.hash).toBe("#k=key-5"); // one-shot flags removed
     expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(1);
     unmount();
@@ -407,6 +510,123 @@ describe("guest order page", () => {
     expect(steps[1]).toHaveAttribute("aria-current", "step");
     expect(steps[0]).toHaveTextContent("Done.");
     expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(1); // no second auto-start
+  });
+
+  describe("splitting the bill and ordering again", () => {
+    const reorder = [
+      { menuItemId: "i-biryani", name: "Biryani", variantId: "v-large", modifierOptionIds: ["o-hot"], modifierLabels: ["Spice: Hot"], unitPrice: 380, modifiersPerUnit: 0, taxPct: 5, qty: 2, notes: "no onions" },
+      { menuItemId: "i-dosa", name: "Masala Dosa", modifierOptionIds: [], modifierLabels: [], unitPrice: 120, modifiersPerUnit: 0, taxPct: 5, qty: 1 },
+    ];
+    const v = (over: object = {}) => ({ orderId: "cmord7", ref: "ORD007", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill({ total: "630.00", balanceDue: "630.00" }), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder, split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
+
+    it("shows each person's part before they pay, sends only the number of people, and shows the server's amount", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = (c) => (c.url.endsWith("/payments") ? { data: { paymentId: "pS1", amount: "210.00", provider: "mock", testMode: true, share: { parts: 3, remainingParts: 3, last: false } } } : { data: v() });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      expect(screen.getByTestId("split-parts")).toHaveTextContent("2");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹315.00. One more person pays the rest");
+      expect(screen.getByRole("button", { name: "Fewer people" })).toBeDisabled(); // 2 is the least
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      expect(screen.getByTestId("split-parts")).toHaveTextContent("3");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹210.00. 2 more people pay the rest");
+      await user.click(screen.getByRole("button", { name: /Pay your part .*210\.00/ }));
+      const gw = await screen.findByRole("region", { name: "Test payment gateway" });
+      expect(within(gw).getByTestId("share-note")).toHaveTextContent("Your part of the bill, split 3 ways");
+      expect(gw).toHaveTextContent("210.00");
+      const start = calls.find((c) => c.url.endsWith("/payments"))!;
+      expect(start.body).toEqual({ parts: 3 }); // never an amount
+      expect(start.headers["Idempotency-Key"]).toBeTruthy();
+    });
+
+    it("the last person pays what is left; a part that is paid says what is still due", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      const half = (over: object = {}) => v({ bill: bill({ total: "630.00", balanceDue: "315.00", paid: "315.00", paymentStatus: "PARTIALLY_PAID" }), split: { sharesPaid: 1, minParts: 2, maxParts: 12 }, ...over });
+      let state = half();
+      handler = (c) => {
+        if (c.url.endsWith("/payments/confirm")) {
+          state = half({ bill: bill({ total: "630.00", balanceDue: "105.00", paid: "525.00", paymentStatus: "PARTIALLY_PAID" }), split: { sharesPaid: 2, minParts: 2, maxParts: 12 } });
+          return { data: { ...state, paymentStatus: "SUCCESS" } };
+        }
+        if (c.url.endsWith("/payments")) return { data: { paymentId: "pS2", amount: "210.00", provider: "mock", testMode: true, share: { parts: 3, remainingParts: 2, last: false } } };
+        return { data: state };
+      };
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹157.50. One more person pays the rest");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("One part is already paid.");
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await user.click(within(await screen.findByRole("region", { name: "Test payment gateway" })).getByRole("button", { name: "Approve payment" }));
+      expect(await screen.findByText(/Your part is paid\. ₹105\.00 is still due on this bill\./)).toBeInTheDocument();
+    });
+
+    it("a new ask is a new payment: the same ask retried keeps its key, a different number of people does not", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = (c) => {
+        if (c.url.endsWith("/payments")) return { error: { code: "VALIDATION_ERROR", message: "Could not start the payment." } };
+        return { data: v() };
+      };
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await screen.findByRole("alert");
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(2));
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(3));
+      const keys = calls.filter((c) => c.url.endsWith("/payments")).map((c) => c.headers["Idempotency-Key"]);
+      expect(keys[1]).toBe(keys[0]);
+      expect(keys[2]).not.toBe(keys[0]);
+    });
+
+    it("offers no split once nothing is due, or when online payment is off", async () => {
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = () => ({ data: v({ canPay: false }) });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      expect(await screen.findByTestId("pay-at-counter")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Split the bill" })).toBeNull();
+    });
+
+    it("\"Order the same again\" fills the cart with the same dishes and opens it; the cart screen prices them", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      rememberOrder({ orderId: "cmord7", key: "key-7", token: "tok-7", ref: "ORD007", at: "2026-10-04T08:00:00.000Z" });
+      saveCart("tok-7", cartReducer(emptyCart("DINE_IN"), { type: "add", line: { menuItemId: "i-dosa", name: "Masala Dosa", modifierOptionIds: [], modifierLabels: [], unitPrice: 120, modifiersPerUnit: 0, taxPct: 5, qty: 1 } }));
+      handler = () => ({ data: v() });
+      const assign = vi.fn();
+      const original = window.location;
+      Object.defineProperty(window, "location", { configurable: true, value: { ...original, assign, hash: original.hash, pathname: original.pathname, search: original.search } });
+      try {
+        render(<GuestOrderScreen orderId="cmord7" />);
+        await user.click(await screen.findByRole("button", { name: "Order the same again" }));
+        expect(assign).toHaveBeenCalledWith("/t/tok-7/cart");
+      } finally {
+        Object.defineProperty(window, "location", { configurable: true, value: original });
+      }
+      const lines = loadCart("tok-7").lines;
+      expect(lines.map((l) => [l.menuItemId, l.qty])).toEqual([["i-dosa", 2], ["i-biryani", 2]]); // merged with what was already in the cart
+      expect(lines[1]).toMatchObject({ variantId: "v-large", modifierOptionIds: ["o-hot"], notes: "no onions" });
+      expect(calls.some((c) => c.method === "POST")).toBe(false); // nothing is ordered until the guest checks out
+    });
+
+    it("has no \"Order the same again\" without the menu link, or for an order with no dishes", async () => {
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = () => ({ data: v() });
+      const { unmount } = render(<GuestOrderScreen orderId="cmord7" />);
+      await screen.findByTestId("order-stage");
+      expect(screen.queryByRole("button", { name: "Order the same again" })).toBeNull(); // opened from a bookmark: no table menu to go back to
+      unmount();
+      rememberOrder({ orderId: "cmord7", key: "key-7", token: "tok-7", ref: "ORD007", at: "2026-10-04T08:00:00.000Z" });
+      handler = () => ({ data: v({ reorder: [] }) });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await screen.findByTestId("order-stage");
+      expect(screen.queryByRole("button", { name: "Order the same again" })).toBeNull();
+    });
   });
 
   it("without a key it explains instead of calling the API", async () => {

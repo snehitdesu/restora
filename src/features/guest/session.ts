@@ -18,6 +18,10 @@ import { emptyCart, type CartState } from "@/features/pos/cart";
 const CART = (token: string) => `aharos.guest.cart.${token}`;
 const SUBMIT = (token: string) => `aharos.guest.submit.${token}`;
 const ORDERS = "aharos.guest.orders";
+const COUPON = (token: string) => `aharos.guest.coupon.${token}`;
+const REFERRAL = "aharos.guest.referral";
+const NOTICE = (orderId: string) => `aharos.guest.notice.${orderId}`;
+const RATED = (orderId: string) => `aharos.guest.rated.${orderId}`;
 
 type KV = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const session = (): KV | null => {
@@ -91,3 +95,43 @@ export function orderKeyFor(orderId: string, hash: string, store: KV | null = lo
 
 /** Where a guest's order lives: the key rides in the fragment, which browsers never send to the server. */
 export const orderUrl = (orderId: string, key: string) => `/o/${encodeURIComponent(orderId)}#k=${encodeURIComponent(key)}`;
+
+// ---------------- coupon, referral, notices, rating (Group 6) ----------------
+
+const CODE = /^[A-Z0-9]{3,20}$/;
+
+/** The coupon code the guest typed for this table's cart (cleared with the order). */
+export function loadCoupon(token: string, store: KV | null = session()): string | null {
+  const c = read<string>(store, COUPON(token));
+  return typeof c === "string" && CODE.test(c) ? c : null;
+}
+export function saveCoupon(token: string, code: string | null, store: KV | null = session()) {
+  write(store, COUPON(token), code && CODE.test(code) ? code : null);
+}
+
+/** A friend's referral code, kept from the invite link (/r/CODE) until the guest orders. */
+export function loadReferral(store: KV | null = local()): string | null {
+  const c = read<string>(store, REFERRAL);
+  return typeof c === "string" && CODE.test(c) ? c : null;
+}
+export function saveReferral(code: string | null, store: KV | null = local()) {
+  write(store, REFERRAL, code && CODE.test(code.toUpperCase()) ? code.toUpperCase() : null);
+}
+
+/** What happened to the coupon / referral the guest sent with an order, shown once on the order page. */
+export function saveNotice(orderId: string, text: string, store: KV | null = session()) {
+  write(store, NOTICE(orderId), text);
+}
+export function takeNotice(orderId: string, store: KV | null = session()): string | null {
+  const n = read<string>(store, NOTICE(orderId));
+  if (n !== null) write(store, NOTICE(orderId), null);
+  return typeof n === "string" ? n : null;
+}
+
+/** The guest already rated this order on this device (the server also keeps one answer per order). */
+export function wasRated(orderId: string, store: KV | null = local()): boolean {
+  return read<boolean>(store, RATED(orderId)) === true;
+}
+export function markRated(orderId: string, store: KV | null = local()) {
+  write(store, RATED(orderId), true);
+}

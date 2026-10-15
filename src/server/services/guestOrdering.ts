@@ -14,8 +14,13 @@
  *  - Payments use the existing payment service: a PENDING payment for the
  *    server-computed outstanding balance, made SUCCESS only by gateway
  *    verification (payment.verifyPayment, with its balance/concurrency rules).
- *  - Guest orders arrive OPEN: staff accept them at the POS (submitOrder ->
- *    KOT), or a verified prepayment sends them to the kitchen.
+ *  - Kitchen dispatch uses the existing routing (orders.submitOrder ->
+ *    kot.createKOTsForOrder). A guest paying CASH at the counter is sent to the
+ *    kitchen as the order is placed (same transaction: no order without its
+ *    KOT, no KOT without its order) and stays unpaid until staff record the
+ *    payment. An ONLINE order arrives OPEN and reaches the kitchen only when
+ *    the gateway payment is verified (payment.verifyPayment); staff can still
+ *    accept an OPEN order at the POS.
  *
  * Services run with a system context scoped to the resolved outlet (the same
  * pattern as webhooks); every input that reaches them is fixed here.
@@ -24,6 +29,7 @@ import { createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/client";
+import { isGuestTableToken } from "@/lib/qr/tableQrUrl";
 import { systemContext } from "@/server/auth/context";
 import { type AccessContext, NotFoundError, ValidationError } from "@/server/db/scope";
 import { DEV_AUTH_SECRET_PLACEHOLDER } from "@/server/config/env";
@@ -32,6 +38,11 @@ import { createNotificationTx } from "@/server/services/notifications";
 import { listMenu, priceMenuSelection } from "@/server/services/menu";
 import { calculateOrderTotals, placeOrder } from "@/server/services/orders";
 import { upsertCustomerByPhone } from "@/server/services/crm";
+import { applyCouponTx, previewCoupon } from "@/server/services/coupons";
+import { attachReferralTx } from "@/server/services/referrals";
+import { setConsent } from "@/server/services/consent";
+import { submitOrderFeedback, type GuestFeedbackResult } from "@/server/services/feedbackLoop";
+import { runInTx } from "@/server/services/_workflow";
 import type { Tx } from "@/server/services/_workflow";
 import { formatClock, formatHours, hasHours, isOpenAt } from "@/domain/openingHours";
 import { guestTracker, type GuestTracker } from "@/domain/orderProgress";
@@ -40,7 +51,8 @@ import { buildBill, billOrderInclude, loadBillVenue, orderRef, type Bill } from 
 import { getOrderInvoices } from "@/server/services/invoicing";
 import { getPaymentProvider, type IntegrationMode } from "@/integrations/payment";
 import { D, money, num } from "@/domain/money";
-import { FULFILMENT_LABEL } from "@/domain/orderProgress";
+import { MAX_SPLIT_PARTS, MIN_SPLIT_PARTS, splitShare } from "@/domain/billSplit";
+import { FULFILMENT_LABEL, GUEST_AWAITING_PAYMENT_LABEL } from "@/domain/orderProgress";
 
 // ---------------- access keys ----------------
 
@@ -67,12 +79,8 @@ function keyMatches(orderId: string, key: string | null | undefined): boolean {
 
 // ---------------- table resolution ----------------
 
-/** URL-safe table token. The QR generator and resolveTable share this rule. */
-export const GUEST_TABLE_TOKEN_RE = /^[A-Za-z0-9_-]{6,64}$/;
-
-export function isGuestTableToken(token: unknown): token is string {
-  return typeof token === "string" && GUEST_TABLE_TOKEN_RE.test(token);
-}
+// The token rule lives with the scanner's URL parser (pure, client-safe); re-exported for existing callers.
+export { GUEST_TABLE_TOKEN_RE, isGuestTableToken } from "@/lib/qr/tableQrUrl";
 
 // One message for every failure: no oracle for which tables/outlets exist.
 const BAD_QR = "This table QR code is not valid. Please ask the staff for help.";
@@ -84,18 +92,37 @@ export type GuestTable = {
   restaurantName: string;
 };
 
-export async function resolveTable(token: string, db: PrismaClient = prisma): Promise<GuestTable> {
-  if (!isGuestTableToken(token)) throw new NotFoundError(BAD_QR);
+/**
+ * The one table-token lookup. `inactive`: the table exists but its outlet or
+ * organization is switched off. Guests never see the difference (resolveTable
+ * throws the same error for both); the staff QR scanner reports it.
+ */
+export type TableTokenLookup =
+  | { status: "not_found" }
+  | { status: "inactive"; table: { id: string; code: string; organizationId: string; outletId: string }; outletName: string; restaurantName: string }
+  | { status: "ok"; guest: GuestTable };
+
+export async function lookupTableToken(token: string, db: PrismaClient = prisma): Promise<TableTokenLookup> {
+  if (!isGuestTableToken(token)) return { status: "not_found" };
   const table = await db.restaurantTable.findUnique({ where: { qrToken: token }, select: { id: true, code: true, organizationId: true, outletId: true } });
-  if (!table) throw new NotFoundError(BAD_QR);
+  if (!table) return { status: "not_found" };
   const outlet = await db.outlet.findUnique({
     where: { id: table.outletId },
     select: { id: true, organizationId: true, name: true, address: true, phone: true, currency: true, timezone: true, openTime: true, closeTime: true, active: true, organization: { select: { name: true, legalName: true, active: true } } },
   });
-  if (!outlet || !outlet.active || !outlet.organization.active || outlet.organizationId !== table.organizationId) throw new NotFoundError(BAD_QR);
-  const { active: _a, organization, ...o } = outlet;
+  if (!outlet || outlet.organizationId !== table.organizationId) return { status: "not_found" };
+  const restaurantName = outlet.organization.legalName || outlet.organization.name;
+  if (!outlet.active || !outlet.organization.active) return { status: "inactive", table, outletName: outlet.name, restaurantName };
+  const { active: _a, organization: _org, ...o } = outlet;
   void _a;
-  return { ctx: systemContext(outlet.organizationId, [outlet.id]), table: { id: table.id, code: table.code }, outlet: o, restaurantName: organization.legalName || organization.name };
+  void _org;
+  return { status: "ok", guest: { ctx: systemContext(outlet.organizationId, [outlet.id]), table: { id: table.id, code: table.code }, outlet: o, restaurantName } };
+}
+
+export async function resolveTable(token: string, db: PrismaClient = prisma): Promise<GuestTable> {
+  const found = await lookupTableToken(token, db);
+  if (found.status !== "ok") throw new NotFoundError(BAD_QR);
+  return found.guest;
 }
 
 // ---------------- payment availability ----------------
@@ -138,7 +165,11 @@ export async function guestPaymentOptions(opts: { fresh?: boolean } = {}): Promi
 
 /** The guest menu: what the table's outlet offers, at its prices — no admin fields. */
 export async function guestMenu(token: string, db: PrismaClient = prisma) {
-  const t = await resolveTable(token, db);
+  return guestMenuFor(await resolveTable(token, db), db);
+}
+
+/** The guest menu for a table already resolved from its token (the storefront layout resolves it once per request). */
+export async function guestMenuFor(t: GuestTable, db: PrismaClient = prisma) {
   // With an outletId, listMenu returns the outlet's effective price / sold-out per item.
   type Effective = { effectivePrice: number; effectiveSoldOut: boolean };
   const items = (await listMenu(db, t.ctx, { outletId: t.outlet.id, activeOnly: true })) as Array<Awaited<ReturnType<typeof listMenu>>[number] & Effective>;
@@ -203,37 +234,45 @@ export type GuestPricedLine =
  * Price every line exactly as order placement will (menu.priceMenuSelection:
  * outlet price override, variant, modifier rules, sold-out / not offered) —
  * read-only. A line that cannot be ordered carries the reason instead of a price.
+ * Lines are independent reads, so they are priced concurrently: a cart costs
+ * about one line's round trips instead of one per line (each line is 4 queries).
  */
 async function priceGuestLines(db: PrismaClient, t: GuestTable, items: GuestLineInput[]): Promise<GuestPricedLine[]> {
-  const out: GuestPricedLine[] = [];
-  for (const [index, it] of items.entries()) {
-    try {
-      // Reads only (menu item, variants, groups, outlet override): no transaction needed.
-      const p = await priceMenuSelection(db as unknown as Tx, t.ctx, { menuItemId: it.menuItemId, variantId: it.variantId, modifierOptionIds: it.modifierOptionIds?.length ? it.modifierOptionIds : undefined, outletId: t.outlet.id });
-      const modsPerUnit = p.modifiers.reduce((a, m) => a.plus(m.priceDelta), D(0));
-      const line = calculateOrderTotals([{ qty: it.qty, unitPrice: p.unitPrice, modifiersPerUnit: modsPerUnit, taxPct: p.taxPct }]);
-      out.push({
-        index,
-        ok: true,
-        menuItemId: p.menuItemId,
-        name: p.name,
-        unitPrice: money(p.unitPrice).toFixed(2),
-        modifiers: p.modifiers.map((m) => ({ name: m.name, priceDelta: money(m.priceDelta).toFixed(2) })),
-        modifiersPerUnit: money(modsPerUnit).toFixed(2),
-        taxPct: D(p.taxPct).toString(),
-        qty: it.qty,
-        lineTotal: line.subtotal.toFixed(2),
-      });
-    } catch (e) {
-      if (e instanceof NotFoundError) out.push({ index, ok: false, menuItemId: it.menuItemId, reason: NOT_ON_MENU, notFound: true });
-      else if (e instanceof ValidationError) out.push({ index, ok: false, menuItemId: it.menuItemId, reason: e.message });
-      else throw e;
-    }
-  }
-  return out;
+  return Promise.all(
+    items.map(async (it, index): Promise<GuestPricedLine> => {
+      try {
+        // Reads only (menu item, variants, groups, outlet override): no transaction needed.
+        const p = await priceMenuSelection(db as unknown as Tx, t.ctx, { menuItemId: it.menuItemId, variantId: it.variantId, modifierOptionIds: it.modifierOptionIds?.length ? it.modifierOptionIds : undefined, outletId: t.outlet.id });
+        const modsPerUnit = p.modifiers.reduce((a, m) => a.plus(m.priceDelta), D(0));
+        const line = calculateOrderTotals([{ qty: it.qty, unitPrice: p.unitPrice, modifiersPerUnit: modsPerUnit, taxPct: p.taxPct }]);
+        return {
+          index,
+          ok: true,
+          menuItemId: p.menuItemId,
+          name: p.name,
+          unitPrice: money(p.unitPrice).toFixed(2),
+          modifiers: p.modifiers.map((m) => ({ name: m.name, priceDelta: money(m.priceDelta).toFixed(2) })),
+          modifiersPerUnit: money(modsPerUnit).toFixed(2),
+          taxPct: D(p.taxPct).toString(),
+          qty: it.qty,
+          lineTotal: line.subtotal.toFixed(2),
+        };
+      } catch (e) {
+        if (e instanceof NotFoundError) return { index, ok: false, menuItemId: it.menuItemId, reason: NOT_ON_MENU, notFound: true };
+        if (e instanceof ValidationError) return { index, ok: false, menuItemId: it.menuItemId, reason: e.message };
+        throw e;
+      }
+    })
+  );
 }
 
-const quoteSchema = z.object({ items: z.array(z.lazy(() => guestItem)).min(1, "Your cart is empty").max(30) }).strict();
+const quoteSchema = z.object({
+  items: z.array(z.lazy(() => guestItem)).min(1, "Your cart is empty").max(30),
+  /** Optional: price the cart with this coupon code (nothing is created or counted). */
+  couponCode: z.string().trim().min(1).max(40).optional(),
+  /** Optional: lets a first-order / per-guest coupon be checked against the guest's own record (looked up, never created). */
+  phone: z.string().trim().max(20).optional(),
+}).strict();
 
 export type GuestQuote = {
   lines: GuestPricedLine[];
@@ -244,6 +283,15 @@ export type GuestQuote = {
   total: string;
   allAvailable: boolean;
   ordering: OrderingStatus;
+  /** Present when a code was sent: what it is worth now, or a message a guest may see. `discount` is already out of `subtotal`'s tax base and `total`. */
+  coupon?: { ok: true; code: string; name: string; discount: string } | { ok: false; message: string };
+  discount: string;
+  /**
+   * `total` without the coupon: what placing the order is priced at (the coupon is
+   * applied after the order exists), so it is the value checkout sends as
+   * `expectedTotal`. Equal to `total` when no coupon applies.
+   */
+  totalBeforeDiscount: string;
 };
 
 /**
@@ -255,7 +303,16 @@ export async function quoteGuestCart(token: string, input: unknown, db: PrismaCl
   const t = await resolveTable(token, db);
   const lines = await priceGuestLines(db, t, data.items);
   const okLines = lines.filter((l): l is Extract<GuestPricedLine, { ok: true }> => l.ok);
-  const totals = calculateOrderTotals(okLines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct })));
+  const lineItems = okLines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }));
+  const base = calculateOrderTotals(lineItems);
+  let totals = base;
+  let coupon: GuestQuote["coupon"];
+  if (data.couponCode && okLines.length) {
+    const phone = data.phone ? normalizeGuestPhone(data.phone) : null;
+    const known = phone ? await db.customer.findFirst({ where: { organizationId: t.ctx.organizationId, phone }, select: { id: true } }) : null;
+    coupon = await previewCoupon(db, { organizationId: t.ctx.organizationId, outletId: t.outlet.id, channel: "QR", code: data.couponCode, subtotal: totals.subtotal, customerId: known?.id ?? null });
+    if (coupon.ok) totals = calculateOrderTotals(lineItems, coupon.discount);
+  }
   return {
     // `notFound` is internal (placement keeps answering 404 for a dish that is not this restaurant's).
     lines: lines.map((l) => (l.ok ? l : { index: l.index, ok: false as const, menuItemId: l.menuItemId, reason: l.reason })),
@@ -265,6 +322,9 @@ export async function quoteGuestCart(token: string, input: unknown, db: PrismaCl
     total: totals.total.toFixed(2),
     allAvailable: okLines.length === lines.length,
     ordering: orderingStatus(t),
+    discount: totals.discount.toFixed(2),
+    totalBeforeDiscount: base.total.toFixed(2),
+    ...(coupon ? { coupon } : {}),
   };
 }
 
@@ -309,12 +369,53 @@ const guestOrderSchema = z
     customer: guestCustomer.optional(),
     /** How the guest says they will pay. Informational for the staff; payment itself is verified separately. */
     paymentMethod: z.enum(["CASH", "ONLINE"]).optional(),
+    /**
+     * The total the guest was shown at checkout. Never used as a price: the order
+     * is always priced here. When this request's own pricing differs (a price,
+     * tax rate or add-on changed since the quote), nothing is created and the
+     * guest is told the new total (GuestPriceChangedError).
+     */
+    expectedTotal: z.string().trim().regex(/^\d{1,10}(\.\d{1,2})?$/, "Invalid total").optional(),
+    /** A coupon code: priced and applied by the server after the order exists; an invalid one never blocks the order. */
+    couponCode: z.string().trim().min(1).max(40).optional(),
+    /** A friend's referral code (counts only for a new guest who gave a phone number). */
+    referralCode: z.string().trim().min(4).max(20).optional(),
+    /** "Send me offers": an explicit yes to SMS and WhatsApp marketing for the phone number given. */
+    marketingOptIn: z.boolean().optional(),
   })
   .strict();
+
+/** 409: the cart costs something other than the guest was shown. Nothing was created; `details.total` is the current total. */
+export class GuestPriceChangedError extends Error {
+  status = 409;
+  details: { total: string };
+  constructor(total: string) {
+    super("Prices changed since you opened checkout. Check the new total, then place your order again.");
+    this.name = "PriceChanged";
+    this.details = { total };
+  }
+}
 const idemKey = z.string().trim().min(8).max(64).regex(/^[\w.:-]+$/, "Invalid idempotency key");
 
 /** Unaccepted guest orders a table may have waiting at once (a QR is a public link). */
 export const MAX_WAITING_GUEST_ORDERS = 3;
+/**
+ * Unpaid guest orders a table may have at once when paying at the counter. A
+ * cash order reaches the kitchen with nobody at the till, so a public QR link
+ * must not be able to flood the kitchen; paying (or staff cancelling) frees it.
+ *
+ * This is an abuse guard, not a documented restaurant rule: 6 was chosen during
+ * development (a table of six each ordering separately). The owner can change it
+ * with GUEST_MAX_UNPAID_ORDERS_PER_TABLE (1–50); production validation refuses
+ * anything else, and an invalid value here falls back to the default.
+ */
+export const MAX_UNPAID_GUEST_ORDERS = 6;
+
+export function maxUnpaidGuestOrders(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.GUEST_MAX_UNPAID_ORDERS_PER_TABLE);
+  return Number.isInteger(n) && n >= 1 && n <= 50 ? n : MAX_UNPAID_GUEST_ORDERS;
+}
+const UNSETTLED_STATUSES = ["OPEN", "SENT", "PREPARING", "READY", "SERVED", "BILLED"];
 
 export type ClientMeta = { ip?: string; userAgent?: string };
 
@@ -322,21 +423,37 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
   const key = idemKey.parse(idempotencyKey);
   const data = guestOrderSchema.parse(input);
   const t = await resolveTable(token, db);
+  // Paying at the counter: the café's workflow sends the order to the kitchen now.
+  // Online: it waits for the verified payment (or a member of staff) instead.
+  const dispatch = data.paymentMethod === "CASH";
   // Namespaced per table: a key can only ever replay an order of this table.
   const scopedKey = `qr:${t.table.id}:${key}`;
   const existing = await db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: t.ctx.organizationId, idempotencyKey: scopedKey } }, select: { id: true } });
   if (!existing) {
-    const waiting = await db.order.count({ where: { organizationId: t.ctx.organizationId, tableId: t.table.id, source: "QR", status: "OPEN" } });
+    const atTable = { organizationId: t.ctx.organizationId, tableId: t.table.id, source: "QR" };
+    // Independent reads: the limits and every line's price, at once.
+    const [waiting, unpaid, lines] = await Promise.all([
+      db.order.count({ where: { ...atTable, status: "OPEN" } }),
+      dispatch ? db.order.count({ where: { ...atTable, status: { in: UNSETTLED_STATUSES } } }) : Promise.resolve(0),
+      priceGuestLines(db, t, data.items),
+    ]);
     if (waiting >= MAX_WAITING_GUEST_ORDERS) throw new ValidationError("Several orders from this table are waiting for the restaurant to accept them. Please wait, or ask the staff.");
+    const unpaidCap = maxUnpaidGuestOrders();
+    if (unpaid >= unpaidCap) throw new ValidationError(`This table already has ${unpaidCap} unpaid orders. Please pay at the counter, or ask the staff, before ordering more.`);
     const ordering = orderingStatus(t);
     if (!ordering.open) throw new ValidationError(ordering.message!);
     // Every line is checked (and priced) before anything is created, so a sold-out
     // item never leaves a half-made order or a stray customer record behind.
-    const bad = (await priceGuestLines(db, t, data.items)).find((l) => !l.ok);
+    const bad = lines.find((l) => !l.ok);
     if (bad && !bad.ok) {
       // Unknown / another restaurant's dish: the same 404 as before (no oracle); unavailable: 422 with the reason.
       if (bad.notFound) throw new NotFoundError("Menu item not found");
       throw new ValidationError(`Item ${bad.index + 1}: ${bad.reason}. Please update your cart.`);
+    }
+    if (data.expectedTotal !== undefined) {
+      const okLines = lines.filter((l): l is Extract<GuestPricedLine, { ok: true }> => l.ok);
+      const total = calculateOrderTotals(okLines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }))).total;
+      if (!money(total).eq(D(data.expectedTotal))) throw new GuestPriceChangedError(money(total).toFixed(2));
     }
   }
   const guestName = data.customer?.name || undefined;
@@ -353,17 +470,46 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
     notes: data.notes || undefined,
     idempotencyKey: scopedKey,
     items: data.items.map((i) => ({ menuItemId: i.menuItemId, variantId: i.variantId, modifierOptionIds: i.modifierOptionIds?.length ? i.modifierOptionIds : undefined, qty: i.qty, notes: i.notes || undefined })),
-    submit: false,
-  }, db);
+    // submitOrder (SENT + one KOT per station) runs in the order's own transaction:
+    // a failed dispatch creates nothing, and a replayed request never dispatches again.
+    submit: dispatch,
+  }, db, {
+    // Inside the order's transaction (queued with every other SQLite write):
+    // the audit row and the staff alert exist exactly when the order does. A
+    // separate transaction afterwards could time out under load and answer 500
+    // for an order that had already been placed and sent to the kitchen.
+    afterCreate: async (tx, placed) => {
+      const pays = data.paymentMethod === "ONLINE" ? "paying online" : data.paymentMethod === "CASH" ? "pays at the counter" : null;
+      await writeAudit(tx, t.ctx, { action: "CREATE", entityType: "Order", entityId: placed.id, outletId: t.outlet.id, after: { via: "guest-qr", table: t.table.code, total: money(placed.total).toString(), ...(guestName ? { guestName } : {}), ...(data.paymentMethod ? { paymentMethod: data.paymentMethod } : {}) }, ip: meta.ip, userAgent: meta.userAgent?.slice(0, 200) });
+      // Staff (POS / captain alert centre) learn about the order in-app.
+      await createNotificationTx(tx, t.ctx, { outletId: t.outlet.id, type: "NEW_ORDER", title: `New QR order · table ${t.table.code}`, body: [`${orderRef(placed.id)} · ₹${money(placed.total).toFixed(2)} — ${dispatch ? "sent to the kitchen" : "waiting to be accepted"}`, guestName, pays].filter(Boolean).join(" · ") });
+    },
+  });
+  // Coupon, referral and consent ride on the order but never fail it: each reports its own outcome.
+  let coupon: { applied: boolean; code?: string; discount?: string; message?: string } | undefined;
+  let referral: { attached: boolean; message?: string } | undefined;
   if (!order.replayed) {
-    const pays = data.paymentMethod === "ONLINE" ? "paying online" : data.paymentMethod === "CASH" ? "pays at the counter" : null;
-    await db.$transaction(async (tx) => {
-      await writeAudit(tx, t.ctx, { action: "CREATE", entityType: "Order", entityId: order.id, outletId: t.outlet.id, after: { via: "guest-qr", table: t.table.code, total: money(order.total).toString(), ...(guestName ? { guestName } : {}), ...(data.paymentMethod ? { paymentMethod: data.paymentMethod } : {}) }, ip: meta.ip, userAgent: meta.userAgent?.slice(0, 200) });
-      // Staff (POS / captain alert centre) learn about the waiting order in-app.
-      await createNotificationTx(tx, t.ctx, { outletId: t.outlet.id, type: "NEW_ORDER", title: `New QR order · table ${t.table.code}`, body: [`${orderRef(order.id)} · ₹${money(order.total).toFixed(2)} — waiting to be accepted`, guestName, pays].filter(Boolean).join(" · ") });
-    });
+    if (data.couponCode) {
+      try {
+        const r = await runInTx(db, (tx) => applyCouponTx(tx, t.ctx, order.id, data.couponCode!));
+        coupon = { applied: true, code: r.coupon.code, discount: r.discount.toFixed(2) };
+      } catch (e) {
+        coupon = { applied: false, message: e instanceof ValidationError ? e.message : "This code can't be used here." };
+      }
+    }
+    if (customerId && data.referralCode) {
+      const r = await runInTx(db, (tx) => attachReferralTx(tx, t.ctx, customerId, data.referralCode!));
+      referral = { attached: r.status === "ATTACHED", ...(r.status === "ATTACHED" ? {} : { message: r.reason }) };
+    }
+    if (customerId && data.marketingOptIn) await setConsent(t.ctx, customerId, [{ channel: "SMS", marketing: true }, { channel: "WHATSAPP", marketing: true }], "GUEST_QR", db);
   }
-  return { orderId: order.id, ref: orderRef(order.id), accessKey: guestOrderKey(order.id), replayed: Boolean(order.replayed) };
+  return { orderId: order.id, ref: orderRef(order.id), accessKey: guestOrderKey(order.id), replayed: Boolean(order.replayed), ...(coupon ? { coupon } : {}), ...(referral ? { referral } : {}) };
+}
+
+/** The order page's feedback form: the order's access key is the credential (same check as every guest order action). */
+export async function submitGuestOrderFeedback(orderId: string, key: string | null | undefined, input: unknown, db: PrismaClient = prisma): Promise<GuestFeedbackResult> {
+  if (typeof orderId !== "string" || orderId.length > 64 || !keyMatches(orderId, key)) throw new NotFoundError("Order not found");
+  return submitOrderFeedback(orderId, input, db);
 }
 
 // ---------------- the guest's view of an order ----------------
@@ -387,25 +533,64 @@ export type GuestOrderView = {
   canPay: boolean;
   payment: GuestPaymentOptions;
   pendingPaymentId: string | null;
+  /** The same dishes as a cart, for "order the same again": current price and availability are checked when the cart is priced. */
+  reorder: GuestReorderLine[];
+  /** Splitting the bill from the phones: how many online parts guests have already paid. */
+  split: { sharesPaid: number; minParts: number; maxParts: number };
+};
+
+export type GuestReorderLine = {
+  menuItemId: string;
+  name: string;
+  variantId?: string;
+  modifierOptionIds: string[];
+  modifierLabels: string[];
+  unitPrice: number;
+  modifiersPerUnit: number;
+  taxPct: number;
+  qty: number;
+  notes?: string;
 };
 
 async function viewOf(order: Awaited<ReturnType<typeof loadGuestOrder>>, db: PrismaClient): Promise<GuestOrderView> {
   const bill = buildBill(order, await loadBillVenue(db, order.organizationId, order.outletId), await getOrderInvoices(db, order.id));
   const payment = await guestPaymentOptions();
   const pending = order.payments.filter((p) => p.status === "PENDING" && p.method === "ONLINE" && !p.actorId).at(-1);
+  // Not yet in the kitchen while the guest's own online payment is open: what it
+  // waits for is that payment, not the restaurant.
+  const awaitingPayment = bill.fulfilment === "AWAITING_ACCEPTANCE" && pending !== undefined;
+  const reorder: GuestReorderLine[] = order.items
+    .filter((i) => i.menuItemId)
+    .map((i) => ({
+      menuItemId: i.menuItemId!,
+      name: i.name,
+      ...(i.variantId ? { variantId: i.variantId } : {}),
+      modifierOptionIds: i.modifiers.map((m) => m.optionId).filter((x): x is string => Boolean(x)),
+      modifierLabels: i.modifiers.map((m) => m.name),
+      unitPrice: num(i.unitPrice),
+      modifiersPerUnit: num(i.modifiers.reduce((a, m) => a.plus(D(m.priceDelta)), D(0))),
+      taxPct: num(i.taxPct),
+      qty: Math.min(50, Math.max(1, Math.round(num(i.qty)))),
+      ...(i.notes ? { notes: i.notes } : {}),
+    }));
   return {
     orderId: order.id,
     ref: orderRef(order.id),
     status: order.status,
     fulfilment: bill.fulfilment,
-    fulfilmentLabel: FULFILMENT_LABEL[bill.fulfilment],
+    fulfilmentLabel: awaitingPayment ? GUEST_AWAITING_PAYMENT_LABEL : FULFILMENT_LABEL[bill.fulfilment],
     tracker: guestTracker(order),
     bill,
     canPay: payment.online && !["PAID", "CANCELLED", "REFUNDED"].includes(order.status) && D(bill.balanceDue).gt(0),
     payment,
     pendingPaymentId: pending?.id ?? null,
+    reorder,
+    split: { sharesPaid: guestSharesPaid(order.payments), minParts: MIN_SPLIT_PARTS, maxParts: MAX_SPLIT_PARTS },
   };
 }
+
+/** Online payments by guests that went through (staff payments and cash are not "parts" of a phone split). */
+const guestSharesPaid = (payments: Array<{ status: string; method: string; actorId: string | null }>) => payments.filter((p) => (p.status === "SUCCESS" || p.status === "PARTIAL") && p.method === "ONLINE" && !p.actorId).length;
 
 export async function getGuestOrder(orderId: string, key: string | null | undefined, db: PrismaClient = prisma): Promise<GuestOrderView> {
   return viewOf(await loadGuestOrder(orderId, key, db), db);
@@ -419,8 +604,16 @@ export async function getGuestOrder(orderId: string, key: string | null | undefi
  * amount instead of creating another; a new attempt after a decline is a new
  * payment. Retries with the same Idempotency-Key return the same payment.
  */
-export async function startGuestPayment(orderId: string, key: string | null | undefined, idempotencyKey: unknown, db: PrismaClient = prisma) {
+const startPaymentSchema = z.object({ parts: z.number().int().min(MIN_SPLIT_PARTS, `The bill can be split between ${MIN_SPLIT_PARTS} and ${MAX_SPLIT_PARTS} people`).max(MAX_SPLIT_PARTS, `The bill can be split between ${MIN_SPLIT_PARTS} and ${MAX_SPLIT_PARTS} people`).optional() }).strict();
+
+/**
+ * With `parts` the guest pays an equal part of what is still due instead of all of it: the server works out the amount from
+ * the balance and the parts already paid (src/domain/billSplit.ts), the last person pays what is left, and every guest's
+ * payment is their own (never shared with another guest's open payment).
+ */
+export async function startGuestPayment(orderId: string, key: string | null | undefined, idempotencyKey: unknown, input: unknown = {}, db: PrismaClient = prisma) {
   const idem = idemKey.parse(idempotencyKey);
+  const { parts } = startPaymentSchema.parse(input ?? {});
   const order = await loadGuestOrder(orderId, key, db);
   if (["PAID", "CANCELLED", "REFUNDED"].includes(order.status)) throw new ValidationError(`This order is already ${order.status.toLowerCase()}`);
   const options = await guestPaymentOptions({ fresh: true });
@@ -429,10 +622,14 @@ export async function startGuestPayment(orderId: string, key: string | null | un
   const collected = order.payments.filter((p) => p.status === "SUCCESS" || p.status === "PARTIAL").reduce((a, p) => a.plus(D(p.amount)), D(0));
   const outstanding = money(D(order.total).minus(collected));
   if (outstanding.lte(0)) throw new ValidationError("Nothing is due on this order");
+  const share = parts ? splitShare(outstanding, parts, guestSharesPaid(order.payments)) : null;
+  const amount = share ? D(share.amount) : outstanding;
 
   const ctx = systemContext(order.organizationId, [order.outletId]);
-  const resumable = order.payments.find((p) => p.status === "PENDING" && p.method === "ONLINE" && p.provider === gateway.name && !p.actorId && D(p.amount).eq(outstanding));
-  const payment = resumable ?? (await createPayment(ctx, order.id, { method: "ONLINE", amount: num(outstanding), provider: gateway.name, idempotencyKey: `qrpay:${order.id.slice(-12)}:${idem}` }, db));
+  // A refresh resumes the guest's own open payment. Whole-bill payments share one open payment for the same amount; a part
+  // belongs to the phone that asked for it (its Idempotency-Key), so two guests never end up on the same checkout.
+  const resumable = share ? undefined : order.payments.find((p) => p.status === "PENDING" && p.method === "ONLINE" && p.provider === gateway.name && !p.actorId && D(p.amount).eq(outstanding));
+  const payment = resumable ?? (await createPayment(ctx, order.id, { method: "ONLINE", amount: num(amount), provider: gateway.name, idempotencyKey: `qrpay:${order.id.slice(-12)}:${idem}` }, db));
   // Gateway-side checkout for the SERVER's amount (the Payment row), created outside any DB
   // transaction. A failure leaves the payment PENDING without a reference; the next attempt
   // resumes it. A payment that already has its checkout keeps it (no second gateway order).
@@ -449,7 +646,7 @@ export async function startGuestPayment(orderId: string, key: string | null | un
     if (!checkout && providerRef) checkout = gateway.resumeCheckout?.({ providerRef, amount: num(payment.amount), currency: "INR" });
     checkout ??= { provider: gateway.name, mode: gateway.mode, orderId: providerRef ?? "", amount: Math.round(num(payment.amount) * 100), currency: "INR" };
   }
-  return { paymentId: payment.id, amount: money(payment.amount).toFixed(2), provider: gateway.name, mode: gateway.mode, testMode: options.testMode, checkout };
+  return { paymentId: payment.id, amount: money(payment.amount).toFixed(2), provider: gateway.name, mode: gateway.mode, testMode: options.testMode, checkout, ...(share ? { share: { parts, remainingParts: share.remainingParts, last: share.last } } : {}) };
 }
 
 const confirmSchema = z

@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { cache, type ReactNode } from "react";
-import { guestMenu } from "@/server/services/guestOrdering";
+import { guestMenuFor, resolveTable, type GuestTable } from "@/server/services/guestOrdering";
 import { NotFoundError } from "@/server/db/scope";
 import { StorefrontProvider, type GuestMenuData } from "@/features/guest/storefront";
 import { StorefrontOverlays } from "@/features/guest/components/Chrome";
@@ -12,31 +12,41 @@ import "@/features/guest/storefront.css";
 // is the only input, resolved server-side to restaurant → outlet → table.
 export const dynamic = "force-dynamic";
 
-/** One server lookup per request, shared by the metadata and the layout. */
-const load = cache(async (token: string): Promise<GuestMenuData | null> => {
+/** The table behind the token, resolved once per request (metadata, viewport and layout share it). */
+const table = cache(async (token: string): Promise<GuestTable | null> => {
   try {
-    return (await guestMenu(token)) as GuestMenuData;
+    return await resolveTable(token);
   } catch (e) {
     if (e instanceof NotFoundError) return null;
     throw e;
   }
 });
 
+/**
+ * The menu is loaded by the layout render only. A client navigation between
+ * this table's pages (menu ↔ cart ↔ checkout) re-runs the metadata but not the
+ * layout, so it costs the table lookup, never the menu or a gateway health check.
+ */
+const load = cache(async (token: string): Promise<GuestMenuData | null> => {
+  const t = await table(token);
+  return t ? ((await guestMenuFor(t)) as GuestMenuData) : null;
+});
+
 type Props = { params: Promise<{ token: string }>; children: ReactNode };
 
 export async function generateMetadata({ params }: Omit<Props, "children">): Promise<Metadata> {
-  const data = await load((await params).token);
+  const t = await table((await params).token);
   return {
-    title: data ? `${data.restaurant.name} · Table ${data.table.code}` : "Table QR",
-    description: data ? `Order from Table ${data.table.code} at ${data.restaurant.name}.` : undefined,
+    title: t ? `${t.restaurantName} · Table ${t.table.code}` : "Table QR",
+    description: t ? `Order from Table ${t.table.code} at ${t.restaurantName}.` : undefined,
     robots: { index: false, follow: false },
     referrer: "no-referrer",
   };
 }
 
 export async function generateViewport({ params }: Omit<Props, "children">): Promise<Viewport> {
-  const data = await load((await params).token);
-  return { themeColor: brandFor(data?.restaurant.name).themeColor, width: "device-width", initialScale: 1, viewportFit: "cover" };
+  const t = await table((await params).token);
+  return { themeColor: brandFor(t?.restaurantName).themeColor, width: "device-width", initialScale: 1, viewportFit: "cover" };
 }
 
 export default async function GuestTableLayout({ params, children }: Props) {

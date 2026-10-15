@@ -1,7 +1,7 @@
 /**
  * Phase 2 core transaction in real browsers, three parties at once:
  *   GUEST (phone, no account)  : table QR -> menu -> cart + modifiers -> order -> pay -> receipt
- *   POS   (cashier session)    : incoming QR order -> accept (KOT) -> bill / receipt
+ *   POS   (cashier session)    : the QR order (sent to the kitchen at placement) -> bill / receipt
  *   KITCHEN (kitchen session)  : KOT -> Accept -> Start -> Ready -> Served
  * then stock consumption and sales data. Every step is checked against the
  * server (API / database state), not only the screen.
@@ -11,7 +11,7 @@
  * labels it as a test gateway and the server still verifies every payment.
  */
 import { test, expect, type Browser, type Page } from "@playwright/test";
-import { statePath, outletByCode, order, openPos, toast, sessionFor, materialByName, stockQty, ledgerForOrder, apiAs, apiData, CENTRAL, money } from "./helpers";
+import { statePath, outletByCode, order, openPos, toast, sessionFor, materialByName, stockQty, ledgerForOrder, apiAs, apiData, expectNoSeriousA11yViolations, CENTRAL, money } from "./helpers";
 
 test.use({ storageState: statePath("cashier") });
 
@@ -43,7 +43,7 @@ async function checkout(page: Page, opts: { total?: string; online?: boolean } =
   if (opts.total) await expect(page.getByTestId("cart-total")).toHaveText(opts.total);
   await page.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await page.waitForURL(/\/checkout$/);
-  if (opts.online) await page.getByRole("radio", { name: /Pay online/ }).check();
+  if (opts.online) await page.getByRole("radio", { name: /Pay online|Simulated online payment/ }).check();
   await page.getByRole("button", { name: /^Place order/ }).click();
 }
 
@@ -74,28 +74,22 @@ test.describe("QR guest transaction", () => {
     expect((await placed).status()).toBe(200);
     await g.waitForURL(/\/o\/[^/#]+#k=/);
     const orderId = orderIdFrom(g);
-    await expect(g.getByTestId("order-stage")).toHaveText("Waiting for the restaurant to accept");
+    // Cash at the counter was chosen (the default): the order goes straight to the kitchen.
+    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
 
-    // Server state: OPEN QR order at F5, priced by the server, no KOT yet.
+    // Server state: SENT QR order at F5, priced by the server, one KOT, nothing paid.
     let o = await order(page.request, orderId);
-    expect(o).toMatchObject({ status: "OPEN", channel: "QR", total: "924" });
+    expect(o).toMatchObject({ status: "SENT", channel: "QR", total: "924" });
     expect(o.items.find((i) => i.name === "Chicken Biryani")!.modifiers.map((m) => m.name)).toEqual(["Spice Level: Spicy"]);
-    expect(o.kots).toHaveLength(0);
-
-    // ---- POS: the incoming QR order is flagged; the cashier accepts it.
-    await openPos(page);
-    const openOrders = page.getByRole("button", { name: /^Open orders, \d+ new QR order/ });
-    await expect(openOrders).toBeVisible({ timeout: 20_000 });
-    await openOrders.click();
-    const list = page.getByRole("dialog", { name: "Open orders" });
-    await list.getByRole("button", { name: new RegExp(`#${orderId.slice(-6).toUpperCase()}.*Table F5.*New QR order`) }).click();
-    await expect(page.getByText("QR · awaiting acceptance")).toBeVisible();
-    await page.getByRole("button", { name: "Send to kitchen" }).click();
-    await expect(toast(page, `Order #${orderId.slice(-6).toUpperCase()} accepted and sent to kitchen`)).toBeVisible();
-    o = await order(page.request, orderId);
-    expect(o.status).toBe("SENT");
     expect(o.kots).toHaveLength(1);
-    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen", { timeout: 15_000 });
+    expect(o.payments ?? []).toHaveLength(0);
+
+    // ---- POS: the cashier sees it among the outlet's open (unpaid) orders, as a QR order.
+    await openPos(page);
+    await page.getByRole("button", { name: /^Open orders/ }).click();
+    const list = page.getByRole("dialog", { name: "Open orders" });
+    await expect(list.getByRole("button", { name: new RegExp(`#${orderId.slice(-6).toUpperCase()}.*Table F5.*QR`) })).toBeVisible();
+    await list.getByRole("button", { name: "Close dialog" }).click();
 
     // ---- KITCHEN: the KOT shows the table, items and modifier; Accept -> Start.
     const kitchen = await sessionFor(browser, "kitchen");
@@ -165,10 +159,10 @@ test.describe("QR guest transaction", () => {
     const g = guest.page;
     await g.goto(`/t/${token}`);
     await addDish(g, "Masala Chai");
-    await checkout(g);
+    await checkout(g, { online: true }); // prepaid: the gateway opens on the order page
     await g.waitForURL(/\/o\//);
     const orderId = orderIdFrom(g);
-    await g.getByRole("button", { name: /^Pay/ }).click();
+    expect((await order(page.request, orderId)).kots).toHaveLength(0); // nothing reaches the kitchen before the payment is verified
     await g.getByRole("region", { name: "Test payment gateway" }).getByRole("button", { name: "Approve payment" }).click();
     await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
     const o = await order(page.request, orderId);
@@ -187,6 +181,64 @@ test.describe("QR guest transaction", () => {
     await expect(receipt).toHaveText("Receipt");
     await kitchen.context.close();
     await guest.context.close();
+  });
+
+  test("QR-004 two phones split the bill, each paying their own part online; the table can order the same again", async ({ page, browser }) => {
+    const outlet = await outletByCode(page.request, CENTRAL);
+    const { token, tableId } = await qrToken(outlet.id, "F4");
+    const guestA = await guestPhone(browser);
+    const a = guestA.page;
+    await a.goto(`/t/${token}`);
+    await addDish(a, "Masala Chai");
+    await a.getByRole("button", { name: "Increase Masala Chai" }).click();
+    await checkout(a, { total: money(84) }); // 2 × 40 × 1.05
+    await a.waitForURL(/\/o\/[^/#]+#k=/);
+    const orderId = orderIdFrom(a);
+
+    // ---- Phone A: split two ways; the share is the server's figure, the page sends only the number of people.
+    await a.getByRole("button", { name: "Split the bill" }).click();
+    await expect(a.getByTestId("split-share")).toContainText("Your part: ₹42.00");
+    await expectNoSeriousA11yViolations(a); // the split-bill screen on a phone
+    const start = a.waitForRequest((r) => r.method() === "POST" && r.url().endsWith(`/api/qr/orders/${orderId}/payments`));
+    await a.getByRole("button", { name: /^Pay your part .*42\.00/ }).click();
+    expect((await start).postDataJSON()).toEqual({ parts: 2 });
+    const gw = a.getByRole("region", { name: "Test payment gateway" });
+    await expect(gw).toContainText("Your part of the bill, split 2 ways");
+    await expect(gw).toContainText(money(42));
+    await gw.getByRole("button", { name: "Approve payment" }).click();
+    await expect(a.getByText(/Your part is paid\. ₹42\.00 is still due on this bill\./)).toBeVisible();
+    let o = await order(page.request, orderId);
+    // One part is not the whole bill. (Ordered "pay at the counter", so it went to the kitchen when it was placed.)
+    expect(o.status).toBe("SENT");
+    expect(o.payments!.map((x) => [x.method, x.status, Number(x.amount)])).toEqual([["ONLINE", "SUCCESS", 42]]);
+
+    // ---- Phone B opens the same order (the link a friend shares) and pays what is left.
+    const guestB = await guestPhone(browser);
+    const b = guestB.page;
+    await b.goto(a.url());
+    await expect(b.getByTestId("order-stage")).toBeVisible();
+    await b.getByRole("button", { name: "Split the bill" }).click();
+    await expect(b.getByTestId("split-share")).toContainText("You pay everything that is left: ₹42.00.");
+    await expect(b.getByTestId("split-share")).toContainText("One part is already paid.");
+    await b.getByRole("button", { name: /^Pay your part .*42\.00/ }).click();
+    await b.getByRole("region", { name: "Test payment gateway" }).getByRole("button", { name: "Approve payment" }).click();
+    await expect(b.getByText("Payment successful. Thank you!")).toBeVisible();
+    await expect(b.getByTestId("bill-payment-status")).toHaveText("Paid");
+    o = await order(page.request, orderId);
+    expect(o.status).toBe("PAID");
+    expect(o.payments!.map((x) => [x.method, x.status, Number(x.amount)]).sort()).toEqual([["ONLINE", "SUCCESS", 42], ["ONLINE", "SUCCESS", 42]]);
+    await guestB.context.close();
+
+    // ---- Phone A follows along and puts the same dishes back in a cart; nothing is ordered until it checks out.
+    await expect(a.getByTestId("bill-payment-status")).toHaveText("Paid", { timeout: 15_000 });
+    await expect(a.getByRole("button", { name: "Split the bill" })).toHaveCount(0);
+    await a.getByRole("button", { name: "Order the same again" }).click();
+    await a.waitForURL(/\/t\/[^/]+\/cart$/);
+    await expect(a.getByText("Masala Chai").first()).toBeVisible();
+    await expect(a.getByTestId("cart-total")).toHaveText(money(84));
+    const tableOrders = (await apiData<{ items: Array<{ id: string }> }>(page.request, `/api/orders?outletId=${outlet.id}&tableId=${tableId}&take=50`)).items;
+    expect(tableOrders.map((x) => x.id)).toEqual([orderId]);
+    await guestA.context.close();
   });
 
   test("QR-003 invalid QR, tampering, cross-origin and a lost response during checkout never duplicate or misprice", async ({ page, browser }) => {

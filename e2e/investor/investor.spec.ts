@@ -3,7 +3,7 @@
  * against the production build, on the real Coders' Cafe menu:
  *
  *   DEVICE 1  owner   (desktop)  Tables → Table T07's QR; finance / analytics / audit
- *   DEVICE 2  manager (desktop)  sees the same order; accepts the cash order; takes cash
+ *   DEVICE 2  manager (desktop)  sees the same order (already in the kitchen); takes cash
  *   DEVICE 3  customer (phone)   scans T07 → real menu → cart → order → pays
  *   KITCHEN   chef    (desktop)  KDS: accept → start → ready → served
  *
@@ -157,11 +157,12 @@ async function orderFromTable(guest: Page, link: string, cart: Array<{ item: str
   await expect(guest.getByTestId("cart-total")).toHaveText(inr(expectedTotal));
   await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await expect(guest.getByText("Table T07").first()).toBeVisible();
-  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Pay online/ }).check();
+  // Against the Razorpay emulator the adapter reports MOCK, so the option is labelled as simulated.
+  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Pay online|Simulated online payment/ }).check();
   await guest.getByRole("button", { name: /^Place order/ }).click();
   await guest.waitForURL(/\/o\/[^/#]+#k=/);
-  // Cash: the order waits for the restaurant (no KOT yet). Online: the payment window is already opening.
-  if (pay === "CASH") await expect(guest.getByTestId("order-stage")).toHaveText("Waiting for the restaurant to accept");
+  // Cash: the order went straight to the kitchen (unpaid until the counter). Online: the payment window is already opening.
+  if (pay === "CASH") await expect(guest.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
   return orderIdFrom(guest);
 }
 
@@ -238,7 +239,7 @@ test.describe("investor acceptance — Coders' Cafe, Table 07", () => {
     for (const d of [owner, manager, chef, guest]) await d.context.close();
   });
 
-  test("INV-002 cash: customer orders at T07, manager accepts, kitchen cooks, manager takes cash", async ({ browser }) => {
+  test("INV-002 cash: customer orders at T07, the kitchen gets it at once and cooks, manager takes cash", async ({ browser }) => {
     const owner = await staff(browser, "owner");
     const manager = await staff(browser, "manager");
     const chef = await staff(browser, "chef");
@@ -252,19 +253,14 @@ test.describe("investor acceptance — Coders' Cafe, Table 07", () => {
     const orderId = await orderFromTable(g, link, [{ item: "Loaded Veg Nachos" }, { item: "Veg Arrabita Penne" }], 351.75);
     await expect(g.getByTestId("pay-at-counter")).toContainText(`#${ref(orderId)}`);
 
-    // Manager: the waiting QR order → accept (KOT) at the POS.
-    const m = manager.page;
-    await m.goto("/pos");
-    const openOrders = m.getByRole("button", { name: /^Open orders, \d+ new QR order/ });
-    await expect(openOrders).toBeVisible({ timeout: 20_000 });
-    await openOrders.click();
-    await m.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${ref(orderId)}.*Table T07`) }).click();
-    await m.getByRole("button", { name: "Send to kitchen" }).click();
-    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen", { timeout: 20_000 });
-
+    // No acceptance step: the KOT exists from placement, so the chef cooks straight away.
     await kitchenCompletes(chef.page, orderId, ["Loaded Veg Nachos", "Veg Arrabita Penne"]);
 
-    // Manager takes the cash.
+    // Manager finds the unpaid QR order at the POS and takes the cash.
+    const m = manager.page;
+    await m.goto("/pos");
+    await m.getByRole("button", { name: /^Open orders/ }).click();
+    await m.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${ref(orderId)}.*Table T07`) }).click();
     await m.getByRole("button", { name: "Pay", exact: true }).click();
     const dlg = m.getByRole("dialog", { name: "Take payment" });
     await expect(dlg.getByRole("radio", { name: "Cash" })).toHaveAttribute("aria-checked", "true");

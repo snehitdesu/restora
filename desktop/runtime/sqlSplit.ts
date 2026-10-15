@@ -4,8 +4,10 @@
  * Needed because Prisma's raw SQL on SQLite executes ONLY the first statement of
  * a multi-statement string and still reports success. The splitter understands
  * '…' and "…" literals (with doubled-quote escapes), `…` and […] identifiers,
- * -- and /* *\/ comments. It refuses SQL whose statements can contain `;` in a
- * way it cannot split safely (CREATE TRIGGER … BEGIN … END), instead of guessing.
+ * -- and /* *\/ comments. A CREATE TRIGGER … BEGIN … END statement is kept whole: its body
+ * holds `;`, so the statement only ends at the `;` after the END that closes the BEGIN
+ * (CASE … END inside the body is counted). Anything it cannot split safely (a trigger that
+ * never closes) is refused instead of guessed.
  */
 export class UnsafeMigrationSqlError extends Error {
   constructor(message: string) {
@@ -24,12 +26,34 @@ export function splitSqlStatements(sql: string): string[] {
     const s = current.trim();
     if (s) statements.push(s);
     current = "";
+    words.length = 0;
+    depth = 0;
+    sawBegin = false;
+  };
+
+  // Words seen outside literals and comments in the current statement, to recognise CREATE TRIGGER and its BEGIN … END.
+  const words: string[] = [];
+  let word = "";
+  let depth = 0;
+  let sawBegin = false;
+  const isTrigger = () => words[0] === "CREATE" && (words[1] === "TRIGGER" || ((words[1] === "TEMP" || words[1] === "TEMPORARY") && words[2] === "TRIGGER"));
+  const endWord = () => {
+    if (!word) return;
+    const w = word.toUpperCase();
+    word = "";
+    if (words.length < 4) words.push(w);
+    if (!isTrigger()) return;
+    if (w === "BEGIN") { depth++; sawBegin = true; }
+    else if (w === "CASE") depth++;
+    else if (w === "END") depth--;
   };
 
   while (i < n) {
     const c = sql[i];
     const next = sql[i + 1];
 
+    if (!/[A-Za-z_]/.test(c)) endWord();
+    else word += c;
     if (c === "-" && next === "-") {
       const end = sql.indexOf("\n", i);
       i = end === -1 ? n : end + 1;
@@ -62,6 +86,13 @@ export function splitSqlStatements(sql: string): string[] {
       continue;
     }
     if (c === ";") {
+      endWord();
+      // Inside a trigger body the `;` belongs to the statement; it ends after the END that closes the BEGIN.
+      if (isTrigger() && (!sawBegin || depth > 0)) {
+        current += c;
+        i++;
+        continue;
+      }
       push();
       i++;
       continue;
@@ -69,12 +100,8 @@ export function splitSqlStatements(sql: string): string[] {
     current += c;
     i++;
   }
+  endWord();
+  if (isTrigger() && (!sawBegin || depth !== 0)) throw new UnsafeMigrationSqlError("A CREATE TRIGGER statement in the migration SQL never closes its BEGIN … END");
   push();
-
-  for (const s of statements) {
-    if (/^\s*CREATE\s+(TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i.test(s)) {
-      throw new UnsafeMigrationSqlError("CREATE TRIGGER is not supported by the desktop migrator (statement bodies contain ';')");
-    }
-  }
   return statements;
 }

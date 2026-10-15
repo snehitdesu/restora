@@ -203,26 +203,26 @@ test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → order �
     const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     const guest = await phone.newPage();
     await guest.goto(t07Link);
-    await expect(guest.getByLabel("Table T07")).toBeVisible();
+    await expect(guest.getByLabel("Table T07").first()).toBeVisible();
     await guest.getByRole("button", { name: "Add Loaded Veg Nachos" }).click();
     await guest.getByRole("button", { name: "Add Veg Arrabita Penne" }).click();
-    await guest.getByRole("button", { name: /View cart/ }).click();
-    const cart = guest.getByRole("dialog", { name: "Your order" });
-    await expect(cart.getByLabel("Estimated total")).toContainText(inr(351.75)); // 150 + 185 = 335 + 5% GST
-    await cart.getByRole("button", { name: "Place order" }).click();
+    // Sticky cart → cart page (priced by the server) → checkout → place the order (cash at the counter is the default).
+    await guest.getByRole("link", { name: /^View cart/ }).click();
+    await expect(guest.getByTestId("cart-total")).toHaveText(inr(351.75)); // 150 + 185 = 335 + 5% GST
+    await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
+    await guest.getByRole("button", { name: /^Place order/ }).click();
     await guest.waitForURL(/\/o\/[^/#]+#k=/);
     const orderId = decodeURIComponent(new URL(guest.url()).pathname.split("/").pop()!);
     const ref = orderId.slice(-6).toUpperCase();
-    await expect(guest.getByTestId("order-stage")).toHaveText("Waiting for the restaurant to accept");
+    // Cash: sent to the kitchen as it is placed (one KOT), unpaid until the counter — no acceptance step.
+    await expect(guest.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
 
-    // Manager accepts the QR order at the POS → one KOT.
+    // The manager sees it at the POS as an unpaid QR order.
     await manager.goto("/pos");
-    const openOrders = manager.getByRole("button", { name: /^Open orders, \d+ new QR order/ });
-    await expect(openOrders).toBeVisible({ timeout: 20_000 });
-    await openOrders.click();
-    await manager.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${ref}.*Table T07`) }).click();
-    await manager.getByRole("button", { name: "Send to kitchen" }).click();
-    await expect(guest.getByTestId("order-stage")).toHaveText("Sent to the kitchen", { timeout: 20_000 });
+    await manager.getByRole("button", { name: /^Open orders/ }).click();
+    const openList = manager.getByRole("dialog", { name: "Open orders" });
+    await expect(openList.getByRole("listitem").filter({ hasText: `#${ref}` })).toContainText("QR · unpaid");
+    await openList.getByRole("button", { name: "Close" }).first().click();
 
     // Chef: KDS accept → start → ready → served.
     await chef.goto("/kitchen");

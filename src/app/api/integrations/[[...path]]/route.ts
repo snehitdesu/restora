@@ -7,6 +7,7 @@ import { can } from "@/server/auth/rbac";
 import { deploymentProviders, integrationAudit, listIntegrations, testConnection, upsertIntegration } from "@/server/services/integrations";
 import { deliverMessage, listDeliveries, MESSAGE_TEMPLATES, sendOrderMessage } from "@/server/services/messaging";
 import { pushAggregatorStatus } from "@/server/services/aggregatorSync";
+import { deliverItemAvailability } from "@/server/services/aggregatorMenu";
 import { accountingBatch, exportAccounting } from "@/server/services/accounting";
 import { getAccountingMapping, listAccountingSync, retryAccountingSync, saveAccountingMapping, STANDARD_LEDGERS, syncAccounting } from "@/server/services/accountingSync";
 import { listSheetConflicts, resolveSheetConflict, runSheetsSync, SHEET_DATASETS } from "@/server/services/sheetsSync";
@@ -29,6 +30,7 @@ export const { GET, POST } = createRouter([
       if (d.status !== "FAILED") throw new ValidationError(`Only failed deliveries can be retried (this one is ${d.status})`);
       if (d.kind === "MESSAGE") return deliverMessage(ctx, d.id);
       if (d.kind === "AGGREGATOR_STATUS" && d.sourceId) return pushAggregatorStatus(ctx, d.sourceId, (JSON.parse(d.payload) as { status: "READY" }).status);
+      if (d.kind === "AGGREGATOR_ITEM") return deliverItemAvailability(ctx, d.id);
       if (d.kind === "ACCOUNTING_SYNC") return retryAccountingSync(ctx, d.id);
       throw new ValidationError("This delivery cannot be retried");
     },

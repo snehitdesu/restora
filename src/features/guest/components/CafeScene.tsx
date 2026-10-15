@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { memo, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 /**
  * The storefront hero "set": an original flat illustration of a Coders' Cafe
@@ -8,10 +8,24 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
  * floor). It is an illustration, not a photograph, and says so to assistive
  * tech. The guest moves the "camera" between a few views — one transform on a
  * wrapper, so the motion stays on the compositor and is interruptible.
+ *
+ * The room is drawn on a panorama wider than any screen (x −1000 → 2600) with
+ * the original 1600-wide composition in the middle. Every layer is drawn
+ * "slice" with the same viewBox, so the full height (sign band to floor) is
+ * always visible and a wider window simply shows more of the café to either
+ * side — never a stretched drawing and never an empty edge.
+ *
+ * Four layers share that viewBox — back wall, room (furniture and floor),
+ * lamps, and the front facade (sign band and awning) — so the stylesheet can
+ * move them at different rates as the hero scrolls away (CSS scroll-driven
+ * animation, no JS on scroll).
  */
 
-const VB_W = 1600;
+const VB_X = -1000;
+const VB_W = 3600;
 const VB_H = 1000;
+const VIEWBOX = `${VB_X} 0 ${VB_W} ${VB_H}`;
+const VB_RIGHT = VB_X + VB_W;
 
 type View = { id: string; label: string; fx: number; fy: number; s: number };
 
@@ -22,7 +36,10 @@ export const SCENE_VIEWS: View[] = [
   { id: "board", label: "Board", fx: 840, fy: 312, s: 2.5 },
 ];
 
-// Deterministic terrazzo flecks (same on server and client — no hydration drift).
+// Deterministic terrazzo flecks (same on server and client — no hydration drift),
+// drawn once into a 1600-wide pattern tile that repeats along the panorama floor.
+const TILE_W = 1600;
+const FLOOR_Y = 862;
 const FLECKS = (() => {
   let a = 0x5eed;
   const rnd = () => {
@@ -34,20 +51,24 @@ const FLECKS = (() => {
   };
   const colors = ["#a3282c", "#e8782b", "#4a2a20", "#d9a066", "#7a1f24", "#c9b28f"];
   return Array.from({ length: 170 }, () => ({
-    x: Math.round(rnd() * VB_W),
-    y: Math.round(868 + rnd() * 128),
+    // kept clear of the tile edges so no fleck is cut where the tile repeats
+    x: Math.round(8 + rnd() * (TILE_W - 16)),
+    y: Math.round(6 + rnd() * 128),
     r: Math.round((1.5 + rnd() * 4.5) * 10) / 10,
     rot: Math.round(rnd() * 180),
     c: colors[Math.floor(rnd() * colors.length)],
   }));
 })();
 
-/** Awning scallops along y = 150 from x = 0 → 1600. */
+/** Awning scallops along y = 150 across the whole panorama (same 50-unit rhythm as before). */
 const AWNING = (() => {
-  let d = `M0 64 H${VB_W} V150`;
-  for (let x = VB_W; x > 0; x -= 50) d += ` A25 20 0 0 1 ${x - 50} 150`;
+  let d = `M${VB_X} 64 H${VB_RIGHT} V150`;
+  for (let x = VB_RIGHT; x > VB_X; x -= 50) d += ` A25 20 0 0 1 ${x - 50} 150`;
   return `${d} Z`;
 })();
+
+const display = { fontFamily: "var(--sf-display)" } as CSSProperties;
+const mono = { fontFamily: "var(--sf-mono)" } as CSSProperties;
 
 /** A booth back with a scalloped top, x..x+w, top y. */
 function scallopTop(x: number, y: number, w: number, n: number) {
@@ -57,7 +78,9 @@ function scallopTop(x: number, y: number, w: number, n: number) {
   return `${d} V${y + 210} H${x} Z`;
 }
 
-function Pendant({ x, top = 150, y }: { x: number; top?: number; y: number }) {
+// The cord starts well under the awning: the lamps layer drifts a little against
+// the facade on scroll, and the cord must never come loose from the ceiling.
+function Pendant({ x, top = 96, y }: { x: number; top?: number; y: number }) {
   return (
     <g>
       <line x1={x} y1={top} x2={x} y2={y - 22} stroke="#4a2a20" strokeWidth="3" />
@@ -145,150 +168,192 @@ function Plant({ x, base = 860, h = 1 }: { x: number; base?: number; h?: number 
   );
 }
 
-function SceneArt() {
-  const display = { fontFamily: "var(--sf-display)" } as CSSProperties;
-  const mono = { fontFamily: "var(--sf-mono)" } as CSSProperties;
+function ArchWindow({ x }: { x: number }) {
   return (
-    <svg viewBox={`0 0 ${VB_W} ${VB_H}`} preserveAspectRatio="xMidYMid slice" className="sf-scene-svg" aria-hidden="true" focusable="false">
+    <g>
+      <path d={`M${x} 520 V290 a65 65 0 0 1 130 0 V520 Z`} fill="#7a1f24" />
+      <path d={`M${x + 10} 520 V292 a55 55 0 0 1 110 0 V520 Z`} fill="url(#sf-glass)" />
+      <rect x={x + 62} y="230" width="6" height="290" fill="#7a1f24" />
+      <rect x={x + 10} y="380" width="110" height="5" fill="#7a1f24" />
+      <rect x={x - 10} y="516" width="150" height="10" rx="2" fill="#4a2a20" />
+    </g>
+  );
+}
+
+/** An arched glass door (the entrance, and its twin on the far wall of wide screens). */
+function ArchDoor({ x }: { x: number }) {
+  return (
+    <g>
+      <path d={`M${x} 860 V430 a90 90 0 0 1 180 0 V860 Z`} fill="#7a1f24" />
+      <path d={`M${x + 16} 860 V432 a74 74 0 0 1 148 0 V860 Z`} fill="url(#sf-glass)" />
+      <rect x={x + 87} y="358" width="6" height="502" fill="#7a1f24" />
+      <rect x={x + 16} y="610" width="148" height="6" fill="#7a1f24" />
+      <rect x={x + 70} y="640" width="6" height="56" rx="3" fill="#b8862f" />
+      <rect x={x + 104} y="640" width="6" height="56" rx="3" fill="#b8862f" />
+      <text x={x + 90} y="470" textAnchor="middle" fontSize="34" fontWeight="700" fill="#7a1f24" style={mono}>
+        &lt;/&gt;
+      </text>
+    </g>
+  );
+}
+
+function Shelves({ x }: { x: number }) {
+  return (
+    <>
+      {[300, 392].map((y) => (
+        <g key={y}>
+          <rect x={x} y={y} width="150" height="9" fill="#4a2a20" />
+          <Cup x={x + 10} y={y - 27} />
+          <Cup x={x + 50} y={y - 27} c="#a3282c" band="#fbf1e1" />
+          <rect x={x + 96} y={y - 44} width="26" height="44" rx="5" fill="#d9a066" opacity="0.9" />
+          <rect x={x + 96} y={y - 50} width="26" height="9" rx="3" fill="#4a2a20" />
+        </g>
+      ))}
+    </>
+  );
+}
+
+/** Every layer shares one coordinate system and one fit, so they line up exactly at rest. */
+function LayerSvg({ children }: { children: ReactNode }) {
+  return (
+    <svg viewBox={VIEWBOX} preserveAspectRatio="xMidYMid slice" className="sf-scene-svg" aria-hidden="true" focusable="false">
+      {children}
+    </svg>
+  );
+}
+
+/* The static illustration, split by depth. Each layer is drawn once (memoized,
+ * no props) — never on a camera move, a scroll, or a storefront update. */
+
+/** Back wall: plaster, tiled wainscot, doors, windows, shelves and the menu board. */
+const BackArt = memo(function BackArt() {
+  return (
+    <LayerSvg>
       <defs>
-        <pattern id="sf-stripes" width="50" height="10" patternUnits="userSpaceOnUse">
-          <rect width="25" height="10" fill="#a3282c" />
-          <rect x="25" width="25" height="10" fill="#fbf1e1" />
-        </pattern>
         <pattern id="sf-tiles" width="18" height="18" patternUnits="userSpaceOnUse">
           <rect width="18" height="18" fill="#7a1f24" />
           <rect width="2" height="18" fill="#8e2a2f" />
           <rect width="18" height="1.5" fill="#6a1a1f" />
         </pattern>
+        <linearGradient id="sf-glass" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#fde9cc" />
+          <stop offset="1" stopColor="#f2c48f" />
+        </linearGradient>
+      </defs>
+
+      {/* wall */}
+      <rect x={VB_X} width={VB_W} height={VB_H} fill="#f4e4cb" />
+      <rect x={VB_X} y="64" width={VB_W} height="40" fill="#ead6b8" />
+
+      {/* wainscot + trim (runs on behind the floor, which sits in the room layer) */}
+      <rect x={VB_X} y="600" width={VB_W} height="262" fill="url(#sf-tiles)" />
+      <rect x={VB_X} y="592" width={VB_W} height="10" fill="#4a2a20" />
+
+      {/* entrance + shelves */}
+      <ArchDoor x={110} />
+      <Shelves x={318} />
+
+      {/* counter side: shifted right so wide screens can lay the headline over the doorway */}
+      <g transform="translate(100 0)">
+        {/* menu board */}
+        <rect x="586" y="196" width="308" height="232" rx="8" fill="#4a2a20" />
+        <rect x="598" y="208" width="284" height="208" rx="4" fill="#2a1916" />
+        <text x="740" y="250" textAnchor="middle" fontSize="27" fontWeight="700" fill="#e8782b" style={display}>
+          Coders&apos; Cafe
+        </text>
+        <line x1="640" y1="266" x2="840" y2="266" stroke="#f6e7d2" strokeOpacity="0.35" strokeDasharray="4 6" strokeWidth="2" />
+        <g fill="#f6e7d2" fontSize="20" letterSpacing="2" style={mono}>
+          <text x="624" y="304">GOOD FOOD.</text>
+          <text x="624" y="338">GOOD COFFEE.</text>
+          <text x="624" y="372" fill="#e8782b">
+            GOOD CODE.
+          </text>
+        </g>
+        <text x="856" y="400" textAnchor="end" fontSize="13" fill="#f6e7d2" fillOpacity="0.55" letterSpacing="2" style={mono}>
+          BREW · MUSE · PLAY
+        </text>
+      </g>
+
+      {/* arched windows (booth side; the third continues the room on wide screens) */}
+      <ArchWindow x={1170} />
+      <ArchWindow x={1400} />
+      <ArchWindow x={1630} />
+
+      {/* the rest of the room, only reached by wide and ultra-wide windows */}
+      <ArchWindow x={-330} />
+      <Shelves x={-640} />
+      <ArchDoor x={1990} />
+      <Shelves x={2230} />
+    </LayerSvg>
+  );
+});
+
+/** Room: counter, stools, booths, tables, plants and the terrazzo floor they stand on. */
+const RoomArt = memo(function RoomArt() {
+  return (
+    <LayerSvg>
+      <defs>
         <pattern id="sf-flute" width="22" height="10" patternUnits="userSpaceOnUse">
           <rect width="22" height="10" fill="#7a1f24" />
           <rect x="18" width="4" height="10" fill="#621519" />
           <rect x="2" width="3" height="10" fill="#93302f" />
         </pattern>
-        <linearGradient id="sf-glass" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#fde9cc" />
-          <stop offset="1" stopColor="#f2c48f" />
-        </linearGradient>
-        <linearGradient id="sf-shade" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id="sf-shade-floor" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="#2a1916" stopOpacity="0.18" />
           <stop offset="1" stopColor="#2a1916" stopOpacity="0" />
         </linearGradient>
-        <radialGradient id="sf-glow">
-          <stop offset="0" stopColor="#ffd9a3" stopOpacity="0.85" />
-          <stop offset="1" stopColor="#ffd9a3" stopOpacity="0" />
-        </radialGradient>
+        <pattern id="sf-terrazzo" x="0" y={FLOOR_Y} width={TILE_W} height={VB_H - FLOOR_Y} patternUnits="userSpaceOnUse">
+          {FLECKS.map((f, i) => (
+            <ellipse key={i} cx={f.x} cy={f.y} rx={f.r} ry={f.r * 0.6} fill={f.c} opacity="0.75" transform={`rotate(${f.rot} ${f.x} ${f.y})`} />
+          ))}
+        </pattern>
       </defs>
 
-      {/* wall */}
-      <rect width={VB_W} height={VB_H} fill="#f4e4cb" />
-      <rect y="64" width={VB_W} height="40" fill="#ead6b8" />
-
-      {/* wainscot + trim */}
-      <rect x="0" y="600" width={VB_W} height="262" fill="url(#sf-tiles)" />
-      <rect x="0" y="592" width={VB_W} height="10" fill="#4a2a20" />
-
-      {/* entrance: arched door */}
-      <path d="M110 860 V430 a90 90 0 0 1 180 0 V860 Z" fill="#7a1f24" />
-      <path d="M126 860 V432 a74 74 0 0 1 148 0 V860 Z" fill="url(#sf-glass)" />
-      <rect x="197" y="358" width="6" height="502" fill="#7a1f24" />
-      <rect x="126" y="610" width="148" height="6" fill="#7a1f24" />
-      <rect x="180" y="640" width="6" height="56" rx="3" fill="#b8862f" />
-      <rect x="214" y="640" width="6" height="56" rx="3" fill="#b8862f" />
-      <text x="200" y="470" textAnchor="middle" fontSize="34" fontWeight="700" fill="#7a1f24" style={mono}>
-        &lt;/&gt;
-      </text>
       <Plant x={390} />
-      {/* shelves */}
-      {[300, 392].map((y) => (
-        <g key={y}>
-          <rect x="318" y={y} width="150" height="9" fill="#4a2a20" />
-          <Cup x={328} y={y - 27} />
-          <Cup x={368} y={y - 27} c="#a3282c" band="#fbf1e1" />
-          <rect x="414" y={y - 44} width="26" height="44" rx="5" fill="#d9a066" opacity="0.9" />
-          <rect x="414" y={y - 50} width="26" height="9" rx="3" fill="#4a2a20" />
-        </g>
-      ))}
-
-
-      {/* counter side: shifted right so wide screens can lay the headline card over the doorway */}
-      <g transform="translate(100 0)">
-      {/* menu board */}
-      <rect x="586" y="196" width="308" height="232" rx="8" fill="#4a2a20" />
-      <rect x="598" y="208" width="284" height="208" rx="4" fill="#2a1916" />
-      <text x="740" y="250" textAnchor="middle" fontSize="27" fontWeight="700" fill="#e8782b" style={display}>
-        Coders&apos; Cafe
-      </text>
-      <line x1="640" y1="266" x2="840" y2="266" stroke="#f6e7d2" strokeOpacity="0.35" strokeDasharray="4 6" strokeWidth="2" />
-      <g fill="#f6e7d2" fontSize="20" letterSpacing="2" style={mono}>
-        <text x="624" y="304">GOOD FOOD.</text>
-        <text x="624" y="338">GOOD COFFEE.</text>
-        <text x="624" y="372" fill="#e8782b">
-          GOOD CODE.
-        </text>
-      </g>
-      <text x="856" y="400" textAnchor="end" fontSize="13" fill="#f6e7d2" fillOpacity="0.55" letterSpacing="2" style={mono}>
-        BREW · MUSE · PLAY
-      </text>
-
-      </g>
-
-      {/* arched windows (booth side) */}
-      {[1170, 1400].map((x) => (
-        <g key={x}>
-          <path d={`M${x} 520 V290 a65 65 0 0 1 130 0 V520 Z`} fill="#7a1f24" />
-          <path d={`M${x + 10} 520 V292 a55 55 0 0 1 110 0 V520 Z`} fill="url(#sf-glass)" />
-          <rect x={x + 62} y="230" width="6" height="290" fill="#7a1f24" />
-          <rect x={x + 10} y="380" width="110" height="5" fill="#7a1f24" />
-          <rect x={x - 10} y="516" width="150" height="10" rx="2" fill="#4a2a20" />
-        </g>
-      ))}
-
-      {/* pendants (cords) */}
-      <Pendant x={1100} y={470} />
-      <Pendant x={1240} y={440} />
-      <Pendant x={1470} y={440} />
 
       <g transform="translate(100 0)">
-      {/* counter */}
-      <rect x="500" y="608" width="500" height="236" fill="url(#sf-flute)" />
-      <rect x="500" y="840" width="500" height="22" fill="#2a1916" />
-      <rect x="488" y="586" width="524" height="24" rx="4" fill="#fff6ea" />
-      <rect x="488" y="604" width="524" height="6" fill="#d9c3a3" />
-      {/* espresso machine */}
-      <rect x="544" y="490" width="160" height="96" rx="12" fill="#c8642b" />
-      <rect x="544" y="490" width="160" height="22" rx="10" fill="#fbf1e1" />
-      <rect x="566" y="526" width="116" height="10" rx="4" fill="#a94f22" />
-      <rect x="580" y="536" width="20" height="16" rx="3" fill="#2a1916" />
-      <rect x="648" y="536" width="20" height="16" rx="3" fill="#2a1916" />
-      <circle cx="624" cy="512" r="8" fill="#2a1916" />
-      <Cup x={577} y={556} />
-      <Cup x={645} y={556} />
-      <g fill="none" stroke="#c9b28f" strokeWidth="3" strokeLinecap="round" opacity="0.7">
-        <path d="M590 548 q-8 -14 0 -26" />
-        <path d="M658 548 q8 -14 0 -26" />
-      </g>
-      {/* cake dome */}
-      <ellipse cx="830" cy="586" rx="64" ry="8" fill="#e9d6b6" />
-      <circle cx="800" cy="568" r="16" fill="#e0a052" />
-      <circle cx="834" cy="566" r="18" fill="#c8642b" />
-      <circle cx="866" cy="570" r="14" fill="#e0a052" />
-      <path d="M772 584 V560 a58 58 0 0 1 116 0 V584" fill="#ffffff" fillOpacity="0.35" stroke="#d9c3a3" strokeWidth="3" />
-      <circle cx="830" cy="500" r="6" fill="#d9c3a3" />
-      {/* cup stack */}
-      {[0, 1, 2].map((i) => (
-        <Cup key={i} x={960} y={556 - i * 22} c={i === 1 ? "#a3282c" : "#fbf1e1"} band={i === 1 ? "#fbf1e1" : "#a3282c"} />
-      ))}
-      <Stool x={570} />
-      <Stool x={710} />
-      <Stool x={850} />
+        {/* counter */}
+        <rect x="500" y="608" width="500" height="236" fill="url(#sf-flute)" />
+        <rect x="500" y="840" width="500" height="22" fill="#2a1916" />
+        <rect x="488" y="586" width="524" height="24" rx="4" fill="#fff6ea" />
+        <rect x="488" y="604" width="524" height="6" fill="#d9c3a3" />
+        {/* espresso machine */}
+        <rect x="544" y="490" width="160" height="96" rx="12" fill="#c8642b" />
+        <rect x="544" y="490" width="160" height="22" rx="10" fill="#fbf1e1" />
+        <rect x="566" y="526" width="116" height="10" rx="4" fill="#a94f22" />
+        <rect x="580" y="536" width="20" height="16" rx="3" fill="#2a1916" />
+        <rect x="648" y="536" width="20" height="16" rx="3" fill="#2a1916" />
+        <circle cx="624" cy="512" r="8" fill="#2a1916" />
+        <Cup x={577} y={556} />
+        <Cup x={645} y={556} />
+        <g fill="none" stroke="#c9b28f" strokeWidth="3" strokeLinecap="round" opacity="0.7">
+          <path d="M590 548 q-8 -14 0 -26" />
+          <path d="M658 548 q8 -14 0 -26" />
+        </g>
+        {/* cake dome */}
+        <ellipse cx="830" cy="586" rx="64" ry="8" fill="#e9d6b6" />
+        <circle cx="800" cy="568" r="16" fill="#e0a052" />
+        <circle cx="834" cy="566" r="18" fill="#c8642b" />
+        <circle cx="866" cy="570" r="14" fill="#e0a052" />
+        <path d="M772 584 V560 a58 58 0 0 1 116 0 V584" fill="#ffffff" fillOpacity="0.35" stroke="#d9c3a3" strokeWidth="3" />
+        <circle cx="830" cy="500" r="6" fill="#d9c3a3" />
+        {/* cup stack */}
+        {[0, 1, 2].map((i) => (
+          <Cup key={i} x={960} y={556 - i * 22} c={i === 1 ? "#a3282c" : "#fbf1e1"} band={i === 1 ? "#fbf1e1" : "#a3282c"} />
+        ))}
+        <Stool x={570} />
+        <Stool x={710} />
+        <Stool x={850} />
       </g>
 
       {/* booths + tables */}
       <Plant x={1135} h={0.9} />
       <Booth x={1180} />
       <Booth x={1380} />
+      <Booth x={1580} />
       <Table cx={1285} />
       <Table cx={1490} />
+      <Table cx={1690} />
       {/* laptop on the first table */}
       <path d="M1236 712 l12 -64 h88 l-12 64 Z" fill="#2a1916" />
       <text x="1292" y="688" textAnchor="middle" fontSize="18" fontWeight="700" fill="#e8782b" style={mono}>
@@ -302,50 +367,105 @@ function SceneArt() {
       <path d="M1478 706 l64 -4 l-34 -26 Z" fill="#e0a052" />
       <circle cx="1504" cy="696" r="4" fill="#a3282c" />
       <circle cx="1520" cy="701" r="3.5" fill="#a3282c" />
+      {/* two coffees on the third */}
+      <Cup x={1640} y={686} />
+      <Cup x={1700} y={686} c="#a3282c" band="#fbf1e1" />
+
+      {/* plants along the far walls (wide screens) */}
+      <Plant x={-90} />
+      <Plant x={-470} h={0.9} />
+      <Plant x={1890} h={0.95} />
+      <Plant x={2440} />
 
       {/* terrazzo floor */}
-      <rect y="862" width={VB_W} height="138" fill="#f1e4ce" />
-      <rect y="862" width={VB_W} height="22" fill="url(#sf-shade)" />
-      <g>
-        {FLECKS.map((f, i) => (
-          <ellipse key={i} cx={f.x} cy={f.y} rx={f.r} ry={f.r * 0.6} fill={f.c} opacity="0.75" transform={`rotate(${f.rot} ${f.x} ${f.y})`} />
-        ))}
-      </g>
+      <rect x={VB_X} y={FLOOR_Y} width={VB_W} height={VB_H - FLOOR_Y} fill="#f1e4ce" />
+      <rect x={VB_X} y={FLOOR_Y} width={VB_W} height="22" fill="url(#sf-shade-floor)" />
+      <rect x={VB_X} y={FLOOR_Y} width={VB_W} height={VB_H - FLOOR_Y} fill="url(#sf-terrazzo)" />
+    </LayerSvg>
+  );
+});
 
+const LAMPS: Array<{ x: number; y: number }> = [
+  { x: 1100, y: 470 },
+  { x: 1240, y: 440 },
+  { x: 1470, y: 440 },
+  { x: 1690, y: 450 },
+];
+
+/** Lamps: the ceiling fan and the pendant globes (drawn over the evening dimmer, so they stay lit). */
+const LampArt = memo(function LampArt() {
+  return (
+    <LayerSvg>
+      <defs>
+        <radialGradient id="sf-glow">
+          <stop offset="0" stopColor="#ffd9a3" stopOpacity="0.85" />
+          <stop offset="1" stopColor="#ffd9a3" stopOpacity="0" />
+        </radialGradient>
+      </defs>
       {/* ceiling fan */}
-      <line x1="840" y1="150" x2="840" y2="176" stroke="#4a2a20" strokeWidth="4" />
+      <line x1="840" y1="110" x2="840" y2="176" stroke="#4a2a20" strokeWidth="4" />
       <ellipse cx="780" cy="180" rx="62" ry="7" fill="#4a2a20" />
       <ellipse cx="900" cy="180" rx="62" ry="7" fill="#4a2a20" />
       <circle cx="840" cy="180" r="11" fill="#b8862f" />
+      {LAMPS.map((l) => (
+        <Pendant key={l.x} x={l.x} y={l.y} />
+      ))}
+      {LAMPS.map((l) => (
+        <Globe key={l.x} x={l.x} y={l.y} />
+      ))}
+    </LayerSvg>
+  );
+});
 
-      {/* evening light: dim the room, then light the globes over it */}
-      <rect className="sf-scene-dusk" width={VB_W} height={VB_H} fill="#2b0f12" />
-      <Globe x={1100} y={470} />
-      <Globe x={1240} y={440} />
-      <Globe x={1470} y={440} />
-
-      {/* facade: sign band, awning, pilasters (always in daylight colours) */}
-      <rect x="0" y="0" width={VB_W} height="64" fill="#7a1f24" />
+/** Front: the facade — sign band and striped awning (always in daylight colours). */
+const FrontArt = memo(function FrontArt() {
+  return (
+    <LayerSvg>
+      <defs>
+        <pattern id="sf-stripes" width="50" height="10" patternUnits="userSpaceOnUse">
+          <rect width="25" height="10" fill="#a3282c" />
+          <rect x="25" width="25" height="10" fill="#fbf1e1" />
+        </pattern>
+        <linearGradient id="sf-shade-awning" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#2a1916" stopOpacity="0.18" />
+          <stop offset="1" stopColor="#2a1916" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <rect x={VB_X} y="0" width={VB_W} height="64" fill="#7a1f24" />
       <text x="800" y="45" textAnchor="middle" fontSize="30" fontWeight="700" letterSpacing="10" fill="#fff6ea" style={display}>
         CODERS&apos; CAFE
       </text>
-      <text x="80" y="40" fontSize="14" letterSpacing="3" fill="#fff6ea" fillOpacity="0.6" style={mono}>
+      {/* side lettering: hidden by the stylesheet when the frame is too narrow to show it whole */}
+      <text className="sf-sign-side" x="80" y="40" fontSize="14" letterSpacing="3" fill="#fff6ea" fillOpacity="0.6" style={mono}>
         &lt;/&gt; BREW · MUSE · PLAY
       </text>
-      <text x="1520" y="40" textAnchor="end" fontSize="14" letterSpacing="3" fill="#fff6ea" fillOpacity="0.6" style={mono}>
+      <text className="sf-sign-side" x="1520" y="40" textAnchor="end" fontSize="14" letterSpacing="3" fill="#fff6ea" fillOpacity="0.6" style={mono}>
         GOOD CODE &lt;/&gt;
       </text>
-      <rect y="150" width={VB_W} height="40" fill="url(#sf-shade)" />
+      <rect x={VB_X} y="150" width={VB_W} height="40" fill="url(#sf-shade-awning)" />
       <path d={AWNING} fill="url(#sf-stripes)" />
-      <rect y="64" width={VB_W} height="6" fill="#5c151a" />
-      <rect x="0" y="64" width="34" height={VB_H - 64} fill="#7a1f24" />
-      <rect x={VB_W - 34} y="64" width="34" height={VB_H - 64} fill="#7a1f24" />
-    </svg>
+      <rect x={VB_X} y="64" width={VB_W} height="6" fill="#5c151a" />
+    </LayerSvg>
+  );
+});
+
+/** One depth layer: the outer box carries the scroll parallax, the inner one the entrance. */
+function Layer({ depth, children }: { depth: "back" | "room" | "lamps" | "front"; children: ReactNode }) {
+  return (
+    <div className="sf-scene-layer" data-layer={depth}>
+      <div className="sf-scene-in">{children}</div>
+    </div>
   );
 }
 
-/** The illustrated café with its camera views and the evening-light switch. */
-export function CafeScene() {
+/** Matches the stylesheet's overlay layout (headline over the left of the scene). */
+const WIDE_QUERY = "(min-width: 900px) and (min-height: 560px)";
+
+/**
+ * The illustrated café with its camera views and the evening-light switch.
+ * Memoized (no props): the hero re-renders with every cart change, the scene does not.
+ */
+export const CafeScene = memo(function CafeScene() {
   const stageRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState(SCENE_VIEWS[0]);
   const [evening, setEvening] = useState(false);
@@ -354,7 +474,7 @@ export function CafeScene() {
   // views frame their subject in the open area to its right.
   const [wide, setWide] = useState(false);
   useEffect(() => {
-    const mq = window.matchMedia("(min-width: 900px)");
+    const mq = window.matchMedia(WIDE_QUERY);
     const on = () => setWide(mq.matches);
     on();
     mq.addEventListener("change", on);
@@ -378,7 +498,7 @@ export function CafeScene() {
     const k = Math.max(size.w / VB_W, size.h / VB_H);
     const ox = (size.w - VB_W * k) / 2;
     const oy = (size.h - VB_H * k) / 2;
-    const px = ox + view.fx * k;
+    const px = ox + (view.fx - VB_X) * k;
     const py = oy + view.fy * k;
     const clamp = (v: number, lo: number) => Math.min(0, Math.max(lo, v));
     const tx = clamp(size.w * focusX - view.s * px, size.w * (1 - view.s));
@@ -388,25 +508,36 @@ export function CafeScene() {
 
   return (
     <div className="sf-scene" data-evening={evening} ref={stageRef}>
-      <div className="sf-scene-cam" style={cam}>
-        <div className="sf-scene-intro">
-          <div className="sf-scene-scroll">
-            <SceneArt />
-          </div>
-        </div>
+      <div className="sf-scene-cam" style={cam} aria-hidden="true">
+        <Layer depth="back">
+          <BackArt />
+        </Layer>
+        <Layer depth="room">
+          <RoomArt />
+        </Layer>
+        {/* evening light: dim the room, then the lamps and facade sit over it */}
+        <div className="sf-scene-dusk" />
+        <Layer depth="lamps">
+          <LampArt />
+        </Layer>
+        <Layer depth="front">
+          <FrontArt />
+        </Layer>
       </div>
       <span className="sf-sr">Illustration of the Coders&apos; Cafe interior: a striped awning, a menu board, the espresso counter and red booths.</span>
-      <button type="button" className="sf-scene-light" aria-pressed={evening} onClick={() => setEvening((v) => !v)}>
-        <span aria-hidden="true" className="sf-scene-light-dot" />
-        Evening light
-      </button>
-      <div className="sf-scene-views" role="group" aria-label="Look around the café">
-        {SCENE_VIEWS.map((v) => (
-          <button key={v.id} type="button" aria-pressed={view.id === v.id} onClick={() => setView(v)}>
-            {v.label}
-          </button>
-        ))}
+      <div className="sf-scene-tools">
+        <button type="button" className="sf-scene-light" aria-pressed={evening} onClick={() => setEvening((v) => !v)}>
+          <span aria-hidden="true" className="sf-scene-light-dot" />
+          <span className="sf-scene-light-label">Evening light</span>
+        </button>
+        <div className="sf-scene-views" role="group" aria-label="Look around the café">
+          {SCENE_VIEWS.map((v) => (
+            <button key={v.id} type="button" aria-pressed={view.id === v.id} onClick={() => setView(v)}>
+              {v.label}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
-}
+});

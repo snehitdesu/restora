@@ -24,6 +24,7 @@ import { ErrorState, LoadingState } from "@/components/ui/States";
 import { ActionButton } from "@/components/ui/Confirm";
 import { useToast } from "@/components/ui/Toast";
 import { ManualSalesDialog } from "@/features/backoffice/kitchen";
+import { ScrollRegion } from "@/components/ui/ScrollRegion";
 
 type Channel = { key: string; label: string; orders: number; billed: number; declared: number | null; difference: number | null; note: string | null; aggregator: boolean; commissionPct: number | null; commission: number | null; commissionBasis: string | null; expectedPayout: number | null };
 type Collection = { method: string; expected: number; declared: number | null; difference: number | null };
@@ -90,7 +91,7 @@ const METHOD_LABELS: Record<string, string> = { CASH: "Cash", UPI: "UPI", CARD: 
 const methodLabel = (m: string) => METHOD_LABELS[m] ?? humanize(m);
 
 const gapTone = (v: number | null) => (v === null ? "" : v < 0 ? "font-semibold text-bad-600" : v > 0 ? "font-semibold text-warn-700" : "text-ok-600");
-const Gap = ({ v }: { v: number | null }) => (v === null ? <span className="text-ink-400">—</span> : <span className={`tabular-nums ${gapTone(v)}`}>{v > 0 ? "+" : ""}{formatMoney(v)}</span>);
+const Gap = ({ v }: { v: number | null }) => (v === null ? <span className="text-ink-500">—</span> : <span className={`tabular-nums ${gapTone(v)}`}>{v > 0 ? "+" : ""}{formatMoney(v)}</span>);
 
 // ---------------- declared revenue ----------------
 
@@ -125,7 +126,7 @@ function DeclareCard({ d, editable, onSaved }: { d: MoneyDesk; editable: boolean
   return (
     <Card title="Revenue by channel" actions={d.reconciliations.sales && <StatusBadge status={d.reconciliations.sales.status} />}>
       <FormAlert message={err} />
-      <div className="overflow-x-auto">
+      <ScrollRegion label="Revenue by channel (scrolls sideways)">
         <table className="w-full text-sm sm:min-w-max" aria-label="Revenue by channel">
           <thead>
             <tr className="border-b border-ink-200 text-left text-[11px] font-semibold uppercase tracking-eyebrow text-ink-600">
@@ -170,7 +171,7 @@ function DeclareCard({ d, editable, onSaved }: { d: MoneyDesk; editable: boolean
             </tr>
           </tfoot>
         </table>
-      </div>
+      </ScrollRegion>
       {editable && (
         <div className="mt-3 flex flex-wrap items-end justify-between gap-2 print:hidden">
           {addable.length > 0 ? (
@@ -230,7 +231,7 @@ function CollectionsCard({ d, editable, onSaved }: { d: MoneyDesk; editable: boo
       {d.collections.length === 0 && <p className="mb-2 text-sm text-ink-500">No payments were taken on this day.{editable && " Count the cash drawer anyway (enter 0 if it is empty) so the day can be closed."}</p>}
       {(d.collections.length > 0 || editable) && (
         // A plain table like "Revenue by channel": on a phone the method wraps and the input stays on screen.
-        <div className="overflow-x-auto">
+        <ScrollRegion label="Money collected per payment method (scrolls sideways)">
           <table className="w-full text-sm sm:min-w-max" aria-label="Money collected per payment method">
             <thead>
               <tr className="border-b border-ink-200 text-left text-[11px] font-semibold uppercase tracking-eyebrow text-ink-600">
@@ -258,7 +259,7 @@ function CollectionsCard({ d, editable, onSaved }: { d: MoneyDesk; editable: boo
               ))}
             </tbody>
           </table>
-        </div>
+        </ScrollRegion>
       )}
       {editable && <div className="mt-3 flex justify-end print:hidden"><Button variant="primary" onClick={save} loading={busy}>Save counted money</Button></div>}
       <p className="mt-2 text-xs text-ink-500">System = payments recorded in RESTORA for the day, net of refunds. Counted = the cash in the drawer and the UPI / card settlement amounts.</p>
@@ -330,7 +331,7 @@ function BankCard({ d, canWrite, onChanged }: { d: MoneyDesk; canWrite: boolean;
         <div className="mt-3">
           <DataTable label="Deposit entries" rows={d.bank.deposits} rowKey={(x) => x.id}
             columns={[
-              { key: "r", header: "Reference", cell: (x) => <span className={x.status === "VOIDED" ? "text-ink-400 line-through" : "font-medium text-ink-900"}>{x.reference}</span> },
+              { key: "r", header: "Reference", cell: (x) => <span className={x.status === "VOIDED" ? "text-ink-500 line-through" : "font-medium text-ink-900"}>{x.reference}</span> },
               { key: "m", header: "Type", cell: (x) => methodLabel(x.method) },
               { key: "a", header: "Amount", numeric: true, cell: (x) => formatMoney(x.amount) },
               { key: "t", header: "Reached bank", cell: (x) => formatDateTime(x.depositedAt, outlet?.timezone) },

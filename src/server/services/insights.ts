@@ -22,6 +22,7 @@ import { analyticsInternals as A, stockAgeing } from "@/server/services/analytic
 import { lowStock, negativeStock } from "@/server/services/inventory";
 import { vendorAging } from "@/server/services/vendorFinance";
 import { ANOMALY_RULES } from "@/server/services/anomaly";
+import { expiringStock } from "@/server/services/expiry";
 
 export const INSIGHT_RULES = {
   /** Recent window: the last N completed business days. */
@@ -45,6 +46,8 @@ export const INSIGHT_RULES = {
   priceLookbackDays: ANOMALY_RULES.priceLookbackDays,
   drawerVarianceAbs: 100,
   deadStockValue: 1000,
+  /** Batches expiring within this many days raise an alert. */
+  expiryDays: 7,
   scanLimit: ANOMALY_RULES.scanLimit,
 };
 
@@ -184,6 +187,18 @@ export async function businessInsights(db: PrismaClient, ctx: AccessContext, inp
           detail: `The stock ledger shows negative on-hand for ${neg.slice(0, 5).map((n) => `${names.get(n.materialId) ?? n.materialId} (${num(n.quantity)})`).join(", ")}${neg.length > 5 ? "…" : ""}. Stock was used that was never received or counted — usage, receipts or a count is missing.`,
           evidence: { materials: neg.length },
           link: "/inventory",
+        });
+      }
+      // Stock that expires within the week (or already has): the batch to use first, from the receipts' expiry dates.
+      const expiry = await expiringStock(db, ctx, { outletId, days: INSIGHT_RULES.expiryDays }, asOf);
+      if (expiry.rows.length) {
+        const worst = expiry.rows.slice(0, 5).map((r) => `${r.name}${r.batchNo ? ` batch ${r.batchNo}` : ""} (${r.status === "EXPIRED" ? `expired ${-r.daysLeft} day${-r.daysLeft === 1 ? "" : "s"} ago` : r.status === "TODAY" ? "today" : `in ${r.daysLeft} day${r.daysLeft === 1 ? "" : "s"}`})`).join(", ");
+        out.push({
+          code: expiry.counts.expired ? "EXPIRED_STOCK" : "EXPIRING_STOCK", severity: expiry.counts.expired ? "CRITICAL" : "WARNING", category: "inventory",
+          title: expiry.counts.expired ? `${expiry.counts.expired} batches are past their expiry date` : `${expiry.rows.length} batches expire within ${INSIGHT_RULES.expiryDays} days`,
+          detail: `${worst}${expiry.rows.length > 5 ? "…" : ""}. Rule: a batch received with an expiry date that is within ${INSIGHT_RULES.expiryDays} days (or past) and still on the shelf. ${expiry.basis}`,
+          evidence: { batches: expiry.rows.length, expired: expiry.counts.expired },
+          link: "/inventory/expiry",
         });
       }
       const critical = low.filter((l) => l.quantity.lte(0) || l.quantity.lte(D(l.material.minStock)));

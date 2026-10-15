@@ -75,7 +75,7 @@ export function AnomaliesScreen() {
               return (
                 <span className="block max-w-lg">
                   {r.message}
-                  {href && <Link href={href} className="ml-1 text-brand-600 hover:underline">View</Link>}
+                  {href && <Link href={href} className="ml-1 text-brand-600 underline underline-offset-2 hover:no-underline">View</Link>}
                   {r.resolutionNote && <span className="block text-xs text-ink-500">Note: {r.resolutionNote}</span>}
                 </span>
               );

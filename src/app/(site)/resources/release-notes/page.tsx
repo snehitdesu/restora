@@ -65,7 +65,7 @@ export default function ReleaseNotesPage() {
         <li>One app instance per web deployment.</li>
         <li>No multi-factor authentication.</li>
         <li>The Windows installer is not code-signed in this candidate.</li>
-        <li>Password-reset links are handed over by a manager; there is no email or SMS delivery yet.</li>
+        <li>Password-reset email is sent through Resend when it is configured. Otherwise a manager issues the link. There is no SMS delivery.</li>
         <li>The Razorpay and Twilio adapters have not yet run against live accounts.</li>
         <li>The macOS app is configured but not yet verified on a Mac.</li>
       </ul>

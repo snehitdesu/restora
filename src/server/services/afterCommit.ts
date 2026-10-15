@@ -12,7 +12,8 @@ import { inc } from "@/server/observability/metrics";
 
 const pending = new Set<Promise<void>>();
 
-export function runAfterCommit(label: string, fn: () => Promise<unknown>): void {
+/** Returns the tracked promise (it never rejects) for callers that must keep a serverless function alive until it settles. */
+export function runAfterCommit(label: string, fn: () => Promise<unknown>): Promise<void> {
   const p: Promise<void> = (async () => {
     try {
       await fn();
@@ -23,6 +24,7 @@ export function runAfterCommit(label: string, fn: () => Promise<unknown>): void 
   })();
   pending.add(p);
   void p.finally(() => pending.delete(p));
+  return p;
 }
 
 /** Wait for every scheduled side effect (tests, graceful shutdown). */

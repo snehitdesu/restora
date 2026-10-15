@@ -1,15 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { request, describeError, ApiError } from "@/lib/api/client";
 import { formatMoney } from "@/lib/format";
 import { cartFingerprint, toOrderItems } from "@/features/pos/cart";
 import { createSubmitGuard } from "@/features/pos/submitGuard";
-import { clearSubmission, orderUrl, rememberOrder, saveCart, submissionKey } from "@/features/guest/session";
+import { clearSubmission, loadReferral, orderUrl, rememberOrder, saveCart, saveCoupon, saveNotice, saveReferral, submissionKey } from "@/features/guest/session";
 import { useServerQuote, useStorefront } from "@/features/guest/storefront";
 import { OfflineBanner, TopBar } from "@/features/guest/components/Chrome";
 import { Totals } from "@/features/guest/components/GuestCartScreen";
+import { CouponBox, ReferralAndOffers } from "@/features/guest/components/GuestOffers";
 import { Alert, Spinner } from "@/features/guest/components/Bits";
 import { SfIcon } from "@/features/guest/components/SfIcon";
 import { guestOnlinePaymentCopy } from "@/features/guest/paymentCopy";
@@ -22,6 +23,16 @@ export function normalizePhone(raw: string): string {
   const india = /^(?:\+?91|0)?([6-9]\d{9})$/.exec(compact);
   return india ? india[1] : compact;
 }
+/**
+ * The price guard: the total placing the order is priced at, i.e. before any coupon (the coupon is
+ * applied once the order exists). A quote with a discount but without that figure sends no guard
+ * rather than the discounted total, which the server would always refuse.
+ */
+function guardTotal(quote: { total: string; discount?: string; totalBeforeDiscount?: string }): { expectedTotal?: string } {
+  if (quote.totalBeforeDiscount) return { expectedTotal: quote.totalBeforeDiscount };
+  return Number(quote.discount ?? 0) > 0 ? {} : { expectedTotal: quote.total };
+}
+
 export const phoneValid = (raw: string) => !raw.trim() || /^\+?\d{10,15}$/.test(normalizePhone(raw));
 
 /**
@@ -31,12 +42,16 @@ export const phoneValid = (raw: string) => !raw.trim() || /^\+?\d{10,15}$/.test(
  * where the payment gateway is allowed to run.
  */
 export function GuestCheckoutScreen({ navigate = (url: string) => window.location.assign(url) }: { navigate?: (url: string) => void }) {
-  const { token, cart, cartReady, data, base, estimate, dispatch, refreshMenu } = useStorefront();
-  const { quote, loading, unavailable, recheck } = useServerQuote();
+  const { token, cart, cartReady, data, base, estimate, dispatch, refreshMenu, couponCode, setCouponCode } = useStorefront();
   const online = data.payment.online;
   const [method, setMethod] = useState<PayMethod>("CASH");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [referral, setReferral] = useState("");
+  const [optIn, setOptIn] = useState(false);
+  // A friend's invite link (/r/CODE) leaves the code on this device until it is used.
+  useEffect(() => setReferral(loadReferral() ?? ""), []);
+  const { quote, loading, unavailable, recheck } = useServerQuote({ phone: phoneValid(phone) && phone.trim() ? normalizePhone(phone) : undefined });
   const [touched, setTouched] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,19 +69,37 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     setError(null);
     setPlacing(true);
     const customer = name.trim() || phone.trim() ? { ...(name.trim() ? { name: name.trim().slice(0, 60) } : {}), ...(phone.trim() ? { phone: normalizePhone(phone) } : {}) } : undefined;
-    const fp = cartFingerprint(cart, JSON.stringify([customer ?? null, payMethod]));
+    const withPhone = Boolean(phone.trim());
+    // Only a code the server just accepted rides with the order; the server prices it again when the order is placed.
+    const coupon = quote?.coupon?.ok ? quote.coupon.code : undefined;
+    const referralCode = withPhone && referral.length >= 4 ? referral : undefined;
+    const marketingOptIn = withPhone && optIn ? true : undefined;
+    const fp = cartFingerprint(cart, JSON.stringify([customer ?? null, payMethod, coupon ?? null, referralCode ?? null, marketingOptIn ?? null]));
     // The key survives a refresh (sessionStorage): resubmitting the same order replays it.
     const result = await guard.current.run(fp, () =>
-      request<{ orderId: string; ref: string; accessKey: string }>(`/api/qr/t/${encodeURIComponent(token)}/orders`, {
+      request<{ orderId: string; ref: string; accessKey: string; coupon?: { applied: boolean; message?: string }; referral?: { attached: boolean; message?: string } }>(`/api/qr/t/${encodeURIComponent(token)}/orders`, {
         method: "POST",
         idempotencyKey: submissionKey(token, fp),
-        body: { items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod },
+        // The total the guest was shown, before any coupon (the coupon is applied once the order exists):
+        // the server prices the order itself and refuses (409, nothing created) if its price differs.
+        body: {
+          items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod,
+          ...(quote ? guardTotal(quote) : {}),
+          ...(coupon ? { couponCode: coupon } : {}), ...(referralCode ? { referralCode } : {}), ...(marketingOptIn ? { marketingOptIn } : {}),
+        },
       })
     );
     if (result.status === "busy") return;
     if (result.status === "error") {
       setPlacing(false);
       const e = result.error;
+      if (e instanceof ApiError && e.code === "PriceChanged") {
+        const now = (e.details as { total?: unknown } | undefined)?.total;
+        setError(typeof now === "string" ? `${e.message} New total: ${formatMoney(now)}.` : e.message);
+        void refreshMenu();
+        void recheck();
+        return;
+      }
       setError(describeError(e));
       if (e instanceof ApiError && e.kind === "validation") {
         void refreshMenu(); // e.g. an item just sold out
@@ -77,6 +110,12 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     const placed = result.value;
     rememberOrder({ orderId: placed.orderId, key: placed.accessKey, token, ref: placed.ref, at: new Date().toISOString() });
     clearSubmission(token);
+    // The order never fails because of a code; if one was not used, the order page says why.
+    const notices = [placed.coupon && !placed.coupon.applied ? `Coupon not applied: ${placed.coupon.message ?? "this code can't be used here."}` : null, placed.referral && !placed.referral.attached ? `Referral not used: ${placed.referral.message ?? "this code can't be used."}` : null].filter(Boolean);
+    if (notices.length) saveNotice(placed.orderId, notices.join(" "));
+    if (referralCode) saveReferral(null);
+    saveCoupon(token, null);
+    setCouponCode(null);
     saveCart(token, { ...cart, lines: [], notes: "" });
     dispatch({ type: "clear" });
     // A full page load: the order page is where the payment gateway's script is allowed (CSP).
@@ -109,7 +148,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
       <OfflineBanner />
       <main className="sf-wrap" style={{ paddingBottom: 24 }}>
         <div className="sf-page-head">
-          <Link href={`${base}/cart`} className="sf-back" aria-label="Back to your cart">
+          <Link prefetch href={`${base}/cart`} className="sf-back" aria-label="Back to your cart">
             <SfIcon name="back" />
           </Link>
           <div>
@@ -150,11 +189,13 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
           {unavailable.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <Alert tone="bad" role="alert">
-                Some items aren&apos;t available any more. <Link href={`${base}/cart`} className="sf-link">Review your cart</Link>
+                Some items aren&apos;t available any more. <Link prefetch href={`${base}/cart`} className="sf-link">Review your cart</Link>
               </Alert>
             </div>
           )}
         </section>
+
+        <CouponBox quote={quote} loading={loading} />
 
         <section className="sf-card" aria-labelledby="co-you">
           <h2 id="co-you" className="sf-card-title">About you</h2>
@@ -186,6 +227,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
               {touched && !phoneOk ? "Enter a valid mobile number, or leave it empty." : "Only used by the café for this order and your visits."}
             </p>
           </label>
+          <ReferralAndOffers phoneGiven={Boolean(phone.trim()) && phoneOk} referral={referral} onReferral={setReferral} optIn={optIn} onOptIn={setOptIn} />
         </section>
 
         <section className="sf-card" aria-labelledby="co-pay">
@@ -219,7 +261,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
               ? data.payment.mode === "LIVE"
                 ? "Your order goes to the kitchen as soon as the payment is confirmed by the bank."
                 : `${onlineCopy.detail} The café sends the order to the kitchen only after that payment is accepted.`
-              : "The café confirms your order and sends it to the kitchen. Pay at the counter whenever you're ready."}
+              : "Your order goes to the kitchen as soon as you place it. Pay at the counter whenever you're ready."}
           </p>
         </section>
 

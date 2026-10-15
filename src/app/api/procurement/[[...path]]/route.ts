@@ -3,10 +3,14 @@ import { prisma } from "@/server/db/client";
 import { createRouter } from "@/server/api/router";
 import { IndentStatus, PurchaseOrderStatus } from "@/constants/enums";
 import {
-  createIndent, transitionIndent, createPurchaseOrder, transitionPurchaseOrder,
+  createIndent, transitionIndent, createPurchaseOrder, transitionPurchaseOrder, reviewPurchaseOrder,
   createGRN, postGRN, createPurchaseBill, cancelPurchaseBill, payVendor, vendorDues,
 } from "@/server/services/procurement";
 import { computeReorder, raiseReorderPurchaseOrders, raiseReorderIndent } from "@/server/services/reorder";
+import { getProcurementRules, saveProcurementRules } from "@/server/services/procurementRules";
+import { can } from "@/server/auth/rbac";
+import { ForbiddenError } from "@/server/db/scope";
+import { procurementQueue } from "@/server/services/procurementQueue";
 import { supplierPriceComparison } from "@/server/services/supplierPrices";
 import { materialPriceHistory } from "@/server/services/inventoryInsights";
 import { normalizeDates } from "@/server/services/reports";
@@ -21,6 +25,14 @@ const idemKey = (req: { headers: Headers }) => req.headers.get("idempotency-key"
 
 export const { GET, POST } = createRouter([
   // reads (paginated, outlet-scoped)
+  // One queue for purchase orders and indents together, with the approval tab (audit PP-04).
+  // Approval rules (audit PP-07): readable by whoever buys or approves, changed by the owner (org.manage) after a password step-up.
+  { method: "GET", path: "rules", handler: ({ ctx }) => {
+    if (!can(ctx, "purchase.view") && !can(ctx, "purchase.approve")) throw new ForbiddenError('Missing permission "purchase.view"');
+    return getProcurementRules(prisma, ctx.organizationId);
+  } },
+  { method: "POST", path: "rules", reauth: "settings.manage", handler: ({ ctx, body }) => saveProcurementRules(ctx, body as never) },
+  { method: "GET", path: "queue", handler: ({ ctx, query }) => procurementQueue(prisma, ctx, query as never) },
   { method: "GET", path: "indents", handler: ({ ctx, query }) => listIndents(prisma, ctx, query) },
   { method: "GET", path: "indents/:id", handler: ({ ctx, params }) => getIndent(prisma, ctx, params.id) },
   { method: "GET", path: "purchase-orders", handler: ({ ctx, query }) => listPurchaseOrders(prisma, ctx, query) },
@@ -41,6 +53,8 @@ export const { GET, POST } = createRouter([
   { method: "POST", path: "purchase-orders", handler: ({ ctx, body, req }) => createPurchaseOrder(ctx, body as never, undefined, idemKey(req)) },
   { method: "POST", path: "reorder/purchase-orders", handler: ({ ctx, body, req }) => raiseReorderPurchaseOrders(ctx, body, idemKey(req)) },
   { method: "POST", path: "reorder/indents", handler: ({ ctx, body, req }) => raiseReorderIndent(ctx, body, idemKey(req)) },
+  // Line-by-line review before approval: change a quantity, take a line off, put one back (audit PP-06).
+  { method: "POST", path: "purchase-orders/:id/review", handler: ({ ctx, params, body }) => reviewPurchaseOrder(ctx, params.id, body as never) },
   { method: "POST", path: "purchase-orders/:id/transition", handler: ({ ctx, params, body }) => transitionPurchaseOrder(ctx, params.id, z.object({ to: PurchaseOrderStatus.zod }).parse(body).to) },
   { method: "POST", path: "grns", handler: ({ ctx, body, req }) => createGRN(ctx, body as never, undefined, idemKey(req)) },
   { method: "POST", path: "grns/:id/post", handler: ({ ctx, params }) => postGRN(ctx, params.id) },

@@ -12,7 +12,7 @@ import { readSessionCookie } from "@/server/auth/cookies";
 
 export type CurrentUser = { id: string; name: string; email: string; organizationId: string; isSuperAdmin: boolean };
 
-export type Current = { ctx: AccessContext; user: CurrentUser; session: ActiveSession };
+export type Current = { ctx: AccessContext; user: CurrentUser; session: ActiveSession; deviceId?: string };
 
 /** Resolve the caller from the session cookie, or null if unauthenticated. A page render counts as activity. */
 export async function getCurrentContext(): Promise<Current | null> {

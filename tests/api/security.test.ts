@@ -7,7 +7,7 @@ import { prisma } from "@/server/db/client";
 import { hashPassword } from "@/server/auth/password";
 import { createSession } from "@/server/auth/session";
 import { SESSION_COOKIE } from "@/constants/auth";
-import { MemoryRateLimitStore, enforceRateLimit, RateLimitError, getRateLimitStore, RATE_POLICIES, clientIp } from "@/server/api/rateLimit";
+import { MemoryRateLimitStore, enforceRateLimit, RateLimitError, getRateLimitStore, RATE_POLICIES, clientIp, rateLimitKey } from "@/server/api/rateLimit";
 import { createRouter } from "@/server/api/router";
 import { POST as login } from "@/app/api/auth/login/route";
 import { getPaymentProvider } from "@/integrations/payment";
@@ -69,7 +69,7 @@ describe("rate limit store", () => {
 
 describe("login endpoint", () => {
   it("locks an account after repeated failures even across IPs", async () => {
-    await getRateLimitStore().reset(`${RATE_POLICIES.loginPerEmail.name}:${email}`);
+    await getRateLimitStore().reset(rateLimitKey(RATE_POLICIES.loginPerEmail, email));
     for (let i = 0; i < RATE_POLICIES.loginPerEmail.limit; i++) {
       expect((await login(loginReq({ email, password: "wrong-password" }))).status).toBe(401);
     }

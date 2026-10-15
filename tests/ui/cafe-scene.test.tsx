@@ -22,6 +22,22 @@ describe("CafeScene", () => {
     expect(screen.getByText(/Illustration of the Coders' Cafe interior/)).toBeInTheDocument();
   });
 
+  it("draws four depth layers on one panorama, all fitted the same way (so they line up at rest)", () => {
+    const { container } = render(<CafeScene />);
+    const layers = [...container.querySelectorAll(".sf-scene-layer")].map((l) => l.getAttribute("data-layer"));
+    expect(layers).toEqual(["back", "room", "lamps", "front"]);
+    const svgs = [...container.querySelectorAll("svg")];
+    expect(svgs).toHaveLength(4);
+    for (const svg of svgs) {
+      expect(svg).toHaveAttribute("viewBox", "-1000 0 3600 1000");
+      expect(svg).toHaveAttribute("preserveAspectRatio", "xMidYMid slice");
+      expect(svg).toHaveAttribute("aria-hidden", "true");
+    }
+    // the evening dimmer sits between the room and the lamps, so the globes stay lit
+    const cam = container.querySelector(".sf-scene-cam")!;
+    expect([...cam.children].map((c) => c.getAttribute("data-layer") ?? c.className)).toEqual(["back", "room", "sf-scene-dusk", "lamps", "front"]);
+  });
+
   it("switches camera views (one pressed at a time) and toggles evening light", async () => {
     const user = userEvent.setup();
     const { container } = render(<CafeScene />);

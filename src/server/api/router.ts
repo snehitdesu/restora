@@ -20,6 +20,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { BACKGROUND_HEADER, SESSION_COOKIE, type ReauthScope } from "@/constants/auth";
 import { resolveFromToken, type CurrentUser } from "@/server/auth/current-user";
+import { resolveFromDeviceToken } from "@/server/sync/device";
 import { requireFreshAuth } from "@/server/auth/reauth";
 import { prisma } from "@/server/db/client";
 import { type AccessContext, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from "@/server/db/scope";
@@ -30,20 +31,20 @@ import { withRequestContext, currentRequestContext } from "@/server/observabilit
 import { inc } from "@/server/observability/metrics";
 import { recordServerError } from "@/server/observability/alerts";
 import { beginRequest } from "@/server/ops/lifecycle";
+import { guardMirroredRequest } from "@/server/sync/mirrorGuard";
 
 type Method = "GET" | "POST" | "PATCH" | "DELETE";
-export type HandlerArgs = { ctx: AccessContext; user: CurrentUser; params: Record<string, string>; query: Record<string, string>; body: unknown; req: NextRequest };
+export type HandlerArgs = { ctx: AccessContext; user: CurrentUser; params: Record<string, string>; query: Record<string, string>; body: unknown; req: NextRequest; deviceId?: string };
 /**
  * `reauth`: the route is a sensitive action and needs a fresh password
  * confirmation for that scope on the calling session (see server/auth/reauth.ts).
  */
-export type Route = { method: Method; path: string; handler: (a: HandlerArgs) => Promise<unknown>; rateLimit?: RatePolicy; reauth?: ReauthScope };
+export type Route = { method: Method; path: string; handler: (a: HandlerArgs) => Promise<unknown>; rateLimit?: RatePolicy; reauth?: ReauthScope; /** Unauthenticated (pairing redemption / device enroll). */ public?: true; /** Rate-limit public routes by client IP instead of user id. */ rateLimitByIp?: true };
 
 const MAX_BODY = 1_000_000;
 
 // ---------------- shared input schemas ----------------
 
-export const zId = z.string().min(1).max(64);
 export const listQuery = z.object({
   outletId: z.string().optional(),
   take: z.coerce.number().int().positive().max(200).optional(),
@@ -52,7 +53,6 @@ export const listQuery = z.object({
   to: z.coerce.date().optional(),
 });
 export const outletQuery = z.object({ outletId: z.string().min(1) });
-export const dateOf = (v: unknown) => z.coerce.date().parse(v);
 
 function match(segs: string[], pattern: string[]): Record<string, string> | null {
   if (segs.length !== pattern.length) return null;
@@ -143,21 +143,21 @@ function overlaps(a: string[], b: string[]): boolean {
  * re-authentication. Refuse such tables at module load: identical method+path
  * pairs, and overlapping same-method patterns whose protection differs.
  */
-export function assertUnambiguousRoutes(routes: Array<Pick<Route, "method" | "path" | "reauth" | "rateLimit">>): void {
+export function assertUnambiguousRoutes(routes: Array<Pick<Route, "method" | "path" | "reauth" | "rateLimit" | "public">>): void {
   const segs = routes.map((r) => r.path.split("/").filter(Boolean));
   for (let i = 0; i < routes.length; i++) {
     for (let j = i + 1; j < routes.length; j++) {
       const a = routes[i], b = routes[j];
       if (a.method !== b.method || !overlaps(segs[i], segs[j])) continue;
       const same = segs[i].join("/") === segs[j].join("/");
-      if (same || a.reauth !== b.reauth || a.rateLimit !== b.rateLimit) {
+      if (same || a.reauth !== b.reauth || a.rateLimit !== b.rateLimit || Boolean(a.public) !== Boolean(b.public)) {
         throw new Error(`Ambiguous API routes: ${a.method} "${a.path}" and ${b.method} "${b.path}" can match the same request${same ? "" : " with different protection"}`);
       }
     }
   }
 }
 
-export function createRouter(routes: Route[]) {
+export function createRouter(routes: Route[], opts: { resource?: string } = {}) {
   assertUnambiguousRoutes(routes);
   const compiled = routes.map((r) => ({ ...r, segs: r.path.split("/").filter(Boolean) }));
   const dispatch = (method: Method) => (req: NextRequest, context: { params: Promise<{ path?: string[] }> }) => {
@@ -189,12 +189,15 @@ export function createRouter(routes: Route[]) {
       }
 
       const background = req.headers.get(BACKGROUND_HEADER) === "1";
-      const current = await resolveFromToken(req.cookies.get(SESSION_COOKIE)?.value, { activity: !background });
-      if (!current) throw new UnauthorizedError();
-      userId = current.user.id;
-      const rc = currentRequestContext();
-      if (rc) rc.userId = userId;
-      if (hit.r.rateLimit) await enforceRateLimit(hit.r.rateLimit, current.user.id);
+      let current = hit.r.public ? null : await resolveFromToken(req.cookies.get(SESSION_COOKIE)?.value, { activity: !background });
+      if (!hit.r.public && !current) current = await resolveFromDeviceToken(prisma, req.headers.get("authorization"), { touch: true });
+      if (!hit.r.public && !current) throw new UnauthorizedError();
+      if (current) {
+        userId = current.user.id;
+        const rc = currentRequestContext();
+        if (rc) rc.userId = userId;
+      }
+      if (hit.r.rateLimit) await enforceRateLimit(hit.r.rateLimit, hit.r.public || hit.r.rateLimitByIp ? clientIp(req) : current!.user.id);
 
       let body: unknown = undefined;
       if (method !== "GET") {
@@ -215,13 +218,18 @@ export function createRouter(routes: Route[]) {
         }
       }
       const query = Object.fromEntries(req.nextUrl.searchParams.entries());
-      await assertNamedOutletsInOrg(current.ctx, query, body);
+      if (current) await assertNamedOutletsInOrg(current.ctx, query, body);
+      // Desktop only: an action on a mirrored cloud order is routed to the cloud (or refused) instead of changing the local cache.
+      const mirrored = current ? await guardMirroredRequest(prisma, { ctx: current.ctx, method, segs, body, resource: opts.resource, pathname: req.nextUrl.pathname, idempotencyKey: req.headers.get("idempotency-key") ?? undefined }) : null;
       // Step-up gate last, immediately before the handler: a request rejected for
       // origin/size/JSON/tenant never records a REAUTH_USED for an action that did not run.
-      if (hit.r.reauth) {
-        await requireFreshAuth(prisma, { session: current.session, organizationId: current.user.organizationId }, hit.r.reauth, { method, path, ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined });
+      if (!mirrored && hit.r.reauth) {
+        if (current?.deviceId) throw new ForbiddenError("This action cannot be done from a linked desktop");
+        await requireFreshAuth(prisma, { session: current!.session, organizationId: current!.user.organizationId }, hit.r.reauth, { method, path, ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined });
       }
-      const result = await hit.r.handler({ ctx: current.ctx, user: current.user, params: hit.params!, query, body: body ?? {}, req });
+      const emptyCtx: AccessContext = { userId: "", organizationId: "", outletIds: [], roles: [], outletRoles: {}, orgRoles: [], isOrgWide: false, isSuperAdmin: false };
+      const emptyUser: CurrentUser = { id: "", name: "", email: "", organizationId: "", isSuperAdmin: false };
+      const result = mirrored ? mirrored.value : await hit.r.handler({ ctx: current?.ctx ?? emptyCtx, user: current?.user ?? emptyUser, params: hit.params!, query, body: body ?? {}, req, deviceId: current?.deviceId });
       const durationMs = performance.now() - started;
       if (result instanceof Response) {
         status = result.status;

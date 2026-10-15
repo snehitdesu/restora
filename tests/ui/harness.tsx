@@ -44,7 +44,7 @@ export const ME = "u1";
 
 export function shell(permissions: Permission[], outletId = OUT_A, orgWide = false): ShellData {
   return {
-    user: { id: ME, name: "Asha", email: "a@x" }, roles: ["MANAGER"], orgWide, permissions, outletId,
+    user: { id: ME, name: "Asha", email: "a@x" }, roles: ["MANAGER"], orgWide, desktop: false, permissions, outletId,
     outlets: [{ id: OUT_A, code: "A1", name: "Andheri", timezone: "Asia/Kolkata" }, { id: OUT_B, code: "B1", name: "Bandra", timezone: "Asia/Kolkata" }],
   };
 }

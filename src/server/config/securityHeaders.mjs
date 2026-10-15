@@ -79,6 +79,14 @@ export const PERMISSIONS_POLICY = [
 export const CHECKOUT_PERMISSIONS_POLICY = PERMISSIONS_POLICY.replace("payment=()", 'payment=(self "https://api.razorpay.com")');
 
 /**
+ * The staff table-QR scanner page (/tables/scan) only: its own origin may use the
+ * camera. Browsers fix this policy when a document loads, so the scanner is
+ * entered by a full page load (see features/backoffice/tables.tsx).
+ */
+export const QR_SCANNER_PATH = "/tables/scan";
+export const SCANNER_PERMISSIONS_POLICY = PERMISSIONS_POLICY.replace("camera=()", "camera=(self)");
+
+/**
  * @param {{ dev: boolean, paymentCheckout?: boolean }} opts
  * paymentCheckout: the guest order pages, where Razorpay Checkout runs. Besides
  * the CSP hosts, the opener policy allows the gateway's popups (UPI / bank 3-D
