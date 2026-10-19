@@ -312,7 +312,7 @@ ME-01, ME-02, ME-03, KP-05, KP-06, IN-02, MD-10, AD-10, AD-17 (group 4: now IMPL
 | SE-11 | | Production configuration validation | IMPLEMENTED + VERIFIED | `src/server/config/env.ts` | none | P0 | | env-validation tests |
 | SE-12 | | Windows desktop app (Electron) with local DB, backups, upgrades | IMPLEMENTED + VERIFIED | `desktop/` | none | P1 | | desktop tests |
 | SE-13 | | macOS desktop | IMPLEMENTED + VERIFIED | `desktop/` is cross-platform; CI builds the payload (with the secret scan), runs the desktop E2E on the unpacked app, packages RESTORA.app with the Electron fuses flipped, runs the packaged-app verification (fuses, upgrade from the previous release, launch attacks, asar integrity) and builds the DMG on both `macos-15` (arm64) and `macos-15-intel` (x64): green on every push of this branch (run 24 at `2e5a1d4`) | the app is **unsigned and not notarized** (SE-14), so Gatekeeper will warn; nobody has run it on a physical Mac | P4 | SE-14 | `.github/workflows/ci.yml` (desktop jobs), `desktop/e2e/*`, `tests/desktop/*` |
-| SE-14 | | Code signing | NOT CONFIGURED (signing-ready) | electron-builder signs only when `CSC_LINK` / `CSC_KEY_PASSWORD` are supplied (`electron-builder.yml`, CI secrets `WIN_CSC_LINK` / `MAC_CSC_LINK`); no certificate exists. 2026-10-19: both `dist-desktop` installers report `NotSigned` (`Get-AuthenticodeSignature`) | an OV / EV code-signing certificate (Windows), a Developer ID certificate + notarization credentials (macOS) | P4 | certificates | `docs/desktop-release.md` |
+| SE-14 | | Code signing | PARTIAL | electron-builder signs only when `CSC_LINK` / `CSC_KEY_PASSWORD` are supplied (`electron-builder.yml`, CI secrets `WIN_CSC_LINK` / `MAC_CSC_LINK`); no certificate exists. 2026-10-19: both `dist-desktop` installers report `NotSigned` (`Get-AuthenticodeSignature`) | an OV / EV code-signing certificate (Windows), a Developer ID certificate + notarization credentials (macOS) | P4 | certificates | `docs/desktop-release.md` |
 | SE-15 | | Public RESTORA website | IMPLEMENTED + VERIFIED | `src/app/(site)` | none | P1 | | `tests/site/website.test.ts` |
 | SE-16 | | PostgreSQL production database | IMPLEMENTED + NOT EXTERNALLY VERIFIED | suite + E2E executed on PG 16 | hosted instance | P0 | hosting | `docs/postgres.md` |
 
@@ -325,8 +325,8 @@ Counted from the tables above by script (one row = one feature), after the 2026-
 | Status | Rows |
 |---|---|
 | IMPLEMENTED + VERIFIED | 130 |
-| IMPLEMENTED + NOT EXTERNALLY VERIFIED | 25 |
-| PARTIAL | 9 |
+| IMPLEMENTED + NOT EXTERNALLY VERIFIED | 24 |
+| PARTIAL | 10 |
 | NOT BUILT | 20 |
 | INTENTIONALLY DEFERRED | 3 |
 | **Total** | **187** |
