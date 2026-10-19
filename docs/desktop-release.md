@@ -139,6 +139,23 @@ rebuild, and regenerate the manifest (size + sha256) from that exact file; the
 test then passes against it. The test and the existing installers were left
 unchanged.
 
+## Start-up time (measured 2026-10-19, installed 1.0.0-rc.1 build of 2026-10-15)
+Measured from the app's own `Startup timings` log line on this machine (8 GB RAM,
+under 1 GB free during the runs), with isolated data folders (`AHAROS_DATA_DIR`):
+
+| Launch | Database + all 28 migrations | Local server ready | Window / first page |
+|---|---|---|---|
+| Clean first launch (empty folder) | 1.2 s (then the first-run setup window; the server starts after setup) | — | — |
+| Set-up install, 12:03 | 2.2 s | 32.4 s | 33.5 s |
+| Same install restarted, 12:14 | 2.0 s | 19.3 s | 41.7 s |
+
+One-time database initialization is not the cost: the packaged Next.js server
+boot (17–30 s here) is, plus a window / first-page gap that varied from 1 s to
+22 s. The earlier "~72 s first launch" figure therefore mostly measures the
+server boot and the setup flow. Next step before optimizing: profile the
+standalone server start (module loading from `resources/server`, antivirus
+scanning of the unpacked files, cold disk cache) on a machine with free memory.
+
 ## Code signing — NOT configured (installers are unsigned)
 No certificate exists in this repository or CI. Unsigned installers trigger
 SmartScreen warnings and cannot be verified by an updater. Required:
