@@ -127,6 +127,18 @@ The database is at a migration boundary (the failed migration rolled back).
 - Logs never contain passwords or the install secret; they contain e-mail
   addresses of setup/restore actors and blocked URLs (first 200 characters).
 
+## One version, one binary (finding 2026-10-19)
+`src/site/release-manifest.json` publishes `1.0.0-rc.1` as the 2026-10-06 build
+(Setup 136,792,602 bytes, sha256 `67ec34c5…`). The local `dist-desktop/` holds a
+2026-10-15 rebuild (Cloud Sync) under the **same** version (Setup 137,822,088
+bytes), so `tests/site/website.test.ts` fails locally (CI has no `dist-desktop`,
+so CI is green). Two different binaries must never share a version: an upgrade
+check, a support report or a future updater cannot tell them apart. Before the
+next distributed build, bump `package.json` `version` (e.g. `1.0.0-rc.2`),
+rebuild, and regenerate the manifest (size + sha256) from that exact file; the
+test then passes against it. The test and the existing installers were left
+unchanged.
+
 ## Code signing — NOT configured (installers are unsigned)
 No certificate exists in this repository or CI. Unsigned installers trigger
 SmartScreen warnings and cannot be verified by an updater. Required:
