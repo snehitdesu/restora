@@ -118,7 +118,7 @@ staff or a missing common workflow; **S3** nice to have. Scope: **S** ≤ 1 day,
 1. [O: Offline POS]. 2. **[S]:** the desktop app runs fully offline on SQLite; Cloud Sync pulls hosted QR orders into the desktop POS / KOT and queues status changes while offline (`src/server/sync/*`). Tests: `tests/sync/desktop-sync.test.ts`, `tests/sync/cloud-sync-api.test.ts`, `tests/sync/desktop-prisma-boundary.test.ts`.
 3. **Confirmed defect [S] (fixed 2026-10-19, `tests/api/middleware-matcher.test.ts`):** taking a payment on a cloud order from the desktop called hosted `/api/payments` with the device token and no cookie; the hosted edge middleware answered 401, so the desktop reported "cloud sign-in has ended". Captain app offline queue: row 4.
 4. **Unknown:** how Petpooja Offline POS reconciles conflicting edits.
-9. Re-run the hosted Cloud Sync E2E with a counter payment on a cloud order.
+9. Done 2026-10-19 on the Preview: a counter payment on a cloud order settled once; the desktop's write timeout was raised to 45 s (5e1758c) because a slow cloud settlement was reported to the cashier as a failure. Rebuild and reinstall the desktop to ship it.
 
 ### 16. Backup, restore and desktop updates
 1. [O: none named]. 2. **[S]:** verified backup before every migration, restore, upgrade refusal on a newer database, rollback (`desktop/runtime/*`). Tests: `tests/desktop/backup.test.ts`, `tests/desktop/upgrade-restore.test.ts`, `tests/desktop/migrator.test.ts`.
