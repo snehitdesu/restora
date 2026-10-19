@@ -3,7 +3,7 @@
  * A reachable-but-unavailable cloud (503), a network failure, and a revoked
  * device must not be collapsed into a generic 500 or a healthy ONLINE state.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { fail } from "@/server/api/respond";
 import {
   CloudAuthError,
@@ -58,6 +58,22 @@ describe("CloudClient status classification", () => {
     expect(err).toBeInstanceOf(CloudUnavailableError);
     expect(isTransientCloudError(err)).toBe(true);
     expect(String(err instanceof Error ? err.message : err)).not.toContain(token);
+  });
+
+  // 2026-10-19: a cloud settlement took ~15 s on the Preview; the desktop gave up at 15 s and told the cashier the
+  // cloud was unavailable although the bill was settled. Reads keep the short timeout, writes wait longer.
+  it("gives writes (payments, verification, actions) 45 s and reads 15 s before giving up", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const client = new CloudClient({ baseUrl: "https://cloud.restora.test", token, transport: async () => new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 }) });
+      await client.get("/api/sync/orders");
+      await client.post("/api/payments", { amount: 1 });
+      expect(spy.mock.calls.map((c) => c[0])).toEqual([15_000, 45_000]);
+      await new CloudClient({ baseUrl: "https://cloud.restora.test", timeoutMs: 5_000, transport: async () => new Response(JSON.stringify({ ok: true, data: {} })) }).post("/api/payments", {});
+      expect(spy.mock.calls.at(-1)?.[0]).toBe(5_000); // an explicit timeout still wins
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("treats a dropped connection as offline, not auth", async () => {

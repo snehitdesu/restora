@@ -73,6 +73,12 @@ export function setCloudTransportForTests(t: Transport | null): void {
 }
 const defaultTransport: Transport = (url, init) => (transportOverride ?? fetch)(url, init);
 const TIMEOUT_MS = 15_000;
+/**
+ * A write (payment, verification, order action) waits longer: on a distant database a settlement takes about
+ * 15 s, and giving up first told the cashier "temporarily unavailable" for a payment the cloud had already
+ * settled (2026-10-19 Preview). Writes are idempotent (keys / state checks), so a retry stays safe either way.
+ */
+const WRITE_TIMEOUT_MS = 45_000;
 
 async function readEnvelope(res: Response): Promise<{ ok: boolean; data?: unknown; error?: { code?: string; message?: string } } | null> {
   try {
@@ -95,7 +101,7 @@ export class CloudClient {
     if (extra.body !== undefined) headers["content-type"] = "application/json";
     let res: Response;
     try {
-      res = await this.transport(`${this.opts.baseUrl}${path}`, { method, headers, body: extra.body === undefined ? undefined : JSON.stringify(extra.body), redirect: "manual", signal: AbortSignal.timeout(this.opts.timeoutMs ?? TIMEOUT_MS) });
+      res = await this.transport(`${this.opts.baseUrl}${path}`, { method, headers, body: extra.body === undefined ? undefined : JSON.stringify(extra.body), redirect: "manual", signal: AbortSignal.timeout(this.opts.timeoutMs ?? (method === "POST" ? WRITE_TIMEOUT_MS : TIMEOUT_MS)) });
     } catch {
       // Never echo the underlying error: it can carry the URL.
       throw new CloudOfflineError();
