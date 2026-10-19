@@ -263,18 +263,19 @@ test.describe("QR guest transaction", () => {
     await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
     await g.waitForURL(/\/checkout$/);
     let dropped = false;
+    const keys: string[] = [];
     await g.route("**/api/qr/t/*/orders", async (route) => {
+      keys.push(route.request().headers()["idempotency-key"]);
       if (dropped) return route.continue();
       dropped = true;
       await route.fetch(); // the server creates the order…
       await route.abort("connectionreset"); // …the phone never hears back
     });
     await g.getByRole("button", { name: "Place order" }).click();
-    await expect(g.getByRole("alert").filter({ hasText: /Network error/ })).toBeVisible();
-    // The guest refreshes the checkout and taps again: the same cart replays the same order.
-    await g.reload();
-    await g.getByRole("button", { name: "Place order" }).click();
+    // No failure is claimed: the page asks again with the SAME request and recovers the order it placed.
     await g.waitForURL(/\/o\//);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
     const mine = (await apiData<{ items: Array<{ id: string }> }>(page.request, `/api/orders?outletId=${outlet.id}&tableId=${tableId}&take=50`)).items;
     expect(mine).toHaveLength(1);
     expect(mine[0].id).toBe(orderIdFrom(g));
