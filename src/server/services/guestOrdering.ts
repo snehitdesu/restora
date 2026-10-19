@@ -428,8 +428,9 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
   const dispatch = data.paymentMethod === "CASH";
   // Namespaced per table: a key can only ever replay an order of this table.
   const scopedKey = `qr:${t.table.id}:${key}`;
-  const existing = await db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: t.ctx.organizationId, idempotencyKey: scopedKey } }, select: { id: true } });
-  if (!existing) {
+  const placedUnderKey = () => db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: t.ctx.organizationId, idempotencyKey: scopedKey } }, select: { id: true } });
+  // A new order is checked first; a replay of a placed one skips straight to placeOrder's replay.
+  const checkNewOrder = async () => {
     const atTable = { organizationId: t.ctx.organizationId, tableId: t.table.id, source: "QR" };
     // Independent reads: the limits and every line's price, at once.
     const [waiting, unpaid, lines] = await Promise.all([
@@ -454,6 +455,15 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
       const okLines = lines.filter((l): l is Extract<GuestPricedLine, { ok: true }> => l.ok);
       const total = calculateOrderTotals(okLines.map((l) => ({ qty: l.qty, unitPrice: l.unitPrice, modifiersPerUnit: l.modifiersPerUnit, taxPct: l.taxPct }))).total;
       if (!money(total).eq(D(data.expectedTotal))) throw new GuestPriceChangedError(money(total).toFixed(2));
+    }
+  };
+  if (!(await placedUnderKey())) {
+    try {
+      await checkNewOrder();
+    } catch (e) {
+      // A replay's original can commit between the lookup above and these checks (and then count as one
+      // more waiting order): the refusal is only true while the key still has no order.
+      if (!(await placedUnderKey())) throw e;
     }
   }
   const guestName = data.customer?.name || undefined;

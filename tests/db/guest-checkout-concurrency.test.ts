@@ -82,4 +82,45 @@ describe(`${N} guests paying cash check out at the same moment`, () => {
     await expect(placeGuestOrder(token, body, `race-${RUN}-key`)).resolves.toMatchObject({ orderId: placed[0].orderId, replayed: true });
     expect(await prisma.kot.count({ where: { organizationId: orgId } })).toBe(before.kots + 1);
   });
+
+  // 2026-10-19: a replay whose original commits just AFTER the replay looked its key up, but before the
+  // replay checked the table's limits, saw the original as one more waiting order and was refused (422),
+  // so the guest page reported "failed" for an order the restaurant had. The refusal must recover it.
+  it("a replay that races the original's commit returns the original instead of a limit refusal", async () => {
+    const token = randomBytes(18).toString("base64url");
+    const tableId = (await prisma.restaurantTable.create({ data: { organizationId: orgId, outletId, code: `LIM${RUN}`.slice(0, 12), qrToken: token } })).id;
+    const body = { items: [{ menuItemId: dish, qty: 1 }] }; // no payment choice: waits for acceptance (OPEN)
+    for (let i = 0; i < 2; i++) await placeGuestOrder(token, body, `lim-${RUN}-${i}-key`);
+    const key = `lim-${RUN}-orig-key`;
+    let original: { orderId: string } | undefined;
+    let lookups = 0;
+    // The replay's first key lookup misses; the original commits right after it (the third waiting order).
+    const racing = new Proxy(prisma, {
+      get(target, prop) {
+        if (prop === "order") {
+          return new Proxy(target.order, {
+            get(o, p) {
+              if (p === "findUnique" && lookups++ === 0) {
+                return async (args: Parameters<typeof prisma.order.findUnique>[0]) => {
+                  const miss = await o.findUnique(args);
+                  original = await placeGuestOrder(token, body, key);
+                  return miss;
+                };
+              }
+              const v = Reflect.get(o, p);
+              return typeof v === "function" ? v.bind(o) : v;
+            },
+          });
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const replay = await placeGuestOrder(token, body, key, {}, racing);
+    expect(original).toBeDefined();
+    expect(replay).toMatchObject({ orderId: original!.orderId, replayed: true });
+    expect(await prisma.order.count({ where: { organizationId: orgId, tableId } })).toBe(3);
+    // A genuinely new order is still refused at the limit.
+    await expect(placeGuestOrder(token, body, `lim-${RUN}-new-key`)).rejects.toThrow(/waiting for the restaurant/);
+  });
 });
