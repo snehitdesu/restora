@@ -59,4 +59,27 @@ describe(`${N} guests paying cash check out at the same moment`, () => {
     expect(res.every((r) => r.replayed)).toBe(true);
     expect({ orders: await prisma.order.count({ where: { organizationId: orgId } }), kots: await prisma.kot.count({ where: { organizationId: orgId } }), alerts: await prisma.notification.count({ where: { organizationId: orgId } }), audits: await prisma.auditLog.count({ where: { organizationId: orgId, action: "CREATE", entityType: "Order" } }) }).toEqual(before);
   });
+
+  // 2026-10-19: a slow answer (22.9 s) makes the guest page replay the request while the first one may
+  // still be running. Duplicate taps and replays of one key racing each other: one order, one KOT.
+  it("the same request arriving several times at once (taps + replays racing the original) places ONE order with ONE KOT", async () => {
+    const token = randomBytes(18).toString("base64url");
+    const tableId = (await prisma.restaurantTable.create({ data: { organizationId: orgId, outletId, code: `RACE${RUN}`.slice(0, 12), qrToken: token } })).id;
+    const before = { kots: await prisma.kot.count({ where: { organizationId: orgId } }), alerts: await prisma.notification.count({ where: { organizationId: orgId } }) };
+    const body = { items: [{ menuItemId: dish, qty: 2 }], paymentMethod: "CASH" as const };
+    const res = await Promise.allSettled(Array.from({ length: 6 }, () => placeGuestOrder(token, body, `race-${RUN}-key`)));
+    const failed = res.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    expect(failed.map((f) => String((f.reason as Error)?.message).slice(0, 80))).toEqual([]);
+    const placed = res.map((r) => (r as PromiseFulfilledResult<{ orderId: string; replayed: boolean; accessKey: string }>).value);
+    expect(new Set(placed.map((p) => p.orderId)).size).toBe(1);
+    expect(new Set(placed.map((p) => p.accessKey)).size).toBe(1);
+    expect(placed.filter((p) => !p.replayed)).toHaveLength(1);
+    const orders = await prisma.order.findMany({ where: { organizationId: orgId, tableId }, include: { kots: true } });
+    expect(orders).toHaveLength(1);
+    expect(orders[0].kots).toHaveLength(1);
+    expect({ kots: await prisma.kot.count({ where: { organizationId: orgId } }), alerts: await prisma.notification.count({ where: { organizationId: orgId } }) }).toEqual({ kots: before.kots + 1, alerts: before.alerts + 1 });
+    // A later replay (the guest's "Check order status") still returns that order and adds nothing.
+    await expect(placeGuestOrder(token, body, `race-${RUN}-key`)).resolves.toMatchObject({ orderId: placed[0].orderId, replayed: true });
+    expect(await prisma.kot.count({ where: { organizationId: orgId } })).toBe(before.kots + 1);
+  });
 });

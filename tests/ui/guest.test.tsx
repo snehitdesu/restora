@@ -10,7 +10,7 @@
 import "@testing-library/jest-dom/vitest";
 import type { ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, within, waitFor, act } from "@testing-library/react";
+import { render, screen, cleanup, within, waitFor, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GuestMenuScreen } from "@/features/guest/components/GuestMenuScreen";
 import { GuestCartScreen } from "@/features/guest/components/GuestCartScreen";
@@ -20,7 +20,7 @@ import { StorefrontOverlays } from "@/features/guest/components/Chrome";
 import { StorefrontProvider, type GuestMenuData } from "@/features/guest/storefront";
 import { brandFor } from "@/features/guest/brand";
 import { BillView } from "@/features/billing/BillView";
-import { loadCart, saveCart, submissionKey, clearSubmission, rememberOrder, rememberedOrders, orderKeyFor, orderUrl } from "@/features/guest/session";
+import { loadCart, saveCart, submissionKey, clearSubmission, pendingSubmission, rememberOrder, rememberedOrders, orderKeyFor, orderUrl } from "@/features/guest/session";
 import { cartReducer, emptyCart, type CartLine } from "@/features/pos/cart";
 import type { Bill } from "@/server/services/bill";
 
@@ -28,7 +28,8 @@ vi.mock("next/link", () => ({ default: ({ href, children, prefetch: _prefetch, .
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: any };
 let calls: Call[] = [];
-let handler: (c: Call) => { status?: number; data?: unknown; error?: { code: string; message: string } };
+/** delayMs: answer late; hang: never answer (until the client gives up and aborts). */
+let handler: (c: Call) => { status?: number; data?: unknown; error?: { code: string; message: string }; delayMs?: number; hang?: boolean };
 
 beforeEach(() => {
   calls = [];
@@ -38,6 +39,12 @@ beforeEach(() => {
     const c: Call = { url, method: init.method ?? "GET", headers: (init.headers ?? {}) as Record<string, string>, body: init.body ? JSON.parse(init.body as string) : undefined };
     calls.push(c);
     const r = handler(c);
+    if (r.hang || r.delayMs) {
+      await new Promise<void>((resolve, reject) => {
+        const t = r.hang ? undefined : setTimeout(resolve, r.delayMs);
+        init.signal?.addEventListener("abort", () => (clearTimeout(t), reject(new DOMException("aborted", "AbortError"))), { once: true });
+      });
+    }
     if (r.error) return new Response(JSON.stringify({ ok: false, error: r.error }), { status: r.status ?? 422 });
     return new Response(JSON.stringify({ ok: true, data: r.data }), { status: 200 });
   }));
@@ -319,6 +326,136 @@ describe("guest storefront — checkout", () => {
     const keys = calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders")).map((c) => c.headers["Idempotency-Key"]);
     expect(keys[0]).toBe(keys[1]);
     expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("CASH");
+  });
+
+  describe("slow, lost and refused answers (2026-10-19: a 22.9 s placement was reported as a failure)", () => {
+    const placedOrder = (id: string, replayed = false) => ({ orderId: id, ref: id.toUpperCase(), accessKey: `key-${id}`, replayed });
+    const orderPosts = () => calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders"));
+    const fast = { attemptTimeoutMs: 60, slowAfterMs: 20, delaysMs: [5, 5, 5] };
+    /** A server that keeps one order per Idempotency-Key, like placeGuestOrder. */
+    function keyedServer(answer: (attempt: number) => { hang?: boolean; delayMs?: number; status?: number; error?: { code: string; message: string } } | null) {
+      const orders = new Map<string, ReturnType<typeof placedOrder>>();
+      let attempt = 0;
+      handler = (c) => {
+        if (c.url.endsWith("/quote")) return { data: okQuote(c) };
+        if (c.method !== "POST") return { data: menuData() };
+        const a = answer(attempt++);
+        if (a?.error) return a; // refused: nothing created
+        const key = c.headers["Idempotency-Key"];
+        const prior = orders.get(key);
+        if (!prior) orders.set(key, placedOrder(`cmord${orders.size + 1}`));
+        return { ...a, data: { ...orders.get(key)!, replayed: Boolean(prior) } }; // committed, even if the answer never arrives
+      };
+      return orders;
+    }
+    async function ready(navigate: (url: string) => void, timing?: typeof fast) {
+      inStore(<GuestCheckoutScreen navigate={navigate} timing={timing} />);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled());
+    }
+
+    it("a successful answer after 22.9 s (past the old 20 s limit) places the order once — a 'still placing' notice, never an error", async () => {
+      seedCart([line({})]);
+      const navigate = vi.fn();
+      const orders = keyedServer(() => ({ delayMs: 22_900 }));
+      await ready(navigate); // the real limits
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "Place order" }));
+        await act(() => vi.advanceTimersByTimeAsync(8_500));
+        expect(screen.getByRole("status")).toHaveTextContent("Still placing your order — the connection to the café is slow.");
+        await act(() => vi.advanceTimersByTimeAsync(12_000)); // 20.5 s: where the old client gave up
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(navigate).not.toHaveBeenCalled();
+        await act(() => vi.advanceTimersByTimeAsync(2_600));
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1`);
+      expect(orderPosts()).toHaveLength(1);
+      expect(orders.size).toBe(1);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(pendingSubmission(TOKEN)).toBeNull();
+    });
+
+    it("the server places the order but the answer is lost: the SAME request is replayed and recovers that order", async () => {
+      seedCart([line({ qty: 2 })]);
+      const navigate = vi.fn();
+      const orders = keyedServer((n) => (n === 0 ? { hang: true } : null));
+      await ready(navigate, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1`));
+      const posts = orderPosts();
+      expect(posts).toHaveLength(2);
+      expect(posts[1].headers["Idempotency-Key"]).toBe(posts[0].headers["Idempotency-Key"]);
+      expect(posts[1].body).toEqual(posts[0].body);
+      expect(orders.size).toBe(1);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(rememberedOrders()).toEqual([expect.objectContaining({ orderId: "cmord1" })]);
+      expect(loadCart(TOKEN).lines).toHaveLength(0);
+    });
+
+    it("double taps while a slow request is in flight send nothing extra", async () => {
+      seedCart([line({})]);
+      const navigate = vi.fn();
+      const orders = keyedServer(() => ({ delayMs: 80 }));
+      await ready(navigate, { ...fast, attemptTimeoutMs: 5_000 });
+      const button = screen.getByRole("button", { name: "Place order" });
+      fireEvent.click(button);
+      fireEvent.click(button);
+      await userEvent.setup().dblClick(button);
+      await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+      expect(orderPosts()).toHaveLength(1);
+      expect(orders.size).toBe(1);
+    });
+
+    it("no answer at all: no failure is claimed; 'Check order status' replays the same request — even after a refresh — and recovers the order", async () => {
+      seedCart([line({})]);
+      const navigate = vi.fn();
+      const orders = keyedServer((n) => (n < 4 ? { hang: true } : null)); // the first attempt and all three replays go unanswered
+      await ready(navigate, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
+      expect(await screen.findByTestId("order-unconfirmed")).toHaveTextContent("We couldn't confirm your order yet. It may already be with the kitchen");
+      expect(screen.queryByRole("alert")).toBeNull(); // not an error
+      expect(screen.queryByRole("button", { name: "Place order" })).toBeNull(); // no way to place it a second time
+      expect(orderPosts()).toHaveLength(4);
+      expect(navigate).not.toHaveBeenCalled();
+
+      // The guest refreshes: the page still knows the order is unconfirmed.
+      cleanup();
+      inStore(<GuestCheckoutScreen navigate={navigate} timing={fast} />);
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Check order status" }));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1`));
+      const posts = orderPosts();
+      expect(posts).toHaveLength(5);
+      expect(new Set(posts.map((p) => p.headers["Idempotency-Key"])).size).toBe(1);
+      for (const p of posts) expect(p.body).toEqual(posts[0].body);
+      expect(orders.size).toBe(1);
+      expect(pendingSubmission(TOKEN)).toBeNull();
+    });
+
+    it("a genuine refusal is a clear error, not retried; after a lost answer, a refusal on the replay is final too", async () => {
+      seedCart([line({})]);
+      const soldOut = { status: 422, error: { code: "ValidationError", message: "Item 1: Masala Dosa is sold out at this outlet. Please update your cart." } };
+      let orders = keyedServer(() => soldOut);
+      await ready(() => undefined, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
+      expect(orderPosts()).toHaveLength(1);
+      expect(orders.size).toBe(0);
+      expect(screen.queryByTestId("order-unconfirmed")).toBeNull();
+      expect(pendingSubmission(TOKEN)).toBeNull();
+
+      cleanup();
+      calls = [];
+      orders = keyedServer((n) => (n === 0 ? { status: 502, error: { code: "HTTP502", message: "Bad gateway" } } : soldOut));
+      await ready(() => undefined, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
+      expect(orderPosts()).toHaveLength(2);
+      expect(orders.size).toBe(0);
+      expect(screen.queryByTestId("order-unconfirmed")).toBeNull();
+      expect(await screen.findByRole("button", { name: "Place order" })).toBeInTheDocument();
+    });
   });
 
   it("a price that changed after the quote: shows the new total, re-prices the cart, places nothing until the guest confirms", async () => {

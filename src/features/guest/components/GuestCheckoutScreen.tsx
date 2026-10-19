@@ -6,7 +6,8 @@ import { request, describeError, ApiError } from "@/lib/api/client";
 import { formatMoney } from "@/lib/format";
 import { cartFingerprint, toOrderItems } from "@/features/pos/cart";
 import { createSubmitGuard } from "@/features/pos/submitGuard";
-import { clearSubmission, loadReferral, orderUrl, rememberOrder, saveCart, saveCoupon, saveNotice, saveReferral, submissionKey } from "@/features/guest/session";
+import { clearSubmission, loadReferral, markSubmissionPending, orderUrl, pendingSubmission, rememberOrder, saveCart, saveCoupon, saveNotice, saveReferral, settleSubmission, submissionKey, type PendingSubmission } from "@/features/guest/session";
+import { ORDER_ATTEMPT_TIMEOUT_MS, submitWithReconcile, type SubmitOutcome, type SubmitPhase } from "@/features/guest/orderSubmit";
 import { useServerQuote, useStorefront } from "@/features/guest/storefront";
 import { OfflineBanner, TopBar } from "@/features/guest/components/Chrome";
 import { Totals } from "@/features/guest/components/GuestCartScreen";
@@ -16,6 +17,9 @@ import { SfIcon } from "@/features/guest/components/SfIcon";
 import { guestOnlinePaymentCopy } from "@/features/guest/paymentCopy";
 
 type PayMethod = "CASH" | "ONLINE";
+type PlacedOrder = { orderId: string; ref: string; accessKey: string; coupon?: { applied: boolean; message?: string }; referral?: { attached: boolean; message?: string } };
+/** Test hook: shorter waits than a real phone on a slow network needs. */
+export type OrderSubmitTiming = { attemptTimeoutMs?: number; slowAfterMs?: number; delaysMs?: number[] };
 
 /** "98765 43210" / "+91 98765-43210" → "9876543210" (same rule as the server). */
 export function normalizePhone(raw: string): string {
@@ -38,10 +42,13 @@ export const phoneValid = (raw: string) => !raw.trim() || /^\+?\d{10,15}$/.test(
 /**
  * Checkout: table, order summary (server-priced), optional name / phone, cash
  * or online. Placing the order is one idempotent request (a double tap or a
- * refresh replays the same order). Online payment then opens on the order page,
- * where the payment gateway is allowed to run.
+ * refresh replays the same order). A slow or lost answer is never shown as a
+ * failure: the same request is replayed to learn what happened (orderSubmit.ts),
+ * and if that stays unknown the guest gets "Check order status", not an error.
+ * Online payment then opens on the order page, where the payment gateway is
+ * allowed to run.
  */
-export function GuestCheckoutScreen({ navigate = (url: string) => window.location.assign(url) }: { navigate?: (url: string) => void }) {
+export function GuestCheckoutScreen({ navigate = (url: string) => window.location.assign(url), timing }: { navigate?: (url: string) => void; timing?: OrderSubmitTiming }) {
   const { token, cart, cartReady, data, base, estimate, dispatch, refreshMenu, couponCode, setCouponCode } = useStorefront();
   const online = data.payment.online;
   const [method, setMethod] = useState<PayMethod>("CASH");
@@ -55,6 +62,10 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
   const [touched, setTouched] = useState(false);
   const [placing, setPlacing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<SubmitPhase | null>(null);
+  // An order request went out but its outcome is unknown (slow / lost answer), possibly from before a refresh.
+  const [unconfirmed, setUnconfirmed] = useState(false);
+  useEffect(() => setUnconfirmed(pendingSubmission(token) !== null), [token]);
   const guard = useRef(createSubmitGuard());
   const phoneId = useId();
   const phoneOk = phoneValid(phone);
@@ -65,7 +76,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
 
   async function place() {
     setTouched(true);
-    if (!cart.lines.length || !phoneOk || placing) return;
+    if (!cart.lines.length || !phoneOk || placing || unconfirmed) return;
     setError(null);
     setPlacing(true);
     const customer = name.trim() || phone.trim() ? { ...(name.trim() ? { name: name.trim().slice(0, 60) } : {}), ...(phone.trim() ? { phone: normalizePhone(phone) } : {}) } : undefined;
@@ -76,23 +87,50 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     const marketingOptIn = withPhone && optIn ? true : undefined;
     const fp = cartFingerprint(cart, JSON.stringify([customer ?? null, payMethod, coupon ?? null, referralCode ?? null, marketingOptIn ?? null]));
     // The key survives a refresh (sessionStorage): resubmitting the same order replays it.
-    const result = await guard.current.run(fp, () =>
-      request<{ orderId: string; ref: string; accessKey: string; coupon?: { applied: boolean; message?: string }; referral?: { attached: boolean; message?: string } }>(`/api/qr/t/${encodeURIComponent(token)}/orders`, {
-        method: "POST",
-        idempotencyKey: submissionKey(token, fp),
-        // The total the guest was shown, before any coupon (the coupon is applied once the order exists):
-        // the server prices the order itself and refuses (409, nothing created) if its price differs.
-        body: {
-          items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod,
-          ...(quote ? guardTotal(quote) : {}),
-          ...(coupon ? { couponCode: coupon } : {}), ...(referralCode ? { referralCode } : {}), ...(marketingOptIn ? { marketingOptIn } : {}),
-        },
-      })
-    );
+    // The total the guest was shown, before any coupon (the coupon is applied once the order exists):
+    // the server prices the order itself and refuses (409, nothing created) if its price differs.
+    // JSON round trip: exactly what is sent, and what a later "Check order status" replays.
+    const body = JSON.parse(JSON.stringify({
+      items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod,
+      ...(quote ? guardTotal(quote) : {}),
+      ...(coupon ? { couponCode: coupon } : {}), ...(referralCode ? { referralCode } : {}), ...(marketingOptIn ? { marketingOptIn } : {}),
+    })) as Record<string, unknown>;
+    await submit({ fingerprint: fp, key: submissionKey(token, fp), body });
+  }
+
+  /** "Check order status": the same request again (same key, same body) — returns the order if it was placed. */
+  async function checkAgain() {
+    const p = pendingSubmission(token);
+    if (!p || placing) return;
+    setError(null);
+    setPlacing(true);
+    await submit(p);
+  }
+
+  async function submit(pending: PendingSubmission) {
+    // Remembered before sending: a refresh while the answer is outstanding can still recover the order.
+    markSubmissionPending(token, pending);
+    setUnconfirmed(false);
+    const result = await guard.current.run(pending.fingerprint, async () => {
+      const outcome = await submitWithReconcile(
+        () => request<PlacedOrder>(`/api/qr/t/${encodeURIComponent(token)}/orders`, { method: "POST", idempotencyKey: pending.key, body: pending.body, timeoutMs: timing?.attemptTimeoutMs ?? ORDER_ATTEMPT_TIMEOUT_MS }),
+        { onPhase: setPhase, delaysMs: timing?.delaysMs, slowAfterMs: timing?.slowAfterMs }
+      );
+      if (outcome.status !== "ok") throw outcome;
+      return outcome.value;
+    });
+    setPhase(null);
     if (result.status === "busy") return;
     if (result.status === "error") {
       setPlacing(false);
-      const e = result.error;
+      const outcome = result.error as SubmitOutcome<PlacedOrder>;
+      if (outcome.status === "unknown") {
+        // Not a failure: the order may be in the kitchen already. Keep the request and offer a safe check.
+        setUnconfirmed(true);
+        return;
+      }
+      settleSubmission(token);
+      const e = outcome.status === "failed" ? outcome.error : outcome;
       if (e instanceof ApiError && e.code === "PriceChanged") {
         const now = (e.details as { total?: unknown } | undefined)?.total;
         setError(typeof now === "string" ? `${e.message} New total: ${formatMoney(now)}.` : e.message);
@@ -113,16 +151,16 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     // The order never fails because of a code; if one was not used, the order page says why.
     const notices = [placed.coupon && !placed.coupon.applied ? `Coupon not applied: ${placed.coupon.message ?? "this code can't be used here."}` : null, placed.referral && !placed.referral.attached ? `Referral not used: ${placed.referral.message ?? "this code can't be used."}` : null].filter(Boolean);
     if (notices.length) saveNotice(placed.orderId, notices.join(" "));
-    if (referralCode) saveReferral(null);
+    if (pending.body.referralCode) saveReferral(null);
     saveCoupon(token, null);
     setCouponCode(null);
     saveCart(token, { ...cart, lines: [], notes: "" });
     dispatch({ type: "clear" });
     // A full page load: the order page is where the payment gateway's script is allowed (CSP).
-    navigate(`${orderUrl(placed.orderId, placed.accessKey)}&new=1${payMethod === "ONLINE" ? "&pay=1" : ""}`);
+    navigate(`${orderUrl(placed.orderId, placed.accessKey)}&new=1${pending.body.paymentMethod === "ONLINE" ? "&pay=1" : ""}`);
   }
 
-  if (cartReady && cart.lines.length === 0 && !placing) {
+  if (cartReady && cart.lines.length === 0 && !placing && !unconfirmed) {
     return (
       <div>
         <TopBar />
@@ -275,23 +313,47 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
             <Alert tone="bad" role="alert">{error}</Alert>
           </div>
         )}
+        <div role="status" aria-live="polite">
+          {placing && (phase === "slow" || phase === "confirming") && (
+            <div style={{ marginTop: 14 }}>
+              <Alert tone="info">
+                {phase === "slow"
+                  ? "Still placing your order — the connection to the café is slow. Please keep this page open."
+                  : "Confirming your order with the café… Please keep this page open; your order won't be placed twice."}
+              </Alert>
+            </div>
+          )}
+          {unconfirmed && !placing && (
+            <div style={{ marginTop: 14 }} data-testid="order-unconfirmed">
+              <Alert tone="warn">
+                We couldn&apos;t confirm your order yet. It may already be with the kitchen, so please don&apos;t order it again — check its status in a moment, or ask a member of staff.
+              </Alert>
+            </div>
+          )}
+        </div>
 
         <div className="sf-sticky-cta">
           <div className="sf-total-line">
             <span>Total</span>
             <b data-testid="checkout-total">{formatMoney(total)}</b>
           </div>
-          <button type="button" className="sf-btn sf-btn-primary sf-btn-lg sf-btn-block" onClick={() => void place()} disabled={disabled} aria-disabled={disabled}>
-            {placing ? (
-              <>
-                <Spinner /> Placing your order…
-              </>
-            ) : payMethod === "ONLINE" ? (
-              `Place order & pay ${formatMoney(total)}`
-            ) : (
-              "Place order"
-            )}
-          </button>
+          {unconfirmed && !placing ? (
+            <button type="button" className="sf-btn sf-btn-primary sf-btn-lg sf-btn-block" onClick={() => void checkAgain()}>
+              Check order status
+            </button>
+          ) : (
+            <button type="button" className="sf-btn sf-btn-primary sf-btn-lg sf-btn-block" onClick={() => void place()} disabled={disabled} aria-disabled={disabled}>
+              {placing ? (
+                <>
+                  <Spinner /> {phase === "confirming" ? "Confirming your order…" : "Placing your order…"}
+                </>
+              ) : payMethod === "ONLINE" ? (
+                `Place order & pay ${formatMoney(total)}`
+              ) : (
+                "Place order"
+              )}
+            </button>
+          )}
         </div>
       </main>
     </div>

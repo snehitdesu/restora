@@ -76,6 +76,29 @@ export function clearSubmission(token: string, store: KV | null = session()) {
   write(store, SUBMIT(token), null);
 }
 
+/**
+ * An order request that was sent but whose outcome is not known yet (slow or lost
+ * response). The exact body and key are kept, so "Check order status" — even after
+ * a refresh, even if the cart was edited meanwhile — replays the SAME request: the
+ * server returns the order if it was placed, and places it at most once otherwise.
+ */
+export type PendingSubmission = { fingerprint: string; key: string; body: Record<string, unknown> };
+
+export function markSubmissionPending(token: string, pending: PendingSubmission, store: KV | null = session()) {
+  write(store, SUBMIT(token), { fingerprint: pending.fingerprint, key: pending.key, pending: { body: pending.body } });
+}
+export function pendingSubmission(token: string, store: KV | null = session()): PendingSubmission | null {
+  const saved = read<{ fingerprint?: unknown; key?: unknown; pending?: { body?: unknown } }>(store, SUBMIT(token));
+  const body = saved?.pending?.body;
+  if (!saved || typeof saved.fingerprint !== "string" || typeof saved.key !== "string" || !body || typeof body !== "object") return null;
+  return { fingerprint: saved.fingerprint, key: saved.key, body: body as Record<string, unknown> };
+}
+/** The server gave a definite answer that created nothing: keep the key (same cart → same key), drop the pending marker. */
+export function settleSubmission(token: string, store: KV | null = session()) {
+  const p = pendingSubmission(token, store);
+  if (p) write(store, SUBMIT(token), { fingerprint: p.fingerprint, key: p.key });
+}
+
 export type RememberedOrder = { orderId: string; key: string; token: string; ref: string; at: string };
 
 export function rememberedOrders(store: KV | null = local()): RememberedOrder[] {
