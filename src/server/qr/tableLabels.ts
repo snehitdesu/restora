@@ -382,18 +382,36 @@ function assertWritablePack(pack: TableQrPack): void {
   }
 }
 
+/**
+ * Rename, retrying briefly when Windows reports a transient lock: antivirus or
+ * the search indexer can hold a handle on files that were just written, and a
+ * directory rename then fails with EPERM / EBUSY / EACCES for a moment.
+ */
+export function renameWithRetry(from: string, to: string, attempts = 8): void {
+  for (let i = 1; ; i++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (i >= attempts || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * i); // 25, 50, … ms
+    }
+  }
+}
+
 /** Swap a finished temp directory into place. A failed write never publishes a partial directory. */
 function publishDir(tmp: string, abs: string): void {
   if (!fs.existsSync(abs)) {
-    fs.renameSync(tmp, abs);
+    renameWithRetry(tmp, abs);
     return;
   }
   const backup = `${tmp}.previous`;
-  fs.renameSync(abs, backup);
+  renameWithRetry(abs, backup);
   try {
-    fs.renameSync(tmp, abs);
+    renameWithRetry(tmp, abs);
   } catch (e) {
-    try { fs.renameSync(backup, abs); } catch { /* the previous directory remains at the backup path */ }
+    try { renameWithRetry(backup, abs); } catch { /* the previous directory remains at the backup path */ }
     throw e;
   }
   fs.rmSync(backup, { recursive: true, force: true });

@@ -4,6 +4,8 @@
  * URL, and a local sheet is never marked ready to print.
  */
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { prisma } from "@/server/db/client";
@@ -21,6 +23,7 @@ import {
   normalizeQrOrigin,
   parseQrArgs,
   qrBaseUrlProblem,
+  renameWithRetry,
   writeTableQrFiles,
 } from "@/server/qr/tableLabels";
 import { loadCafeTableRows, runQrGenerate } from "../../scripts/qr/generate-table-qrs";
@@ -236,6 +239,37 @@ describe("generated table QR output", () => {
       expect(fs.readdirSync(dir).filter((name) => name.endsWith(".svg")).sort()).toEqual(CAFE_TABLE_CODES.map((code) => `${code}.svg`));
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a directory swap survives a brief Windows lock (EPERM/EBUSY) but not a lasting one or another error", () => {
+    const err = (code: string) => Object.assign(new Error(code), { code });
+    const real = fs.renameSync;
+    let failures = 2;
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+      if (failures-- > 0) throw err(failures ? "EPERM" : "EBUSY");
+      return real(from, to);
+    }) as typeof fs.renameSync);
+    try {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qr-rename-"));
+      fs.mkdirSync(path.join(dir, "a"));
+      renameWithRetry(path.join(dir, "a"), path.join(dir, "b"));
+      expect(fs.existsSync(path.join(dir, "b"))).toBe(true);
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      spy.mockClear();
+      spy.mockImplementation(() => { throw err("EPERM"); });
+      expect(() => renameWithRetry(path.join(dir, "b"), path.join(dir, "c"), 3)).toThrow("EPERM");
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      spy.mockClear();
+      spy.mockImplementation(() => { throw err("ENOENT"); });
+      expect(() => renameWithRetry(path.join(dir, "b"), path.join(dir, "c"))).toThrow("ENOENT");
+      expect(spy).toHaveBeenCalledTimes(1); // not retried
+      spy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    } finally {
+      spy.mockRestore();
     }
   });
 
