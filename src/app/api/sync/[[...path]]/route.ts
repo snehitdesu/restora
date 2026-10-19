@@ -14,6 +14,7 @@ const feedQuery = z.object({
   take: z.coerce.number().int().positive().max(100).optional(),
   backfillHours: z.coerce.number().int().positive().max(24 * 14).optional(),
   includeActive: z.enum(["0", "1"]).optional(),
+  rewindSeconds: z.coerce.number().int().min(0).max(300).optional(),
 });
 
 /** Desktop sync API: pairing/enrollment, scoped feed of online orders, idempotent actions. */

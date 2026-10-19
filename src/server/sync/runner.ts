@@ -25,6 +25,7 @@ import type { SyncOpInput, SyncOpResult, WireFeed } from "@/lib/sync/wire";
 const PAGE_SIZE = 50;
 const MAX_PAGES_PER_CYCLE = 20;
 const OPS_PER_CYCLE = 50;
+const FEED_REWIND_SECONDS = 30;
 /** Operation retry spacing: 5 s, 10 s, 20 s … capped at 5 minutes. */
 export const opBackoffMs = (attempts: number) => Math.min(5_000 * 2 ** Math.max(0, attempts - 1), 300_000);
 
@@ -98,7 +99,11 @@ async function pullFeed(db: PrismaClient, client: CloudClient, target: MirrorTar
   for (let page = 0; page < MAX_PAGES_PER_CYCLE; page++) {
     const q = new URLSearchParams({ outletId: target.cloudOutletId, take: String(PAGE_SIZE) });
     if (cursor) q.set("cursor", cursor);
-    if (page === 0) q.set("includeActive", "1");
+    if (page === 0) {
+      q.set("includeActive", "1");
+      // Re-read a short window behind the saved position (late-committing orders); unchanged revisions are skipped.
+      if (cursor) q.set("rewindSeconds", String(FEED_REWIND_SECONDS));
+    }
     const feed = await client.get<WireFeed>(`/api/sync/orders?${q}`, { background: true });
     let failed: unknown = null;
     for (const wire of feed.orders) {

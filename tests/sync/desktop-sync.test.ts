@@ -159,6 +159,21 @@ describe("mirroring a QR order (scenarios 3, 4, 5, 6, 7, 14)", () => {
     expect(a).toBe(b);
   });
 
+  it("still imports an order that committed late behind the saved feed position, exactly once", async () => {
+    await guestOrder();
+    await cycle();
+    const cursorAt = new Date((await link()).cursor!.split("|")[0]!);
+    const late = await guestOrder();
+    // Stamped before the saved position, visible only now, and already finished (so no "running orders" re-offer).
+    await prisma.order.update({ where: { id: late.orderId }, data: { status: "PAID", updatedAt: new Date(cursorAt.getTime() - 5_000) } });
+    const r = await cycle();
+    expect(r.state).toBe("ONLINE");
+    expect(await prisma.order.count({ where: { organizationId: desk.orgId, externalRef: late.orderId } })).toBe(1);
+    await cycle();
+    expect(await prisma.order.count({ where: { organizationId: desk.orgId, externalRef: late.orderId } })).toBe(1);
+    expect(new Date((await link()).cursor!.split("|")[0]!).getTime()).toBeGreaterThanOrEqual(cursorAt.getTime());
+  });
+
   it("shows an order it cannot map, but refuses to accept it until the menu matches", async () => {
     await connectCloud(await ownerCtx(desk2Owner), { baseUrl: CLOUD_ORIGIN, email: syncUser.email, password: PASSWORD, installId: "desk2-install-bbbbbbbb" }, prisma, fc.transport);
     const placed = await guestOrder([{ menuItemId: cloud.brownie, qty: 1 }]);

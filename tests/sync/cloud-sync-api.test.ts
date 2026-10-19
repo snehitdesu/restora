@@ -132,6 +132,25 @@ describe("feed: scoped, incremental, minimal (scenarios 3, 8, 10, 20)", () => {
     expect((await call(Sync, "GET", `orders?outletId=${w.outletId}&cursor=garbage`, { session: cashier })).status).toBe(422);
   });
 
+  it("rewindSeconds re-offers an order that committed late behind the cursor, so a finished order is never skipped", async () => {
+    await guestOrder();
+    const caughtUp = await feed(cashier, "&backfillHours=1");
+    const cursor = caughtUp.nextCursor!;
+    const cursorAt = new Date(cursor.split("|")[0]!);
+    // An order stamped before the cursor but committed after that poll (a slow transaction), already finished.
+    const late = await guestOrder();
+    await prisma.order.update({ where: { id: late.orderId }, data: { status: "PAID", updatedAt: new Date(cursorAt.getTime() - 5_000) } });
+
+    const plain = await feed(cashier, `&cursor=${encodeURIComponent(cursor)}&includeActive=1`);
+    expect(plain.orders.map((o) => o.id)).not.toContain(late.orderId); // the hole the rewind closes
+    const rewound = await feed(cashier, `&cursor=${encodeURIComponent(cursor)}&includeActive=1&rewindSeconds=30`);
+    expect(rewound.orders.map((o) => o.id)).toContain(late.orderId);
+    expect(rewound.orders.every((o) => o.outletId === w.outletId)).toBe(true);
+    // The rewind never moves the position backwards and is bounded.
+    expect(new Date(rewound.nextCursor!.split("|")[0]!).getTime()).toBeGreaterThanOrEqual(cursorAt.getTime());
+    expect((await call(Sync, "GET", `orders?outletId=${w.outletId}&cursor=${encodeURIComponent(cursor)}&rewindSeconds=301`, { session: cashier })).status).toBe(422);
+  });
+
   it("includeActive reloads only the authorized outlet: sister-outlet and other-org running orders stay out", async () => {
     const own = await guestOrder();
     const sisterId = (await prisma.outlet.create({ data: { organizationId: w.orgId, code: `SIB${RUN.slice(-4)}`, name: "Sister feed" } })).id;

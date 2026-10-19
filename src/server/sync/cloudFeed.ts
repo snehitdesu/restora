@@ -29,6 +29,7 @@ const FEED_MAX_TAKE = 100;
 const ACTIVE_CAP = 200;
 const DEFAULT_BACKFILL_HOURS = 48;
 const MAX_BACKFILL_HOURS = 24 * 14;
+const MAX_REWIND_SECONDS = 300;
 
 const ORDER_INCLUDE = {
   customer: { select: { name: true } },
@@ -120,7 +121,7 @@ export function decodeCursor(raw: string): { at: Date; id: string } {
   return { at, id };
 }
 
-export type FeedQuery = { outletId: string; cursor?: string; take?: number; backfillHours?: number; includeActive?: boolean };
+export type FeedQuery = { outletId: string; cursor?: string; take?: number; backfillHours?: number; includeActive?: boolean; rewindSeconds?: number };
 
 export async function listOrderFeed(db: PrismaClient, ctx: AccessContext, q: FeedQuery): Promise<WireFeed> {
   assertOutletAccess(ctx, q.outletId);
@@ -130,8 +131,13 @@ export async function listOrderFeed(db: PrismaClient, ctx: AccessContext, q: Fee
   const serverTime = new Date();
 
   let after: { at: Date; id: string };
-  if (q.cursor) after = decodeCursor(q.cursor);
-  else {
+  const from = q.cursor ? decodeCursor(q.cursor) : null;
+  if (from) {
+    // updatedAt is stamped when a transaction writes, not when it commits: re-reading a short window behind the
+    // cursor picks up an order that became visible after a later-stamped one was already delivered.
+    const rewindMs = Math.min(Math.max(Math.trunc(q.rewindSeconds ?? 0), 0), MAX_REWIND_SECONDS) * 1000;
+    after = rewindMs ? { at: new Date(from.at.getTime() - rewindMs), id: "" } : from;
+  } else {
     const hours = Math.min(Math.max(q.backfillHours ?? DEFAULT_BACKFILL_HOURS, 1), MAX_BACKFILL_HOURS);
     after = { at: new Date(serverTime.getTime() - hours * 3_600_000), id: "" };
   }
@@ -156,7 +162,10 @@ export async function listOrderFeed(db: PrismaClient, ctx: AccessContext, q: Fee
     : [];
   rows.sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime() || (a.id < b.id ? -1 : 1));
   const last = pageRows.at(-1);
-  return { orders: rows.map(toWireOrder), nextCursor: last ? encodeCursor(last.updatedAt, last.id) : (q.cursor ?? null), hasMore, serverTime: serverTime.toISOString() };
+  // A rewound page that ends inside the re-read window must not move the position backwards.
+  const behind = !hasMore && from && last && (last.updatedAt.getTime() < from.at.getTime() || (last.updatedAt.getTime() === from.at.getTime() && last.id < from.id));
+  const nextCursor = last && !behind ? encodeCursor(last.updatedAt, last.id) : (q.cursor ?? null);
+  return { orders: rows.map(toWireOrder), nextCursor, hasMore, serverTime: serverTime.toISOString() };
 }
 
 export async function getSyncOrder(db: PrismaClient, ctx: AccessContext, orderId: string): Promise<WireOrder> {
