@@ -338,10 +338,21 @@ const addItemSchema = z.object({
 });
 export type AddItemInput = z.input<typeof addItemSchema>;
 
-export function addOrderItem(ctx: AccessContext, orderId: string, input: AddItemInput, db: Client = prisma) {
+/**
+ * Add one line. Batch callers inside one transaction (placeOrder, addOrderRound) pass the order they already
+ * loaded and `recompute: false`, then recompute the totals once: on a remote database every statement is a
+ * round trip, and re-reading the order and re-totalling it per line cost several per line.
+ */
+export function addOrderItem(
+  ctx: AccessContext,
+  orderId: string,
+  input: AddItemInput,
+  db: Client = prisma,
+  opts: { order?: { id: string; organizationId: string; outletId: string; status: string }; recompute?: boolean } = {},
+) {
   const data = addItemSchema.parse(input);
   return orderTx(db, orderId, async (tx) => {
-    const order = await tx.order.findUnique({ where: { id: orderId } });
+    const order = opts.order?.id === orderId ? opts.order : await tx.order.findUnique({ where: { id: orderId } });
     if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
     assertOutletAccess(ctx, order.outletId);
     assertCan(ctx, "order.modify", order.outletId);
@@ -393,7 +404,7 @@ export function addOrderItem(ctx: AccessContext, orderId: string, input: AddItem
         modifiers: modifiers.length ? { create: modifiers.map((m) => ({ name: m.name, priceDelta: money(m.priceDelta), optionId: m.optionId })) } : undefined,
       },
     });
-    await recomputeTotals(tx, orderId);
+    if (opts.recompute !== false) await recomputeTotals(tx, orderId);
     return item;
   });
 }
@@ -540,7 +551,8 @@ export async function addOrderRound(ctx: AccessContext, orderId: string, input: 
         assertOutletAccess(ctx, order.outletId);
         assertCan(ctx, "order.modify", order.outletId);
         // addOrderItem re-checks the status (no lines on BILLED / PAID / CANCELLED / REFUNDED orders).
-        for (const line of data.items) await addOrderItem(ctx, orderId, line, tx);
+        for (const line of data.items) await addOrderItem(ctx, orderId, line, tx, { order, recompute: false });
+        await recomputeTotals(tx, orderId);
         let kots: Array<{ number: number }> = [];
         if (data.fire) {
           if (order.status === "OPEN") {
@@ -743,7 +755,14 @@ export type PlacedOrderHook = (tx: Prisma.TransactionClient, order: { id: string
  * does (the guest flow's audit row and staff notification) commit or roll back
  * with it.
  */
-export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db: Client = prisma, opts: { afterCreate?: PlacedOrderHook } = {}) {
+export async function placeOrder(
+  ctx: AccessContext,
+  input: PlaceOrderInput,
+  db: Client = prisma,
+  // knownNew: the caller looked the key up in this request and found no order, so the lookup is not repeated
+  // (a concurrent original still resolves through the unique-key conflict below).
+  opts: { afterCreate?: PlacedOrderHook; knownNew?: boolean } = {},
+) {
   const data = placeSchema.parse(input);
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "order.create", data.outletId);
@@ -756,14 +775,15 @@ export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db:
     replayOrConflict(prior, ctx, data.outletId, hash!);
     return { ...prior, replayed: true };
   };
-  if (data.idempotencyKey) {
+  if (data.idempotencyKey && !opts.knownNew) {
     const prior = await replay();
     if (prior) return prior;
   }
   try {
     return await runInTx(db, async (tx) => {
       const order = await createOrderTx(ctx, orderInput, hash, tx);
-      for (const item of items) await addOrderItem(ctx, order.id, item as AddItemInput, tx);
+      for (const item of items) await addOrderItem(ctx, order.id, item as AddItemInput, tx, { order, recompute: false });
+      if (items.length) await recomputeTotals(tx, order.id);
       if (submit) await submitOrder(ctx, order.id, tx);
       const placed = await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: placedInclude });
       if (opts.afterCreate) await opts.afterCreate(tx, placed);

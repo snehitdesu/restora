@@ -457,9 +457,12 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
       if (!money(total).eq(D(data.expectedTotal))) throw new GuestPriceChangedError(money(total).toFixed(2));
     }
   };
+  // A new order skips placeOrder's own key lookup (one round trip less); a replay goes straight to it.
+  let knownNew = false;
   if (!(await placedUnderKey())) {
     try {
       await checkNewOrder();
+      knownNew = true;
     } catch (e) {
       // A replay's original can commit between the lookup above and these checks (and then count as one
       // more waiting order): the refusal is only true while the key still has no order.
@@ -484,6 +487,7 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
     // a failed dispatch creates nothing, and a replayed request never dispatches again.
     submit: dispatch,
   }, db, {
+    knownNew,
     // Inside the order's transaction (queued with every other SQLite write):
     // the audit row and the staff alert exist exactly when the order does. A
     // separate transaction afterwards could time out under load and answer 500
