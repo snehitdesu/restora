@@ -9,6 +9,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api/client";
+import { BACKGROUND_HEADER } from "@/constants/auth";
 import { useAction, useQuery } from "@/lib/hooks/useApi";
 import { useShell } from "@/lib/shellContext";
 import { formatDateTime, humanize } from "@/lib/format";
@@ -179,7 +180,10 @@ export function CampaignDetailScreen({ id }: { id: string }) {
   const status = detail.data?.campaign.status;
   useEffect(() => {
     if (status !== "SCHEDULED" && status !== "SENDING") return;
-    const t = setInterval(() => detail.reload(), 8000);
+    // Background refresh while it sends: watching a campaign is not activity for the idle timeout.
+    const t = setInterval(() => {
+      api<Detail>(`/api/growth/campaigns/${id}`, { headers: { [BACKGROUND_HEADER]: "1" } }).then((d) => detail.setData(() => d)).catch(() => undefined);
+    }, 8000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status]);

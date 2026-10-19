@@ -22,6 +22,7 @@ import * as Master from "@/app/api/master/[[...path]]/route";
 import * as Procurement from "@/app/api/procurement/[[...path]]/route";
 import * as Finance from "@/app/api/finance/[[...path]]/route";
 import * as System from "@/app/api/system/[[...path]]/route";
+import * as Kitchen from "@/app/api/kitchen/[[...path]]/route";
 import { POST as reauthRoute } from "@/app/api/auth/reauth/route";
 import { logout } from "@/server/auth/login";
 import { POST as changeRoute } from "@/app/api/auth/password/change/route";
@@ -424,6 +425,84 @@ describe("idle timeout", () => {
     expect((await session(token)).lastActivityAt!.getTime()).toBe(before); // ...but the poll did not count as activity
     await setLast(token, idleMs() + 1000);
     expect((await call(Orders, "GET", "", { token, query: { outletId: outletA }, headers: { [BACKGROUND_HEADER]: "1" } })).status).toBe(401);
+  });
+
+  describe("kitchen display exemption (GET /api/kitchen/kots only, kitchen-only accounts only)", () => {
+    let kitchenId: string, managerId: string, mixedId: string;
+    beforeAll(async () => {
+      kitchenId = await mkUser(orgId, "kds", "KITCHEN", outletA);
+      managerId = await mkUser(orgId, "kds-manager", "MANAGER", outletA);
+      mixedId = await mkUser(orgId, "kds-mixed", "KITCHEN", outletA);
+      await prisma.membership.create({ data: { organizationId: orgId, userId: mixedId, outletId: outletA, role: "CASHIER" } });
+    });
+    const kds = (token: string, headers: Record<string, string> = { [BACKGROUND_HEADER]: "1" }) => call(Kitchen, "GET", "kots", { token, query: { outletId: outletA }, headers });
+
+    it("a kitchen-only account's ticket poll keeps the screen signed in through service", async () => {
+      const token = await login(kitchenId);
+      await setLast(token, idleMs() - 60_000);
+      expect((await kds(token)).status).toBe(200);
+      expect(Date.now() - (await session(token)).lastActivityAt!.getTime()).toBeLessThan(ACTIVITY_WRITE_INTERVAL_MS);
+      await setLast(token, idleMs() - 60_000); // another 14 quiet minutes: still alive because the board kept polling
+      expect((await kds(token)).status).toBe(200);
+      const before = (await session(token)).lastActivityAt!.getTime();
+      expect((await kds(token)).status).toBe(200); // throttled like any activity: at most one write a minute
+      expect((await session(token)).lastActivityAt!.getTime()).toBe(before);
+    });
+
+    it("the KDS poll never refreshes a manager's (or a mixed-role account's) idle timer, with or without the background header", async () => {
+      for (const id of [managerId, mixedId, ownerId]) {
+        const token = await login(id);
+        await setLast(token, idleMs() - 60_000);
+        const before = (await session(token)).lastActivityAt!.getTime();
+        expect((await kds(token)).status).toBe(200);
+        expect((await kds(token, {})).status).toBe(200); // an old client without the header gets no exemption either
+        expect((await session(token)).lastActivityAt!.getTime()).toBe(before);
+        await setLast(token, idleMs() + 1000);
+        expect((await kds(token)).status).toBe(401);
+        expect((await session(token)).revokedAt).not.toBeNull();
+      }
+    });
+
+    it("the exemption is confined to the ticket poll: other kitchen polling and other APIs follow the normal rules", async () => {
+      const token = await login(kitchenId);
+      await setLast(token, idleMs() - 60_000);
+      const before = (await session(token)).lastActivityAt!.getTime();
+      expect((await call(Kitchen, "GET", "stations", { token, query: { outletId: outletA }, headers: { [BACKGROUND_HEADER]: "1" } })).status).toBe(200);
+      expect((await session(token)).lastActivityAt!.getTime()).toBe(before);
+      await setLast(token, idleMs() + 1000);
+      expect((await kds(token)).status).toBe(401); // an idle kitchen session is not revived by the poll
+      const s = await session(token);
+      expect(s.revokedAt).not.toBeNull();
+      expect(await prisma.auditLog.findFirst({ where: { entityId: s.id, action: "SESSION_EXPIRED" }, select: { actorId: true } })).toEqual({ actorId: kitchenId });
+    });
+
+    it("a kitchen session kept alive by the board cannot reach owner, staff, finance or configuration actions", async () => {
+      const token = await login(kitchenId);
+      expect((await kds(token)).status).toBe(200);
+      const owners = await prisma.membership.count({ where: { organizationId: orgId, role: "OWNER" } });
+      expect((await call(Staff, "GET", "", { token })).status).toBe(403);
+      expect((await call(Finance, "GET", "payments", { token, query: { outletId: outletA } })).status).toBe(403);
+      // Even after confirming its own password, the kitchen account has no permission for owner actions.
+      await reauth(token, "staff.manage");
+      expect((await call(Staff, "POST", "", { token, body: { name: "x", email: `x-${RUN}@sess.test`, role: "OWNER" } })).status).toBe(403);
+      await reauth(token, "backup.restore");
+      expect((await call(System, "POST", "restore-authorization", { token })).status).toBe(403);
+      expect(await prisma.membership.count({ where: { organizationId: orgId, role: "OWNER" } })).toBe(owners);
+    });
+
+    it("a deactivated kitchen account or a revoked kitchen session loses the board at once", async () => {
+      const token = await login(kitchenId);
+      expect((await kds(token)).status).toBe(200);
+      await prisma.user.update({ where: { id: kitchenId }, data: { active: false } });
+      try {
+        expect((await kds(token)).status).toBe(401);
+      } finally {
+        await prisma.user.update({ where: { id: kitchenId }, data: { active: true } });
+      }
+      const other = await login(kitchenId);
+      await logout(prisma, other);
+      expect((await kds(other)).status).toBe(401);
+    });
   });
 
   it("validateSession honours the absolute expiry independently of activity", async () => {

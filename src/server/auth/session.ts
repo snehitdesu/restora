@@ -85,6 +85,16 @@ export async function validateSession(
   return { id: session.id, userId: session.userId, reauthScope: session.reauthScope, reauthExpiresAt: session.reauthExpiresAt };
 }
 
+/**
+ * Slide the idle window of an already-validated session (same once-a-minute
+ * throttle as validateSession). Used only for the kitchen-display exemption,
+ * where the decision depends on WHO is polling, known after validation.
+ */
+export async function recordSessionActivity(db: Client, sessionId: string, now = new Date()): Promise<void> {
+  const stale = new Date(now.getTime() - ACTIVITY_WRITE_INTERVAL_MS);
+  await db.session.updateMany({ where: { id: sessionId, revokedAt: null, OR: [{ lastActivityAt: null }, { lastActivityAt: { lte: stale } }] }, data: { lastActivityAt: now } });
+}
+
 async function expireIdleSession(db: Client, sessionId: string, userId: string, now: Date) {
   const res = await db.session.updateMany({ where: { id: sessionId, revokedAt: null }, data: { revokedAt: now, reauthScope: null, reauthExpiresAt: null } });
   if (res.count !== 1) return; // a concurrent request already expired it

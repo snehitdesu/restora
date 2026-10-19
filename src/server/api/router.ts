@@ -19,7 +19,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { BACKGROUND_HEADER, SESSION_COOKIE, type ReauthScope } from "@/constants/auth";
-import { resolveFromToken, type CurrentUser } from "@/server/auth/current-user";
+import { isKitchenDisplayUser, resolveFromToken, type CurrentUser } from "@/server/auth/current-user";
+import { recordSessionActivity } from "@/server/auth/session";
 import { resolveFromDeviceToken } from "@/server/sync/device";
 import { requireFreshAuth } from "@/server/auth/reauth";
 import { prisma } from "@/server/db/client";
@@ -39,7 +40,7 @@ export type HandlerArgs = { ctx: AccessContext; user: CurrentUser; params: Recor
  * `reauth`: the route is a sensitive action and needs a fresh password
  * confirmation for that scope on the calling session (see server/auth/reauth.ts).
  */
-export type Route = { method: Method; path: string; handler: (a: HandlerArgs) => Promise<unknown>; rateLimit?: RatePolicy; reauth?: ReauthScope; /** Unauthenticated (pairing redemption / device enroll). */ public?: true; /** Rate-limit public routes by client IP instead of user id. */ rateLimitByIp?: true };
+export type Route = { method: Method; path: string; handler: (a: HandlerArgs) => Promise<unknown>; rateLimit?: RatePolicy; reauth?: ReauthScope; /** Unauthenticated (pairing redemption / device enroll). */ public?: true; /** Rate-limit public routes by client IP instead of user id. */ rateLimitByIp?: true; /** Kitchen-display poll: counts as activity only for kitchen-only accounts (isKitchenDisplayUser), whatever the headers say. */ kdsIdleExempt?: true };
 
 const MAX_BODY = 1_000_000;
 
@@ -189,7 +190,8 @@ export function createRouter(routes: Route[], opts: { resource?: string } = {}) 
       }
 
       const background = req.headers.get(BACKGROUND_HEADER) === "1";
-      let current = hit.r.public ? null : await resolveFromToken(req.cookies.get(SESSION_COOKIE)?.value, { activity: !background });
+      let current = hit.r.public ? null : await resolveFromToken(req.cookies.get(SESSION_COOKIE)?.value, { activity: !background && !hit.r.kdsIdleExempt });
+      if (current && hit.r.kdsIdleExempt && isKitchenDisplayUser(current.ctx)) await recordSessionActivity(prisma, current.session.id);
       if (!hit.r.public && !current) current = await resolveFromDeviceToken(prisma, req.headers.get("authorization"), { touch: true });
       if (!hit.r.public && !current) throw new UnauthorizedError();
       if (current) {

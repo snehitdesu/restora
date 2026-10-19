@@ -53,7 +53,8 @@ export function KitchenScreen({ outletId, canUpdate }: { outletId: string; canUp
     setTickets(null);
     const p = createPoller<KdsTicket[]>({
       intervalMs: intervalSec * 1000,
-      fetch: (signal) => api<KdsTicket[]>("/api/kitchen/kots", { query: { outletId, stationId: stationId === "all" ? undefined : stationId }, signal }),
+      // Background for everyone; the server alone grants the kitchen-display idle exemption (kitchen-only accounts).
+      fetch: (signal) => api<KdsTicket[]>("/api/kitchen/kots", { query: { outletId, stationId: stationId === "all" ? undefined : stationId }, signal, headers: { [BACKGROUND_HEADER]: "1" } }),
       onData: (data) => {
         setTickets(data);
         setError(null);

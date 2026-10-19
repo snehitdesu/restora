@@ -37,6 +37,17 @@ export async function resolveFromToken(token: string | undefined | null, opts: {
   };
 }
 
+/**
+ * Kitchen-display idle exemption: a dedicated kitchen account (every role it
+ * holds is KITCHEN) keeps its session alive by polling the KDS ticket board,
+ * so a wall-mounted screen is not signed out mid-service. Anyone holding any
+ * other role (manager, cashier, owner, …) gets no exemption: their KDS poll is
+ * background polling like any other.
+ */
+export function isKitchenDisplayUser(ctx: AccessContext): boolean {
+  return !ctx.isSuperAdmin && ctx.roles.length > 0 && ctx.roles.every((r) => r === "KITCHEN") && ctx.orgRoles.every((r) => r === "KITCHEN");
+}
+
 /** Require an authenticated caller; throws UnauthorizedError (401) otherwise. */
 export async function requireContext(): Promise<Current> {
   const current = await getCurrentContext();

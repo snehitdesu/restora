@@ -61,7 +61,7 @@ staff or a missing common workflow; **S3** nice to have. Scope: **S** ≤ 1 day,
 
 ### 5. KOT and kitchen display
 1. [O: Kitchen Display System; body copy "generate KOT"]. 2. **[S]:** one KOT per station (`src/server/services/kot.ts`), KDS (`/kitchen`, `KitchenScreen.tsx`) with Accept / Start / Ready / Served timestamps, prep-time expectations, ESC/POS KOT printing (`src/integrations/printers`). Tests: `tests/domain/kitchen-production.test.ts`, `tests/domain/kot-lifecycle-timestamps.test.ts`, `tests/db/kot-concurrency.test.ts`, `tests/ui/kitchen-timing.test.tsx`.
-3. **Confirmed [S] findings:** no per-line cancellation KOT (see row 1). The KDS ticket poll counts as user activity, so a kitchen screen never reaches the 15-minute idle sign-out (`KitchenScreen.tsx` poll without `BACKGROUND_HEADER`); this keeps an unattended KDS working but contradicts `docs/security.md` ("background polling does not extend it"). **Owner decision needed** (see `docs/production-readiness.md`).
+3. **Confirmed [S] findings:** no per-line cancellation KOT (see row 1). The KDS idle behaviour is now decided (2026-10-19): a deliberate exemption for kitchen-only accounts on the ticket poll, none for management roles — see `docs/security.md` *Kitchen display idle exemption*.
 4. **Unknown:** Petpooja KDS bump-bar / recall / colour timers.
 5–9. Row 1 covers the cancellation KOT; the idle behaviour is a security decision, not a feature.
 

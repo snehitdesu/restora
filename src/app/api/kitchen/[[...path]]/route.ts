@@ -10,7 +10,8 @@ export const runtime = "nodejs";
 // KDS: live tickets per outlet/station and their lifecycle.
 export const { GET, POST } = createRouter([
   {
-    method: "GET", path: "kots",
+    // The ticket board poll: keeps a kitchen-only account's screen signed in during service (see isKitchenDisplayUser).
+    method: "GET", path: "kots", kdsIdleExempt: true,
     handler: ({ ctx, query }) => {
       const q = z.object({ outletId: z.string().min(1), stationId: z.string().optional(), status: z.string().optional() }).parse(query);
       return listKOTs(prisma, ctx, { outletId: q.outletId, stationId: q.stationId, status: q.status ? q.status.split(",").map((s) => KOTStatus.zod.parse(s)) : undefined });
