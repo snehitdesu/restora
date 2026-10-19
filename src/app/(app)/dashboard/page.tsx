@@ -11,6 +11,7 @@ import { lowStock } from "@/server/services/inventory";
 import { businessDayRange } from "@/domain/time";
 import { formatMoney } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
+import { recoverySetupGaps, type RecoveryGap } from "@/server/auth/recoveryCodes";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Dashboard — RESTORA" };
@@ -38,6 +39,13 @@ function Stat({ label, value, hint, emphasis = false, tone = "brand" }: { label:
   );
 }
 
+const RECOVERY_GAP_TEXT: Record<RecoveryGap, string> = {
+  no_codes: "You have no unused recovery codes. Without them, or a second owner, a lost password locks you out.",
+  few_codes: "You have two or fewer unused recovery codes left. Generate a new set.",
+  email_not_verified: "Your email address is not confirmed, so password reset links cannot be emailed to you.",
+  sole_owner: "You are the only owner. Adding a second trusted owner with their own email is recommended.",
+};
+
 const unavailable = <span className="text-base font-normal text-bad-500">Unavailable</span>;
 
 export default async function DashboardPage() {
@@ -49,6 +57,8 @@ export default async function DashboardPage() {
   const has = new Set(shell.permissions);
   const today = businessDayRange(new Date(), outlet.timezone);
 
+  // Started alongside the tiles; a failure only hides the notice.
+  const recoveryGapsPending = recoverySetupGaps(prisma, shell.user.id).catch(() => [] as RecoveryGap[]);
   const [sales, openOrderCount, kitchen, openBookings, anomalies, tables, stockAlerts] = await Promise.all([
     tile(has.has("reports.view"), () => salesSummary(prisma, ctx, { outletId: outlet.id, from: today.start, to: new Date(today.end.getTime() - 1) })),
     tile(has.has("order.view"), () => countOrders(prisma, ctx, { outletId: outlet.id, active: true })),
@@ -60,6 +70,7 @@ export default async function DashboardPage() {
   ]);
 
   const availableTables = tables?.ok ? tables.value.filter((t) => t.status === "AVAILABLE").length : 0;
+  const recoveryGaps = await recoveryGapsPending;
 
   return (
     <div className="space-y-6">
@@ -87,6 +98,16 @@ export default async function DashboardPage() {
           )}
         </div>
       </div>
+
+      {recoveryGaps.length > 0 && (
+        <section aria-labelledby="recovery-h" className="rounded-xl border border-warn-200 bg-warn-50 px-4 py-3 text-sm text-warn-700">
+          <h2 id="recovery-h" className="font-semibold">Owner account recovery is not fully set up</h2>
+          <ul className="mt-1 list-disc space-y-0.5 pl-5">
+            {recoveryGaps.map((g) => <li key={g}>{RECOVERY_GAP_TEXT[g]}</li>)}
+          </ul>
+          <Link href="/account/security" className="mt-1.5 inline-block font-medium underline underline-offset-2 hover:no-underline">Open Account security</Link>
+        </section>
+      )}
 
       <section aria-label="Today" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {sales && <Stat emphasis tone="accent" label="Net sales today" value={sales.ok ? formatMoney(sales.value.netSales) : unavailable} hint={sales.ok ? `${sales.value.orders} settled orders · AOV ${formatMoney(sales.value.aov)}` : undefined} />}
