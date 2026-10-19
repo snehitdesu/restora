@@ -11,7 +11,7 @@ import { prisma } from "@/server/db/client";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
 import type { AccessContext } from "@/server/db/scope";
 import { createMenuItem } from "@/server/services/menu";
-import { createOrder, addOrderItem, submitOrder, applyDiscount, requestBill, getOrder } from "@/server/services/orders";
+import { createOrder, addOrderItem, submitOrder, applyDiscount, requestBill, getOrder, updateOrderItem } from "@/server/services/orders";
 import { transferOrderTable, mergeOrders, splitOrder } from "@/server/services/orderOps";
 import { createPayment, verifyPayment } from "@/server/services/payment";
 import { createReservation, seatReservation, completeReservation } from "@/server/services/reservations";
@@ -393,5 +393,30 @@ describe("T5. two bills, paid separately", () => {
     expect(num(first.tax)).toBe(45);
     expect(num(second.total)).toBe(126);
     expect(num(second.tax)).toBe(6);
+  });
+});
+
+// 2026-10-19: PATCH /api/orders/items/:id took a line `discount` with only order.modify, so a captain (no
+// order.discount) could discount any line, without an audit row and beyond the line's value.
+describe("T6. a line discount", () => {
+  it("T6 needs order.discount, is audited, and cannot exceed the line's value", async () => {
+    const o = await openAt(await table(), [["Masala Dosa", 2]]);
+    const line = o.itemIds[0];
+    await expect(updateOrderItem(captain, line, { discount: 50 })).rejects.toBeInstanceOf(ForbiddenError);
+    expect(num((await orderRow(o.id)).discount)).toBe(0);
+    expect(num((await prisma.orderItem.findUniqueOrThrow({ where: { id: line } })).discount)).toBe(0);
+    // A captain can still change the note (and an unchanged discount is not a discount change).
+    await updateOrderItem(captain, line, { notes: "less spicy", discount: 0 });
+
+    const cashier = member(env.orgId, "CASHIER", env.outletA);
+    await expect(updateOrderItem(cashier, line, { discount: 240.01 })).rejects.toThrow(/cannot exceed/);
+    const updated = await updateOrderItem(cashier, line, { discount: 40 });
+    expect(num(updated.subtotal)).toBe(200);
+    const audit = await prisma.auditLog.findFirstOrThrow({ where: { entityType: "OrderItem", entityId: line, action: "UPDATE" }, orderBy: { createdAt: "desc" } });
+    expect(JSON.parse(audit.before!)).toMatchObject({ discount: "0.00" });
+    expect(JSON.parse(audit.after!)).toMatchObject({ discount: "40.00" });
+    // Taking it off is also a discount change.
+    await expect(updateOrderItem(captain, line, { discount: 0 })).rejects.toBeInstanceOf(ForbiddenError);
+    await updateOrderItem(cashier, line, { discount: 0 });
   });
 });

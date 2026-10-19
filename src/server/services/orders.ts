@@ -405,12 +405,21 @@ export function updateOrderItem(
   db: Client = prisma
 ) {
   return runInTx(db, async (tx) => {
-    const item = await tx.orderItem.findUnique({ where: { id: orderItemId }, include: { order: true, kotItems: { include: { kot: { select: { status: true } } } } } });
+    const item = await tx.orderItem.findUnique({ where: { id: orderItemId }, include: { order: true, modifiers: true, kotItems: { include: { kot: { select: { status: true } } } } } });
     if (!item || item.organizationId !== ctx.organizationId) throw new NotFoundError("Order item not found");
     assertOutletAccess(ctx, item.outletId);
     assertCan(ctx, "order.modify", item.outletId);
+    // A line discount is a discount: the same permission as the order-level one (a captain may edit lines, not discount them).
+    const discountChanges = patch.discount !== undefined && !money(patch.discount).eq(D(item.discount));
+    if (discountChanges) assertCan(ctx, "order.discount", item.outletId);
     if (CLOSED_STATUSES.includes(item.order.status)) throw new ValidationError("Order is closed");
     if (patch.qty !== undefined && patch.qty <= 0) throw new ValidationError("Quantity must be positive");
+    if (patch.discount !== undefined) {
+      moneyAmount(z.number().nonnegative("Discount cannot be negative")).parse(patch.discount);
+      const qty = patch.qty !== undefined ? D(patch.qty) : D(item.qty);
+      const gross = money(dMul(qty, D(item.unitPrice).plus(item.modifiers.reduce((a, m) => a.plus(D(m.priceDelta)), D(0)))));
+      if (money(patch.discount).gt(gross)) throw new ValidationError(`A line discount cannot exceed the line's value (${gross.toFixed(2)})`);
+    }
     // The kitchen is already making what its ticket says; changing the quantity
     // here would silently diverge from the KOT. Void the ticket at the KDS instead.
     if (patch.qty !== undefined && !D(patch.qty).eq(D(item.qty)) && item.kotItems.some((k) => k.kot.status !== "CANCELLED")) {
@@ -426,6 +435,9 @@ export function updateOrderItem(
     });
     const updated = await recomputeTotals(tx, item.orderId);
     await assertTotalCoversPaymentsTx(tx, item.orderId, D(updated.total));
+    if (discountChanges) {
+      await writeAudit(tx, ctx, { action: "UPDATE", entityType: "OrderItem", entityId: orderItemId, outletId: item.outletId, before: { orderId: item.orderId, name: item.name, discount: money(item.discount).toFixed(2) }, after: { discount: money(patch.discount!).toFixed(2), total: money(updated.total).toFixed(2) } });
+    }
     return updated;
   });
 }
