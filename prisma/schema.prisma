@@ -112,8 +112,11 @@ model User {
   active               Boolean      @default(true)
   isSuperAdmin         Boolean      @default(false)
   lastLoginAt          DateTime?
-  // Owner recovery key (H2): SHA-256 of a 150-bit key shown to the Owner once.
-  // Only active org-wide OWNERs hold one; it rotates on every successful use.
+  // Set when the user opened a verification link sent to `email`. Reset links
+  // and security notices are only emailed to a verified address.
+  emailVerifiedAt      DateTime?
+  // Unused legacy columns (an earlier single recovery-key design). Owner
+  // recovery now uses RecoveryCode rows; these stay null.
   recoveryKeyHash      String?
   recoveryKeyCreatedAt DateTime?
   createdAt            DateTime     @default(now())
@@ -122,6 +125,7 @@ model User {
   memberships    Membership[]
   sessions       Session[]
   passwordTokens PasswordToken[]
+  recoveryCodes  RecoveryCode[]
 
   @@unique([email])
   @@index([organizationId, active])
@@ -176,7 +180,7 @@ model PasswordToken {
   organizationId String
   userId         String
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  purpose        String // SETUP | RESET
+  purpose        String // SETUP | RESET | VERIFY_EMAIL
   tokenHash      String    @unique
   expiresAt      DateTime
   usedAt         DateTime?
@@ -185,6 +189,22 @@ model PasswordToken {
 
   @@index([userId, usedAt])
   @@index([organizationId])
+}
+
+// Owner offline recovery codes: a batch of single-use codes shown once when
+// generated. Only a SHA-256 of each code (bound to the user id) is stored; a
+// new batch deletes the previous one. Only active org-wide OWNERs hold codes.
+model RecoveryCode {
+  id             String    @id @default(cuid())
+  organizationId String
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batchId        String
+  codeHash       String    @unique
+  usedAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([userId, usedAt])
 }
 
 // ============================================================

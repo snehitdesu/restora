@@ -37,6 +37,12 @@ async function user(org: string, tag: string, memberships: Array<{ role: string;
   return u.id;
 }
 
+/** Reset links are only emailed to a confirmed address. */
+async function verified(id: string) {
+  await prisma.user.update({ where: { id }, data: { emailVerifiedAt: new Date() } });
+  return id;
+}
+
 const ip = () => `10.9.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250) + 1}`;
 function req(path: string, body: unknown, headers: Record<string, string> = {}) {
   return new NextRequest(`http://localhost${path}`, { method: "POST", body: JSON.stringify(body), headers: { host: "localhost", "x-forwarded-for": ip(), ...headers } });
@@ -111,7 +117,7 @@ describe("staff setup link", () => {
     const stale = await createSession(prisma, created.id);
 
     const done = await completePasswordToken(prisma, { token, password: GOOD }, { ip: "1.2.3.4" });
-    expect(done).toEqual({ email: created.email, purpose: "SETUP" });
+    expect(done).toEqual({ email: created.email, purpose: "SETUP", notice: "not_verified" });
     expect(await validateToken(prisma, stale.token)).toBeNull();
     const stored = await prisma.user.findUniqueOrThrow({ where: { id: created.id } });
     expect(stored.passwordHash).not.toContain(GOOD);
@@ -212,7 +218,7 @@ describe("self-service reset", () => {
   it("with a delivery channel: link is delivered, resets the password, revokes all sessions, and is single-use", async () => {
     const sent: Array<{ to: string; token: string }> = [];
     setPasswordLinkDelivery(async (m) => { sent.push({ to: m.to, token: m.token }); });
-    const id = await user(orgId, "resetme", [{ role: "CASHIER", outletId: outletA }], GOOD);
+    const id = await verified(await user(orgId, "resetme", [{ role: "CASHIER", outletId: outletA }], GOOD));
     const s1 = await createSession(prisma, id);
     await requestPasswordReset(prisma, { email: `RESETME-${RUN}@pw.test` });
     await requestPasswordReset(prisma, { email: `nobody2-${RUN}@pw.test` });
@@ -292,7 +298,7 @@ describe("password routes", () => {
       await gate; // a slow mail provider
       sent.push(m.to);
     });
-    const id = await user(orgId, "routeslow", [{ role: "CASHIER", outletId: outletA }], GOOD);
+    const id = await verified(await user(orgId, "routeslow", [{ role: "CASHIER", outletId: outletA }], GOOD));
     const known = await json(await resetRoute(req("/api/auth/password/reset", { email: `routeslow-${RUN}@pw.test` })));
     const unknown = await json(await resetRoute(req("/api/auth/password/reset", { email: `ghost-slow-${RUN}@pw.test` })));
     // Both answered while the send was still blocked: response time cannot depend on the account.
@@ -331,7 +337,7 @@ describe("password routes", () => {
     expect(weak.status).toBe(422);
     expect(weak.body.error.details.fieldErrors.password.length).toBeGreaterThan(0);
     const ok = await json(await completeRoute(req("/api/auth/password/complete", { token: created.setup.token, password: GOOD })));
-    expect(ok).toEqual({ status: 200, body: { ok: true, data: { email: created.email, purpose: "SETUP" } } });
+    expect(ok).toEqual({ status: 200, body: { ok: true, data: { email: created.email, purpose: "SETUP", notice: "not_verified" } } });
     expect((await completeRoute(req("/api/auth/password/complete", { token: created.setup.token, password: GOOD }, { origin: "https://evil.example" }))).status).toBe(403);
   });
 
@@ -353,7 +359,7 @@ describe("password routes", () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m));
     try {
       setPasswordLinkDelivery(async () => { throw new Error("smtp down"); });
-      await user(orgId, "logcheck", [{ role: "CASHIER", outletId: outletA }], GOOD);
+      await verified(await user(orgId, "logcheck", [{ role: "CASHIER", outletId: outletA }], GOOD));
       await resetRoute(req("/api/auth/password/reset", { email: `logcheck-${RUN}@pw.test` }));
       await settleAfterCommit(); // the reset runs after the response
       const created = await createStaff(owner, { email: `log2-${RUN}@pw.test`, name: "Log Hire", role: "CASHIER", outletId: outletA });

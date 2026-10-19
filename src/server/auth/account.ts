@@ -13,6 +13,8 @@ import { hashToken } from "@/server/auth/session";
 import { runInTx, type Tx } from "@/server/services/_workflow";
 import { issuePasswordToken, retireUserTokens, findUsablePasswordToken, consumePasswordToken, INVALID_TOKEN_MESSAGE } from "@/server/auth/passwordTokens";
 import { resendPasswordDelivery } from "@/server/auth/passwordResetMail";
+import { runAfterResponse } from "@/server/api/afterResponse";
+import { deliverSecurityNotice, noticePlan, passwordChangedMessage, type NoticeOutcome } from "@/server/auth/securityMail";
 
 type Meta = { ip?: string; userAgent?: string };
 
@@ -44,14 +46,15 @@ export const completeSchema = z.object({ token: z.string().min(1).max(200), pass
  * Set the password for the token's user. The policy is checked BEFORE the token
  * is consumed, so a rejected password does not burn the link. On success the
  * token (and every other outstanding token of the user) is spent and all of the
- * user's sessions are revoked. The user then signs in normally.
+ * user's sessions are revoked. The user then signs in normally. A verified
+ * address is told about the change (after the response).
  */
-export async function completePasswordToken(db: PrismaClient, input: z.input<typeof completeSchema>, meta: Meta = {}) {
+export async function completePasswordToken(db: PrismaClient, input: z.input<typeof completeSchema>, meta: Meta = {}): Promise<{ email: string; purpose: "SETUP" | "RESET"; notice: NoticeOutcome }> {
   const { token, password } = completeSchema.parse(input);
   const row = await findUsablePasswordToken(db, token);
   assertPasswordPolicy(password, { email: row.user.email, name: row.user.name });
   const passwordHash = await hashPassword(password);
-  return runInTx(db, async (tx) => {
+  const done = await runInTx(db, async (tx) => {
     const now = new Date();
     await consumePasswordToken(tx, row.id, now);
     const updated = await tx.user.updateMany({ where: { id: row.userId, active: true }, data: { passwordHash } });
@@ -59,8 +62,24 @@ export async function completePasswordToken(db: PrismaClient, input: z.input<typ
     await retireUserTokens(tx, row.userId, now);
     const revoked = await tx.session.updateMany({ where: { userId: row.userId, revokedAt: null }, data: { revokedAt: now } });
     await audit(tx, { organizationId: row.organizationId, actorId: row.userId, action: "PASSWORD_SET", entityId: row.userId, after: { purpose: row.purpose, sessionsRevoked: revoked.count }, ...meta });
-    return { email: row.user.email, purpose: row.purpose as "SETUP" | "RESET" };
+    return { email: row.user.email, purpose: row.purpose as "SETUP" | "RESET", now };
   });
+  const notice = notifyPasswordChanged(db, row.user, "reset_link", done.now, meta);
+  return { email: done.email, purpose: done.purpose, notice };
+}
+
+/** Schedule the "your password was changed" notice; returns what the person should expect. */
+function notifyPasswordChanged(
+  db: PrismaClient,
+  user: { id: string; organizationId: string; email: string; name: string; emailVerifiedAt: Date | null },
+  method: "change" | "reset_link",
+  at: Date,
+  meta: Meta,
+): NoticeOutcome {
+  const plan = noticePlan(user);
+  runAfterResponse("password-changed-notice", () =>
+    deliverSecurityNotice(db, user, "password_changed", passwordChangedMessage({ to: user.email, name: user.name, method, at, ip: meta.ip }), meta));
+  return plan;
 }
 
 // ---------------- Self-service reset request ----------------
@@ -69,7 +88,7 @@ export const resetRequestSchema = z.object({ email: z.string().email().max(200) 
 
 /** The public response, identical for existing, unknown and inactive accounts (no account enumeration). */
 export const RESET_ACCEPTED_MESSAGE =
-  "If an active account exists for that email, a reset link will be sent to it. If nothing arrives, ask your manager to issue a password link.";
+  "If an active account with a confirmed email address exists for that email, a reset link will be sent to it. If nothing arrives, ask your manager to issue a password link (owners can also use a recovery code).";
 
 /**
  * The response when this deployment has no reset email at all. Whether email is
@@ -119,7 +138,9 @@ export function registerPasswordResetDelivery(): void {
 
 /**
  * Always resolves the same way whether or not the account exists (no account
- * enumeration). Delivery failures are logged without the token. The HTTP route
+ * enumeration). Links are only emailed to a VERIFIED address (emailVerifiedAt):
+ * an address nobody ever confirmed may be mistyped or belong to someone else.
+ * Delivery failures are logged without the token. The HTTP route
  * runs this after its response (server/api/afterResponse.ts), so the response
  * time does not depend on whether an account exists or an email was sent.
  */
@@ -128,6 +149,10 @@ export async function requestPasswordReset(db: PrismaClient, input: z.input<type
   const email = resetRequestSchema.parse(input).email.toLowerCase().trim();
   const user = await db.user.findUnique({ where: { email } });
   if (!user || !user.active) return;
+  if (!user.emailVerifiedAt) {
+    await audit(db as unknown as Tx, { organizationId: user.organizationId, actorId: null, action: "PASSWORD_RESET_REQUEST", entityId: user.id, after: { delivered: false, reason: "email_not_verified" }, ...meta });
+    return;
+  }
   const send = delivery;
   const issued = await runInTx(db, async (tx) => {
     const t = send ? await issuePasswordToken(tx, { organizationId: user.organizationId, userId: user.id, purpose: "RESET", createdById: null }) : null;
@@ -161,14 +186,15 @@ export const changeSchema = z.object({ currentPassword: z.string().min(1).max(20
 /**
  * Change the caller's password. Requires the current password; the new one
  * must satisfy the policy and differ from the current one. Every OTHER session
- * of the user is revoked; the session making the request stays signed in.
+ * of the user is revoked; the session making the request stays signed in. A
+ * verified address is told about the change (after the response).
  */
 export async function changePassword(
   db: PrismaClient,
   caller: { userId: string; sessionToken: string },
   input: z.input<typeof changeSchema>,
   meta: Meta = {}
-): Promise<{ sessionsRevoked: number }> {
+): Promise<{ sessionsRevoked: number; notice: NoticeOutcome }> {
   const { currentPassword, newPassword } = changeSchema.parse(input);
   const user = await db.user.findUnique({ where: { id: caller.userId } });
   if (!user || !user.active) throw new UnauthorizedError();
@@ -177,7 +203,7 @@ export async function changePassword(
   assertPasswordPolicy(newPassword, { email: user.email, name: user.name });
   const passwordHash = await hashPassword(newPassword);
   const keep = hashToken(caller.sessionToken);
-  return runInTx(db, async (tx) => {
+  const done = await runInTx(db, async (tx) => {
     const now = new Date();
     // Optimistic guard: fails if the password changed since it was verified above.
     const updated = await tx.user.updateMany({ where: { id: user.id, passwordHash: user.passwordHash }, data: { passwordHash } });
@@ -185,6 +211,7 @@ export async function changePassword(
     const revoked = await tx.session.updateMany({ where: { userId: user.id, revokedAt: null, tokenHash: { not: keep } }, data: { revokedAt: now } });
     await retireUserTokens(tx, user.id, now);
     await audit(tx, { organizationId: user.organizationId, actorId: user.id, action: "PASSWORD_CHANGE", entityId: user.id, after: { sessionsRevoked: revoked.count }, ...meta });
-    return { sessionsRevoked: revoked.count };
+    return { sessionsRevoked: revoked.count, now };
   });
+  return { sessionsRevoked: done.sessionsRevoked, notice: notifyPasswordChanged(db, user, "change", done.now, meta) };
 }

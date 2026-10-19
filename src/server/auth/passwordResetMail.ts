@@ -67,7 +67,7 @@ export function resendPasswordProblems(env: NodeJS.ProcessEnv = process.env): st
   return problems;
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
 }
 
@@ -101,16 +101,32 @@ export async function sendPasswordResetEmail(
     "If you did not ask for this, you can ignore this email.",
   ].join("\n");
   const html = `<p>${escapeHtml(msg.name)}, use this link to choose a new password. It expires at ${escapeHtml(expires)} and works once.</p><p><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p><p>If you did not ask for this, you can ignore this email.</p>`;
+  await postResendEmail(cfg, { to: msg.to, subject: "Reset your RESTORA password", text, html }, fetchImpl, "Password reset email was not accepted");
+}
+
+export type ResendMessage = { to: string; subject: string; text: string; html: string };
+
+/**
+ * POST one message to Resend. Resolves only when Resend returns an email id;
+ * a network error, timeout, non-2xx or id-less body throws PasswordEmailError
+ * with `failure` (no key, address or body in the message).
+ */
+export async function postResendEmail(
+  cfg: ResendPasswordConfig,
+  msg: ResendMessage,
+  fetchImpl: typeof fetch = globalThis.fetch,
+  failure = "Email was not accepted",
+): Promise<void> {
   let res: Response;
   try {
     res = await fetchImpl(RESEND_EMAILS_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${cfg.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: cfg.from, to: [msg.to], subject: "Reset your RESTORA password", text, html }),
+      body: JSON.stringify({ from: cfg.from, to: [msg.to], subject: msg.subject, text: msg.text, html: msg.html }),
       signal: AbortSignal.timeout(8_000),
     });
   } catch {
-    throw new PasswordEmailError("Password reset email was not accepted");
+    throw new PasswordEmailError(failure);
   }
   let id: unknown;
   try {
@@ -118,7 +134,7 @@ export async function sendPasswordResetEmail(
   } catch {
     id = undefined;
   }
-  if (!res.ok || typeof id !== "string" || id.length === 0) throw new PasswordEmailError("Password reset email was not accepted");
+  if (!res.ok || typeof id !== "string" || id.length === 0) throw new PasswordEmailError(failure);
 }
 
 /** The delivery function for setPasswordLinkDelivery, or null when Resend is not fully configured. */

@@ -1,11 +1,13 @@
 /**
- * One-time password tokens (new-staff SETUP and RESET links).
+ * One-time account tokens: new-staff SETUP and RESET links (both set a
+ * password) and VERIFY_EMAIL links (prove the user receives mail at their
+ * sign-in address; they can never set a password).
  *
  * Same scheme as sessions: the raw token is 32 random bytes handed out exactly
  * once; only its SHA-256 is stored. A token is bound to one user, expires, and
  * is consumed atomically (a conditional update on `usedAt IS NULL`), so two
  * concurrent uses cannot both succeed. Issuing a new token for a user retires
- * that user's older unused tokens.
+ * that user's older unused tokens of the same kind (password or verification).
  */
 import type { PrismaClient, Prisma } from "@prisma/client";
 import { generateToken, hashToken } from "@/server/auth/session";
@@ -13,12 +15,16 @@ import { ValidationError } from "@/server/db/scope";
 
 type Client = PrismaClient | Prisma.TransactionClient;
 
-export type PasswordTokenPurpose = "SETUP" | "RESET";
+export type PasswordTokenPurpose = "SETUP" | "RESET" | "VERIFY_EMAIL";
+/** The purposes whose token sets a password. */
+export const PASSWORD_PURPOSES: readonly PasswordTokenPurpose[] = ["SETUP", "RESET"];
+const family = (purpose: PasswordTokenPurpose): readonly PasswordTokenPurpose[] => (purpose === "VERIFY_EMAIL" ? ["VERIFY_EMAIL"] : PASSWORD_PURPOSES);
 
 const HOUR = 60 * 60 * 1000;
 export const PASSWORD_TOKEN_TTL_MS: Record<PasswordTokenPurpose, number> = {
   SETUP: 72 * HOUR,
   RESET: 1 * HOUR,
+  VERIFY_EMAIL: 24 * HOUR,
 };
 
 /** The single message for unknown, expired, used or retired tokens (nothing to distinguish them). */
@@ -27,14 +33,14 @@ export const INVALID_TOKEN_MESSAGE = "This link is invalid or has expired. Ask y
 /** Raw tokens are base64url of 32 bytes (43 chars); anything else is rejected before a DB lookup. */
 export const RAW_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
-export type IssuedPasswordToken = { token: string; purpose: PasswordTokenPurpose; expiresAt: Date };
+export type IssuedPasswordToken<P extends PasswordTokenPurpose = PasswordTokenPurpose> = { token: string; purpose: P; expiresAt: Date };
 
-export async function issuePasswordToken(
+export async function issuePasswordToken<P extends PasswordTokenPurpose>(
   db: Client,
-  input: { organizationId: string; userId: string; purpose: PasswordTokenPurpose; createdById?: string | null },
+  input: { organizationId: string; userId: string; purpose: P; createdById?: string | null },
   now = new Date()
-): Promise<IssuedPasswordToken> {
-  await retireUserTokens(db, input.userId, now);
+): Promise<IssuedPasswordToken<P>> {
+  await retireUserTokens(db, input.userId, now, family(input.purpose));
   const token = generateToken();
   const expiresAt = new Date(now.getTime() + PASSWORD_TOKEN_TTL_MS[input.purpose]);
   await db.passwordToken.create({
@@ -43,17 +49,20 @@ export async function issuePasswordToken(
   return { token, purpose: input.purpose, expiresAt };
 }
 
-/** Mark every unused token of the user as used (superseded / password already changed). */
-export async function retireUserTokens(db: Client, userId: string, now = new Date()): Promise<number> {
-  const res = await db.passwordToken.updateMany({ where: { userId, usedAt: null }, data: { usedAt: now } });
+/** Mark the user's unused tokens as used (superseded / password already changed). Default: password tokens only. */
+export async function retireUserTokens(db: Client, userId: string, now = new Date(), purposes: readonly PasswordTokenPurpose[] = PASSWORD_PURPOSES): Promise<number> {
+  const res = await db.passwordToken.updateMany({ where: { userId, usedAt: null, purpose: { in: [...purposes] } }, data: { usedAt: now } });
   return res.count;
 }
 
-/** Look up a usable token (not used, not expired, active user). Throws the uniform error otherwise. */
-export async function findUsablePasswordToken(db: Client, rawToken: string, now = new Date()) {
+/**
+ * Look up a usable token (one of `purposes`, not used, not expired, active
+ * user). Throws the uniform error otherwise. Default: tokens that set a password.
+ */
+export async function findUsablePasswordToken(db: Client, rawToken: string, now = new Date(), purposes: readonly PasswordTokenPurpose[] = PASSWORD_PURPOSES) {
   if (!RAW_TOKEN_PATTERN.test(rawToken)) throw new ValidationError(INVALID_TOKEN_MESSAGE);
   const row = await db.passwordToken.findUnique({ where: { tokenHash: hashToken(rawToken) }, include: { user: true } });
-  if (!row || row.usedAt || row.expiresAt.getTime() <= now.getTime() || !row.user.active || row.user.organizationId !== row.organizationId) {
+  if (!row || !purposes.includes(row.purpose as PasswordTokenPurpose) || row.usedAt || row.expiresAt.getTime() <= now.getTime() || !row.user.active || row.user.organizationId !== row.organizationId) {
     throw new ValidationError(INVALID_TOKEN_MESSAGE);
   }
   return row;

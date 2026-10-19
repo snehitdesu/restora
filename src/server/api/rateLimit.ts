@@ -64,6 +64,12 @@ export const RATE_POLICIES = {
   passwordCompletePerIp: { name: "pwcomplete-ip", limit: 20, windowMs: 15 * 60_000 },
   passwordChangePerUser: { name: "pwchange-user", limit: 10, windowMs: 15 * 60_000 },
   reauthPerUser: { name: "reauth-user", limit: 30, windowMs: 15 * 60_000 },
+  // Owner recovery codes: redeeming is anonymous (email + code), so it is held far below what a guess needs.
+  recoveryRedeemPerIp: { name: "recovery-ip", limit: 10, windowMs: 15 * 60_000 },
+  recoveryRedeemPerEmail: { name: "recovery-email", limit: 5, windowMs: 60 * 60_000 },
+  recoveryGeneratePerUser: { name: "recovery-gen-user", limit: 5, windowMs: 60 * 60_000 },
+  emailVerifyRequestPerUser: { name: "email-verify-user", limit: 3, windowMs: 60 * 60_000 },
+  emailVerifyPerIp: { name: "email-verify-ip", limit: 20, windowMs: 15 * 60_000 },
   webhook: { name: "webhook", limit: 600, windowMs: 60_000 },
   export: { name: "export", limit: 20, windowMs: 60_000 },
   report: { name: "report", limit: 120, windowMs: 60_000 },

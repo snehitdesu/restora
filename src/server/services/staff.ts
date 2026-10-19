@@ -185,7 +185,9 @@ export async function revokeMembership(ctx: AccessContext, membershipId: string,
     if (!m.active) return m; // idempotent
     if (m.role === "OWNER") await assertNotLastOwner(tx, ctx, m.userId);
     const updated = await tx.membership.update({ where: { id: membershipId }, data: { active: false } });
-    await writeAudit(tx, ctx, { action: "ROLE_CHANGE", entityType: "Membership", entityId: membershipId, outletId: m.outletId, before: { active: true }, after: { active: false, role: m.role } });
+    // A former owner's recovery codes are destroyed, so re-granting OWNER later never revives them.
+    const codes = m.role === "OWNER" && m.outletId === null ? (await tx.recoveryCode.deleteMany({ where: { userId: m.userId } })).count : 0;
+    await writeAudit(tx, ctx, { action: "ROLE_CHANGE", entityType: "Membership", entityId: membershipId, outletId: m.outletId, before: { active: true }, after: { active: false, role: m.role, ...(codes ? { recoveryCodesDeleted: codes } : {}) } });
     return updated;
   });
 }
@@ -200,6 +202,7 @@ export async function setUserActive(ctx: AccessContext, userId: string, active: 
     if (!active) {
       await revokeAllForUser(tx, userId); // deactivating kills active sessions
       await retireUserTokens(tx, userId); // and outstanding setup/reset links
+      await tx.recoveryCode.deleteMany({ where: { userId } }); // and owner recovery codes (reactivation does not revive them)
     }
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "User", entityId: userId, before: { active: user.active }, after: { active } });
     return { id: updated.id, active: updated.active };

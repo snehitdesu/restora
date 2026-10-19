@@ -18,7 +18,7 @@ const FROM = "RESTORA <reset@example.com>";
 const BASE = "https://demo.example";
 const GOOD = "Kitchen#Pass42";
 
-type UserRow = { id: string; email: string; name: string; active: boolean; organizationId: string; passwordHash: string };
+type UserRow = { id: string; email: string; name: string; active: boolean; organizationId: string; passwordHash: string; emailVerifiedAt?: Date | null };
 type TokenRow = {
   id: string;
   organizationId: string;
@@ -120,7 +120,7 @@ afterEach(() => {
 describe("Resend password-reset delivery", () => {
   it("sends the reset link and records delivery only after Resend accepts it", async () => {
     installEnv();
-    const user: UserRow = { id: "user-1", email: "ada@example.com", name: "Ada <script>", active: true, organizationId: "org-1", passwordHash: "old" };
+    const user: UserRow = { id: "user-1", email: "ada@example.com", name: "Ada <script>", active: true, organizationId: "org-1", passwordHash: "old", emailVerifiedAt: new Date() };
     const { db, tokens, audits } = createDb(user);
     const fetchMock = vi.fn(async () => jsonResponse(200, { id: "email_123" }));
     vi.stubGlobal("fetch", fetchMock);
@@ -156,7 +156,7 @@ describe("Resend password-reset delivery", () => {
 
   it("does not send or issue a token when Resend is not configured", async () => {
     clearEnv();
-    const user: UserRow = { id: "user-2", email: "bea@example.com", name: "Bea", active: true, organizationId: "org-1", passwordHash: "old" };
+    const user: UserRow = { id: "user-2", email: "bea@example.com", name: "Bea", active: true, organizationId: "org-1", passwordHash: "old", emailVerifiedAt: new Date() };
     const { db, tokens, audits } = createDb(user);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -172,7 +172,7 @@ describe("Resend password-reset delivery", () => {
 
   it("does not report delivery and retires the token when Resend rejects the email", async () => {
     installEnv();
-    const user: UserRow = { id: "user-3", email: "cy@example.com", name: "Cy", active: true, organizationId: "org-1", passwordHash: "old" };
+    const user: UserRow = { id: "user-3", email: "cy@example.com", name: "Cy", active: true, organizationId: "org-1", passwordHash: "old", emailVerifiedAt: new Date() };
     const { db, tokens, audits } = createDb(user);
     const fetchMock = vi.fn(async () => jsonResponse(422, { name: "validation_error", message: `Invalid from ${API_KEY}` }));
     vi.stubGlobal("fetch", fetchMock);
@@ -196,7 +196,7 @@ describe("Resend password-reset delivery", () => {
   });
 
   it("a failed send retires only its own link: a newer link issued meanwhile keeps working", async () => {
-    const user: UserRow = { id: "user-9", email: "eve@example.com", name: "Eve", active: true, organizationId: "org-1", passwordHash: "old" };
+    const user: UserRow = { id: "user-9", email: "eve@example.com", name: "Eve", active: true, organizationId: "org-1", passwordHash: "old", emailVerifiedAt: new Date() };
     const { db, tokens } = createDb(user);
     let newer: string | null = null;
     // While the first email is in flight, a second request issues (and delivers) a newer link.
@@ -213,7 +213,7 @@ describe("Resend password-reset delivery", () => {
 
   it("treats a success body without an email id as a failed delivery", async () => {
     installEnv();
-    const user: UserRow = { id: "user-4", email: "dee@example.com", name: "Dee", active: true, organizationId: "org-1", passwordHash: "old" };
+    const user: UserRow = { id: "user-4", email: "dee@example.com", name: "Dee", active: true, organizationId: "org-1", passwordHash: "old", emailVerifiedAt: new Date() };
     const { db, tokens, audits } = createDb(user);
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { id: "" })));
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -238,7 +238,7 @@ describe("Resend password-reset delivery", () => {
     expect(inactiveResult).toBeUndefined();
     expect(unknownResult).toBeUndefined();
     expect(inactiveResult).toBe(unknownResult);
-    expect(RESET_ACCEPTED_MESSAGE).toContain("If an active account exists");
+    expect(RESET_ACCEPTED_MESSAGE).toContain("If an active account with a confirmed email address exists");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(inactiveDb.tokens).toHaveLength(0);
     expect(unknownDb.audits).toHaveLength(0);
@@ -266,7 +266,7 @@ describe("Resend password-reset delivery", () => {
     const seen: string[] = [];
     setPasswordLinkDelivery(async (msg) => { seen.push(msg.to); });
     registerPasswordResetDelivery();
-    const user: UserRow = { id: "user-7", email: "gia@example.com", name: "Gia", active: true, organizationId: "org-1", passwordHash: "old" };
+    const user: UserRow = { id: "user-7", email: "gia@example.com", name: "Gia", active: true, organizationId: "org-1", passwordHash: "old", emailVerifiedAt: new Date() };
     const { db, tokens, audits } = createDb(user);
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
@@ -279,7 +279,7 @@ describe("Resend password-reset delivery", () => {
   });
 
   it("rejects an expired reset token and accepts a token only once", async () => {
-    const user: UserRow = { id: "user-6", email: "fay@example.com", name: "Fay", active: true, organizationId: "org-1", passwordHash: "old" };
+    const user: UserRow = { id: "user-6", email: "fay@example.com", name: "Fay", active: true, organizationId: "org-1", passwordHash: "old", emailVerifiedAt: new Date() };
     const { db, tokens } = createDb(user);
     const issued = await issuePasswordToken(db as never, { organizationId: user.organizationId, userId: user.id, purpose: "RESET" }, new Date(Date.now() - PASSWORD_TOKEN_TTL_MS.RESET - 60_000));
     await expect(completePasswordToken(db as never, { token: issued.token, password: GOOD })).rejects.toThrow(INVALID_TOKEN_MESSAGE);

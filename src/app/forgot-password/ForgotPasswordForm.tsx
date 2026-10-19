@@ -51,6 +51,7 @@ export function ForgotPasswordForm() {
           </Button>
         </form>
       )}
+      <Link href="/recover" className="block text-center text-sm font-medium text-brand-700 hover:underline">Owner? Use a recovery code</Link>
       <Link href="/login" className="block text-center text-sm font-medium text-brand-700 hover:underline">Back to sign in</Link>
     </div>
   );

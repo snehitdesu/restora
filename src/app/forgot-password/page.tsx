@@ -16,6 +16,7 @@ export default function ForgotPasswordPage() {
         <div className="space-y-4">
           <FormAlert tone="info">{outcome.message}</FormAlert>
           <p className="text-sm text-ink-600">The link they issue works once and lets you choose a new password. Your current password keeps working until then.</p>
+          <p className="text-sm text-ink-600">Owner with saved recovery codes? <Link href="/recover" className="font-medium text-brand-700 hover:underline">Use a recovery code</Link>.</p>
           <Link href="/login" className="block text-center text-sm font-medium text-brand-700 hover:underline">Back to sign in</Link>
         </div>
       </AuthShell>
