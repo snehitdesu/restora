@@ -265,8 +265,10 @@ function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { provider
       return { payment: updated, orderSettled: false };
     }
 
-    // Is the order fully paid now?
-    const paid = await tx.payment.aggregate({ where: { orderId: payment.orderId, status: "SUCCESS" }, _sum: { amount: true } });
+    // Is the order fully paid now? Collected money as in assertPayableTx and the bill: SUCCESS plus PARTIAL
+    // (partly refunded) at full amount. Counting SUCCESS alone left a split bill with a partly refunded part
+    // unable to settle while it refused any further payment.
+    const paid = await tx.payment.aggregate({ where: { orderId: payment.orderId, status: { in: ["SUCCESS", "PARTIAL"] } }, _sum: { amount: true } });
     const paidTotal = D(paid._sum.amount ?? 0);
     const orderTotal = D(payment.order.total);
 
