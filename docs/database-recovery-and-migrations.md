@@ -11,7 +11,7 @@ modified._
 | Database | Target | Migrations | Notes |
 |---|---|---|---|
 | `prisma/dev.db` (the user's `next dev` on :3000, `DATABASE_URL=file:./dev.db`) | SQLite, rollback-journal mode (no WAL/SHM) | **23 of 23** applied since 2026-10-13 06:17 IST (was 15 of 23, through `20261009100000_integrations`) | `PRAGMA integrity_check` = ok, 0 foreign-key violations before and after. Pre-migration backup: `prisma/dev.db.pre-migrate-2026-10-13.bak` (section 5). 2 organizations (demo group + Coders' Cafe), 3 outlets, 13 users, 86 menu items (64 Coders' Cafe), 10 orders + 1 verification order, 14 KOTs + 1. |
-| `prisma/test.db`, `prisma/e2e.db`, `prisma/e2e-investor.db` | SQLite, rebuilt by the test runners | n/a | disposable |
+| `prisma/test-<pid>.db` (one per vitest run; older checkouts: `prisma/test.db`), `prisma/e2e.db`, `prisma/e2e-investor.db` | SQLite, rebuilt by the test runners | n/a | disposable |
 | Hosted Vercel demo | PostgreSQL 16 | 12 of 13 PostgreSQL migrations once this code is deployed | not contacted in this pass (no URL or credentials in the repo) |
 
 The source schema now has 23 SQLite migrations / 13 PostgreSQL migrations. The

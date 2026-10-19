@@ -51,9 +51,12 @@ npm run db:seed     # rebuild demo data in dev.db
 ```
 
 ## Test database
-Tests run against a dedicated `prisma/test.db`, recreated from the schema by
-`vitest.global-setup.ts` before each run (never touches `dev.db`). The `@/`
-alias is resolved via `vitest.config.ts`.
+Tests run against a dedicated `prisma/test-<pid>.db`, one per vitest process,
+built from the migrations by `vitest.global-setup.ts` before each run and removed
+after it (never touches `dev.db`). Two runs in the same checkout (a targeted
+rerun next to a full suite) therefore never rebuild each other's database; a
+file left by a killed run is swept by the next one. The `@/` alias is resolved
+via `vitest.config.ts`.
 
 **Files run sequentially** (`fileParallelism: false`): every suite is a DB
 integration test on one SQLite file, and SQLite allows a single writer.
