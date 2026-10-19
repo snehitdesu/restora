@@ -100,8 +100,9 @@ test.describe.serial("account provisioning and password lifecycle", () => {
 
     await a.page.getByLabel("Current password").fill(FIRST);
     await a.page.getByRole("button", { name: "Change password" }).click();
-    // b's session plus the one left over from PWD-002.
-    await expect(a.page.getByRole("status").filter({ hasText: /^Password changed\. Signed out 2 other sessions\.$/ })).toBeVisible();
+    // b's session plus the one left over from PWD-002. The address was never confirmed, so the page says no
+    // notice email went out (never a false "sent").
+    await expect(a.page.getByRole("status").filter({ hasText: /^Password changed\. Signed out 2 other sessions\. No notice email was sent: confirm your address in Account security\.$/ })).toBeVisible();
 
     await a.page.goto("/dashboard");
     await expect(a.page).toHaveURL(/\/dashboard$/);

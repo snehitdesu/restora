@@ -27,7 +27,7 @@ export function ChangePasswordForm({ email }: { email: string }) {
     setError(null);
     try {
       const res = await api<{ sessionsRevoked: number; notice: "sent" | "not_verified" | "not_configured" }>("/api/auth/password/change", { method: "POST", body: { currentPassword: entered["current-password"], newPassword: entered["new-password"] } });
-      const notice = res.notice === "sent" ? " A notice is being sent to your email." : res.notice === "not_verified" ? " No notice email was sent: confirm your address in Security & recovery." : " No notice email was sent: email delivery is not configured.";
+      const notice = res.notice === "sent" ? " A notice is being sent to your email." : res.notice === "not_verified" ? " No notice email was sent: confirm your address in Account security." : " No notice email was sent: email delivery is not configured.";
       setDone(`Password changed.${res.sessionsRevoked ? ` Signed out ${res.sessionsRevoked} other session${res.sessionsRevoked === 1 ? "" : "s"}.` : ""}${notice}`);
       form.reset();
     } catch (err) {

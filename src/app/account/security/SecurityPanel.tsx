@@ -116,6 +116,8 @@ export function SecurityPanel() {
   function finish() {
     setGenerated(null);
     setSaved(false);
+    // Show "Loading…" until the new set is counted, not the stale "You have no recovery codes".
+    setStatus(null);
     void load();
   }
 
