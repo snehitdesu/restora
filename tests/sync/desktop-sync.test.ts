@@ -26,6 +26,16 @@ import * as CloudApi from "@/app/api/cloud/[[...path]]/route";
 import { call } from "../api/routeSupport";
 import { CLOUD_ORIGIN, fakeCloud, makeStaff, makeWorld, PASSWORD, RUN, type FakeCloud, type World } from "./harness";
 
+/**
+ * The desktop side of this suite needs CloudLink / CloudRecordMap / SyncOperation, which exist only in the desktop's
+ * SQLite database: scripts/pg-schema.mjs strips them from the hosted PostgreSQL schema on purpose (DESKTOP_ONLY_MODELS).
+ * A desktop never runs on PostgreSQL, so on a PostgreSQL test database there is no desktop to test; the SQLite job runs
+ * every case here. The hosted half (feed, actions, pairing) runs on both engines in cloud-sync-api.test.ts, and
+ * desktop-prisma-boundary.test.ts checks on PostgreSQL that the hosted database really has none of these tables.
+ */
+const desktopEngine = !(process.env.DATABASE_URL ?? "").startsWith("postgres");
+const suite = describe.runIf(desktopEngine);
+
 let cloud: World, desk: World, desk2: World;
 let fc: FakeCloud;
 let syncUser: Awaited<ReturnType<typeof makeStaff>>;
@@ -35,6 +45,7 @@ let desk2Owner: Awaited<ReturnType<typeof makeStaff>>;
 let n = 0;
 
 beforeAll(async () => {
+  if (!desktopEngine) return;
   vi.stubEnv("AHAROS_DESKTOP", "1");
   cloud = await makeWorld("Cloud", { qr: true });
   desk = await makeWorld("Desk");
@@ -76,7 +87,7 @@ const submit = (cloudId: string, session = deskCashier.session) => call(Orders, 
 const cloudOrder = (id: string) => prisma.order.findUniqueOrThrow({ where: { id }, include: { kots: true, payments: true } });
 const localOrder = (cloudId: string) => prisma.order.findUniqueOrThrow({ where: { id: localOf(cloudId) }, include: { kots: true, payments: true, items: { include: { modifiers: true } } } });
 
-describe("sign-in to the cloud (scenario 8)", () => {
+suite("sign-in to the cloud (scenario 8)", () => {
   it("is for managers only, validates the address, and rejects wrong credentials without keeping anything", async () => {
     const cashierCtx = await ownerCtx(deskCashier);
     await expect(connectCloud(cashierCtx, { baseUrl: CLOUD_ORIGIN, email: syncUser.email, password: PASSWORD }, prisma, fc.transport)).rejects.toMatchObject({ status: 403 });
@@ -119,7 +130,7 @@ describe("sign-in to the cloud (scenario 8)", () => {
   });
 });
 
-describe("mirroring a QR order (scenarios 3, 4, 5, 6, 7, 14)", () => {
+suite("mirroring a QR order (scenarios 3, 4, 5, 6, 7, 14)", () => {
   it("brings a cloud QR order onto the desktop once, unpaid, with the same reference and mapped dishes", async () => {
     const placed = await guestOrder([{ menuItemId: cloud.coffee, qty: 2, modifierOptionIds: [cloud.largeOption] } as never, { menuItemId: cloud.brownie, qty: 1 }]);
     const r = await cycle();
@@ -189,7 +200,7 @@ describe("mirroring a QR order (scenarios 3, 4, 5, 6, 7, 14)", () => {
   });
 });
 
-describe("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
+suite("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
   it("accepts on the desktop: the cloud order is accepted once, with one KOT, and the customer sees it", async () => {
     const placed = await guestOrder();
     await cycle();
@@ -256,7 +267,7 @@ describe("acceptance and kitchen from either side (scenarios 11, 12, 13)", () =>
   });
 });
 
-describe("payments and cancellations (scenarios 14, 15)", () => {
+suite("payments and cancellations (scenarios 14, 15)", () => {
   it("never treats an imported order as paid; a payment taken on the desktop is verified by the cloud and mirrored", async () => {
     const placed = await guestOrder();
     await cycle();
@@ -378,7 +389,7 @@ describe("payments and cancellations (scenarios 14, 15)", () => {
   });
 });
 
-describe("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
+suite("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
   it("queues an acceptance made offline, does not pretend it happened, and sends it once on reconnect", async () => {
     const placed = await guestOrder();
     await cycle();
@@ -494,7 +505,7 @@ describe("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
   });
 });
 
-describe("session expiry and revocation (scenario 8)", () => {
+suite("session expiry and revocation (scenario 8)", () => {
   it("stops all cloud traffic once the cloud ends the session, queues work, and resumes after signing in again", async () => {
     const placed = await guestOrder();
     await cycle();
@@ -528,7 +539,7 @@ describe("session expiry and revocation (scenario 8)", () => {
   });
 });
 
-describe("scope, privacy and the control API (scenarios 10, 20)", () => {
+suite("scope, privacy and the control API (scenarios 10, 20)", () => {
   it("never mirrors another cloud outlet's or organization's orders", async () => {
     const otherCloud = await makeWorld("OtherCloud", { qr: true });
     const t = otherCloud.qrToken!;

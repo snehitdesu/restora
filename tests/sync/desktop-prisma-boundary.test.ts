@@ -3,15 +3,17 @@
  * SyncOperation. Desktop-only access must go through desktopSync() so Vercel
  * typechecking does not require those models on PrismaClient.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, afterAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { DESKTOP_ONLY_MODELS } from "../../scripts/pg-schema.mjs";
+import { prisma } from "@/server/db/client";
 import { desktopSync } from "@/server/sync/desktopDb";
 import { guardMirroredRequest } from "@/server/sync/mirrorGuard";
 import type { AccessContext } from "@/server/db/scope";
 
 const ROOT = path.resolve(__dirname, "../..");
+const pg = (process.env.DATABASE_URL ?? "").startsWith("postgres");
 const DELEGATE = /\b(?:db|prisma|tx)\.(cloudLink|cloudRecordMap|syncOperation)\b/;
 
 function walkTs(dir: string): string[] {
@@ -26,6 +28,9 @@ function walkTs(dir: string): string[] {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+});
+afterAll(async () => {
+  await prisma.$disconnect();
 });
 
 describe("desktop-only Prisma models stay off the hosted client", () => {
@@ -57,5 +62,14 @@ describe("desktop-only Prisma models stay off the hosted client", () => {
     expect(result).toBeNull();
     expect(cloudRecordMap.findFirst).not.toHaveBeenCalled();
     expect(syncOperation.findMany).not.toHaveBeenCalled();
+  });
+
+  it("exist only in the desktop (SQLite) database and client: the migrated PostgreSQL database and its client have none", async () => {
+    const tables = pg
+      ? await prisma.$queryRaw<Array<{ name: string }>>`SELECT table_name AS name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('CloudLink', 'CloudRecordMap', 'SyncOperation')`
+      : await prisma.$queryRaw<Array<{ name: string }>>`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('CloudLink', 'CloudRecordMap', 'SyncOperation')`;
+    expect(tables.map((t) => t.name).sort()).toEqual(pg ? [] : [...DESKTOP_ONLY_MODELS].sort());
+    const delegates = desktopSync(prisma);
+    for (const d of [delegates.cloudLink, delegates.cloudRecordMap, delegates.syncOperation]) expect(d === undefined).toBe(pg);
   });
 });
