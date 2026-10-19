@@ -24,13 +24,17 @@ export const PROTECTED_PAGES = [
   "/account",
 ];
 
+// A linked desktop calls hosted APIs (e.g. /api/payments for a cloud order) with its device token as
+// `Authorization: Bearer …` and no cookie; the router validates it (resolveFromDeviceToken). Same shape as its readBearer.
+const BEARER = /^Bearer\s+\S+$/i;
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const hasSession = Boolean(req.cookies.get(SESSION_COOKIE)?.value);
 
   if (pathname.startsWith("/api/")) {
     if (OPEN_API_PREFIXES.some((p) => pathname.startsWith(p))) return NextResponse.next();
-    if (!hasSession) {
+    if (!hasSession && !BEARER.test(req.headers.get("authorization")?.trim() ?? "")) {
       return NextResponse.json({ ok: false, error: { code: "UnauthorizedError", message: "Authentication required" } }, { status: 401 });
     }
     return NextResponse.next();

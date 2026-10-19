@@ -5,7 +5,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 vi.mock("next/headers", async () => (await import("./harness")).nextHeadersMock());
+import { NextRequest } from "next/server";
 import { prisma } from "@/server/db/client";
+import { middleware } from "@/middleware";
 import { rotateTableQr } from "@/server/services/masterData";
 import { cancelOrder } from "@/server/services/orders";
 import { getGuestOrder } from "@/server/services/guestOrdering";
@@ -272,6 +274,33 @@ describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7,
     expect(o.payments.map((p) => p.status)).toContain("SUCCESS");
     expect(o.status).toBe("PAID");
     void Kitchen;
+  });
+
+  // 2026-10-19: the desktop settles a cloud order with its device token only (mirrorGuard.createPaymentMirrored).
+  // The edge middleware used to 401 it before the router could validate the token.
+  it("a linked desktop takes payment for a cloud order with its device token alone (edge + router)", async () => {
+    const staff = await makeStaff(w, "MANAGER");
+    const token = ((await call(Sync, "POST", "enroll", { body: { email: staff.email, password: PASSWORD } })).json.data as { token: string }).token;
+    const bearer = { authorization: `Bearer ${token}` };
+    const edge = middleware(new NextRequest("https://restora.example/api/payments", { method: "POST", headers: bearer }));
+    expect(edge.headers.get("x-middleware-next")).toBe("1");
+
+    const placed = await guestOrder();
+    await call(Sync, "POST", "ops", { headers: bearer, body: { action: "ACCEPT", opId: opId(), orderId: placed.orderId } });
+    const total = Number((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).total);
+    const pay = await call(Payments, "POST", "", { headers: { ...bearer, "idempotency-key": `desk-pay-${RUN}` }, body: { orderId: placed.orderId, method: "CASH", amount: total } });
+    expect(pay.status).toBe(200);
+    const again = await call(Payments, "POST", "", { headers: { ...bearer, "idempotency-key": `desk-pay-${RUN}` }, body: { orderId: placed.orderId, method: "CASH", amount: total } });
+    expect(again.json.data.id).toBe(pay.json.data.id); // a retried request is the same payment
+    expect((await call(Payments, "POST", `${pay.json.data.id}/verify`, { headers: bearer, body: {} })).status).toBe(200);
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).status).toBe("PAID");
+    expect(await prisma.payment.count({ where: { orderId: placed.orderId } })).toBe(1);
+
+    // A revoked device passes the edge (it only sees a Bearer header) but the router refuses it.
+    await prisma.cloudDevice.updateMany({ where: { enrolledById: staff.id }, data: { status: "REVOKED", revokedAt: new Date() } });
+    const next = await guestOrder();
+    expect((await call(Payments, "POST", "", { headers: bearer, body: { orderId: next.orderId, method: "CASH", amount: 1 } })).status).toBe(401);
+    expect(await prisma.payment.count({ where: { orderId: next.orderId } })).toBe(0);
   });
 });
 
