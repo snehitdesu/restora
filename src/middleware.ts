@@ -10,7 +10,9 @@ import { PATH_HEADER, SESSION_COOKIE } from "@/constants/auth";
 
 // Paths that require a session. Auth + webhook endpoints are intentionally open;
 // /api/qr is the anonymous guest-ordering API (table token / order key checked by its services).
-const OPEN_API_PREFIXES = ["/api/auth", "/api/webhooks", "/api/health", "/api/qr/", "/api/cron/"];
+// /api/sync is called by linked desktops with a device bearer token (no cookie); its router
+// authenticates every non-public route (session or device token) itself.
+const OPEN_API_PREFIXES = ["/api/auth", "/api/webhooks", "/api/health", "/api/qr/", "/api/cron/", "/api/sync/"];
 // Operator pages that need a session (the page itself validates it server-side).
 export const PROTECTED_PAGES = [
   "/dashboard", "/pos", "/kitchen",
