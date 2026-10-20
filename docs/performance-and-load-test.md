@@ -1,5 +1,159 @@
 # Performance and load test
 
+## 2026-10-20 re-measurement (current)
+
+_Local lab measurements only, on the same laptop (i3-1315U, 8 GB RAM, 0.5–1.1 GB
+free throughout: an editor and a browser stayed open). Production build
+(`next start`, `NODE_ENV=production`), one Node process, SQLite. The database was
+a scratch copy of the investor demo database (Coders' Cafe: 64 items, 10 tables)
+plus 300 synthetic QR tables and two synthetic staff users; neither `dev.db` nor
+the investor baseline was opened for writing. Payments used the in-process mock
+gateway (`ALLOW_MOCK_PROVIDERS=true`, refused in Production). These numbers are
+not a Production capacity claim; the hosted demo and the packaged desktop app
+were not load-tested._
+
+Since 2026-10-13, guest QR orders are online-only: an order waits unpaid (no
+kitchen ticket) until its payment is verified, so the guest load below is a full
+cycle — quote → place order → status → start payment → **two simultaneous
+confirmations** (double tap) → status.
+
+### Guest website (Coders' Cafe storefront `/t/<token>`)
+
+Phone emulation (390×844, DPR 2, touch) with 4× CPU throttling, headless
+Chromium, 10 cold runs each (each in a fresh browser context); medians, max in
+brackets.
+
+| Metric | Before (build of 15:15) | After (fixes below) |
+|---|---|---|
+| TTFB | 38 ms (87) | 31 ms (45) |
+| FCP | 272 ms (812) | 232 ms (1,256) |
+| LCP | 1,144 ms (1,448) | 1,240 ms (1,432) |
+| CLS | 0 | 0 |
+| Total blocking time (4× CPU) | 409 ms (1,217) | 428 ms (1,257) |
+| Requests / bytes on first load | 19 / 465 KB | 18 / 379 KB |
+| Font bytes | 258 KB (3 files) | 171 KB (2 files) |
+| Tap → next paint, first "Add" (Event Timing) | 104 ms (184) | 120 ms (136) |
+| Tap → next paint, first item sheet | 136 ms (280) | 128 ms (176) |
+
+Timing differences between the two columns are within run-to-run noise on
+loopback; the measurable change is 86 KB less to download on every guest page
+(and one fewer full-page relayout when that font arrived). Against the usual
+reference targets (LCP ≤ 2.5 s, CLS ≤ 0.1, INP ≤ 200 ms) the lab results pass at
+4× CPU on loopback; the first-sheet tap reached 280 ms once before the change.
+With 1.6 Mbit/s and 150 ms latency emulated, LCP was 1.76 s median (2.0 s max).
+
+Where the load time goes (Chromium trace, 4× CPU): about 0.8–1.0 s of layout per
+load, of which a first layout of ~0.2–0.8 s also happens on the tiny `/login`
+page in headless Chromium on this machine (environment, as noted on 2026-10-13);
+script evaluation ~0.4 s; no long JavaScript handler on any tap (handlers
+0–4 ms; the cost of a tap is style/layout/paint). The server answers the page in
+~30 ms with 10 database queries (no N+1: one query per relation, constant in the
+menu size). Polling is bounded: the menu refreshes every 60 s only while the tab
+is visible, the order page every 5 s with no overlap, the UPI QR panel every 4 s.
+
+Responsive and accessibility check at 360×800, 390×844, 768×1024, 1366×768 and
+1440×900 (menu, item sheet, cart, checkout): no horizontal overflow, item sheet
+fully inside the viewport, no console errors or failed requests, a visible focus
+ring on the first 15 keyboard stops, axe-core (WCAG 2.2 AA tags) clean once
+animations settle. Remaining axe notes are false positives: page text behind the
+modal backdrop (contrast of the dimmed logo), and the 13 px payment radio, which
+sits inside a full-width label card.
+
+Findings fixed:
+
+1. **₹ downloaded a whole font file.** The rupee sign is the only character on
+   the guest pages outside Inter's preloaded latin subset, so every guest page
+   fetched Inter's latin-ext file (86 KB) and re-laid out the menu when it
+   arrived. A local-only `@font-face` ("SF Rupee", `unicode-range: U+20B9`,
+   regular and bold faces, `local()` sources only) now draws ₹ from a font the
+   phone already has; if none is installed, Inter draws it as before
+   (`src/features/guest/storefront.css`, test `tests/ui/storefront-fonts.test.ts`).
+2. **The UPI QR was re-encoded every second.** The payment panel's countdown
+   re-renders it each second and the QR (Reed-Solomon + mask scoring, ~0.8 ms on
+   this CPU, several ms on a slow phone) was recomputed each time; it is now
+   memoized per checkout (`UpiQrPayment.tsx`, test
+   `tests/ui/upi-qr-payment.test.tsx`, which fails on the old code).
+
+Not changed: the framework attaches the marketing site's page chunk (11 KB) to
+every page that uses `next/link` (a Next.js client-manifest quirk); the
+first item-sheet open still pays a one-time display-font setup.
+
+### Controlled load (closed loop, no think time, one IP per guest)
+
+Harness: Node `fetch`, each virtual user (VU) sends its next request when the
+previous answers; 10–60 s per stage; stages ramped and stopped below 250 MB free
+RAM; target refused unless loopback. Percentiles: p95 with ≥ 20 samples, p99 with
+≥ 100.
+
+| Workload | 1 VU | 5 VU | 10 VU | 25 VU | 50 VU |
+|---|---|---|---|---|---|
+| Menu `GET /api/qr/t/:token` req/s (p95 ms) | 29 (43) | 107 (71) | 129 (129) | 127 (507) | 131 (670) |
+| Guest cycle, paid orders/s (order p95 ms) | 3.3 (72) | 5.5 (244) | 6.1 (468) | 6.6 (872) | — |
+| Kitchen board list + advance, req/s, **before fix** | 20 | 38 | **7.6, 503s, p95 5.9 s** | **7.7, 503s, p95 6.1 s** | — |
+| Kitchen, **after fix** req/s (list p95 ms) | — | 74 (89) | 89 (107) | 117 (252) | — |
+| POS open orders req/s (p95 ms) | 45 (32) | — | 149 (115) | 165 (508) | — |
+
+Every stage above answered 100 % 2xx except the kitchen rows marked "before
+fix". Sustained mixed workload after the fix, 25 VU × 61 s (45 % menu, 20 %
+quote, 15 % guest cycles, 13 % kitchen, 7 % POS): 5,200 requests, **0 server
+errors**, 374 paid orders; menu p95 122 ms, kitchen list p95 178 ms, order p95
+665 ms, payment confirmation p50 2.6 s / p95 3.5 s (writes queue behind the single
+SQLite writer). Right after: 1 VU menu p50 19 ms / p95 36 ms. Server working set
+234 MB → 645 MB peak → 626 MB, CPU ≈ 1.8 cores at saturation. Single-request p99
+outliers of ~0.4–0.6 s at the start of each stage come from Windows trimming the
+idle server's memory on this RAM-starved machine (a 12 s steady run had no
+request above 150 ms).
+
+Correctness under load:
+
+- Recovery: 10 VU × 31 s with half the guests abandoning after starting payment
+  (192 unpaid orders) while the payment-recovery cron ran every 2 s (15 runs,
+  200; 15 unauthenticated tries, 401): the abandoned orders stayed OPEN with **no
+  kitchen ticket**; the mock gateway's status check answers UNKNOWN, so nothing
+  was settled without a confirmation.
+- Duplicate submissions (same Idempotency-Key at once): ×2, ×10, ×25 → exactly
+  one order each time (at ×25, 9 got 429 from the per-table limit).
+- Abuse, 10 VU × 20 s: 1,650 unknown tokens → all 404; wrong password → 401 ×6
+  then 429; one IP flooding the menu → exactly 600 per minute then 429; wrong
+  order key → 404; the brute-force alert fired. No 5xx.
+- Database afterwards: `integrity_check` ok; 1,134 QR orders, 0 acknowledged
+  orders missing; 939 PAID, each with exactly one SUCCESS payment and its
+  ticket(s) although every paid order received two concurrent confirmations; 195
+  OPEN, all unpaid and none with a kitchen ticket; 0 duplicate KOT numbers,
+  invoice numbers, idempotency keys or order items on two tickets.
+
+Defect found by the load test, fixed:
+
+3. **Kitchen screens stalled each other.** Every kitchen-board poll by a kitchen
+   account ran `UPDATE Session … WHERE lastActivityAt <= now-60s` to keep the
+   screen signed in. SQLite takes its single write lock for an UPDATE even when it
+   matches no row, and these statements ran outside the queued write path
+   (`runInTx`). With about ten concurrent kitchen clients, enough of them waited
+   on the lock to stall the ticket-update transactions holding it until the 5 s
+   busy timeout: throughput fell from 38 to 8 requests/s, ticket lists answered
+   503, updates took 5–12 s, and the maintenance worker's own write timed out.
+   Reproduced identically with the database in WAL mode (as the desktop app runs
+   it) and in rollback-journal mode. Validation now reports the session's
+   persisted activity time and `recordSessionActivity` skips the write while it
+   is less than a minute old (`src/server/auth/session.ts`,
+   `src/server/api/router.ts`, test `tests/auth/session-activity-writes.test.ts`);
+   the idle-timeout behaviour is unchanged (existing
+   `tests/auth/session-security.test.ts` kitchen-exemption tests pass).
+
+### Highest tested level
+
+On this laptop, one Node process on SQLite: 25 concurrent closed-loop VUs on
+every workload and 50 on menu reads, with 0 server errors after the fixes. Read
+throughput saturates at ~130–165 requests/s and complete paid guest orders at
+~6.6/s; beyond that, latency grows by queueing. Untested: PostgreSQL in this
+pass, the packaged desktop app, the hosted deployment, real phones on Wi-Fi, more
+than one server instance.
+
+---
+
+_The sections below are the 2026-10-13 measurement (historical: cash checkout,
+since removed for QR orders)._
+
 _2026-10-13. Local measurements only (SQLite, and a local PostgreSQL 16 in §5).
 Nothing here was measured on the hosted demo or on the packaged desktop app;
 those are listed as unmeasured at the end._

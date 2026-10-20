@@ -15,6 +15,13 @@ historical record up to Phase 5B and are kept as written._
 > access are obtained and the integration is implemented and configured (`docs/sbi-upi-integration.md`,
 > `docs/payment-safety.md`). Automated tests use a local UPI bank emulator, not SBI.
 
+> **Performance and load — update of 2026-10-20.** Re-measured locally (lab, one laptop, SQLite, mock gateway):
+> `docs/performance-and-load-test.md` § "2026-10-20 re-measurement". The load test found that about ten kitchen
+> screens polling at once stalled ticket updates for 5–12 s with 503 answers (a no-op session write on every
+> kitchen-board poll held SQLite's write lock outside the queued write path); fixed and re-measured (0 errors to
+> 25 concurrent clients). The guest storefront no longer downloads an 86 KB font file just for the ₹ sign, and the
+> UPI QR is no longer re-encoded every second. No Production capacity is claimed from these numbers.
+
 ## Current status (2026-10-09)
 Groups 1-9 of the master program are implemented on branch `claude/serene-ramanujan-rmvdss` (PR #1 into `main`).
 Of the 187 audited rows: **130 IMPLEMENTED + VERIFIED, 25 IMPLEMENTED + NOT EXTERNALLY VERIFIED (mock / emulator only),

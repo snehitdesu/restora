@@ -177,6 +177,24 @@ server boot and the setup flow. Next step before optimizing: profile the
 standalone server start (module loading from `resources/server`, antivirus
 scanning of the unpacked files, cold disk cache) on a machine with free memory.
 
+### 2026-10-20 packaging check (unpacked build only, nothing published)
+- `npm run desktop:pack` failed with "No standalone build found": a stray
+  `package.json` / `package-lock.json` in the user's home folder made Next.js
+  infer that folder as the workspace root, so the standalone server was written to
+  `.next-desktop/standalone/Downloads/food/`. `next.config.mjs` now pins
+  `outputFileTracingRoot` to the checkout (test
+  `tests/config/next-tracing-root.test.ts`); packaging then succeeded.
+- `npm run desktop:verify` on that package: **23/23 checks passed** (fuses, DPAPI
+  secret, upgrade from the previous release with a verified pre-migration backup,
+  sign-in and data intact, first run, debugger / `RUN_AS_NODE` / tampered-asar
+  refusals). The packaged server was ready **2.9 s** after the database step.
+- The run immediately before it, the first launch of the freshly unpacked files,
+  timed out after 120 s waiting for the server's health check; the log was not
+  kept. The cause is not proven (antivirus scanning of new files is the leading
+  suspect, as in the start-up section above). No installer (`desktop:dist`) was
+  built: the version is still `1.0.0-rc.1` and an rc.2 needs the release decision
+  described above.
+
 ## Code signing — NOT configured (installers are unsigned)
 No certificate exists in this repository or CI. Unsigned installers trigger
 SmartScreen warnings and cannot be verified by an updater. Required:
