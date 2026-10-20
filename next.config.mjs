@@ -1,3 +1,5 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { securityHeaders as buildSecurityHeaders, QR_SCANNER_PATH, SCANNER_PERMISSIONS_POLICY } from "./src/server/config/securityHeaders.mjs";
 
 // Development keeps 'unsafe-eval' + ws: (HMR) in the CSP; production adds HSTS.
@@ -10,6 +12,11 @@ const nextConfig = {
   // It builds into its own directory so a `next dev` running in the same checkout
   // (which writes to .next) cannot mix its chunks into the packaged server.
   ...(process.env.AHAROS_STANDALONE === "1" ? { output: "standalone", distDir: ".next-desktop" } : {}),
+  // This checkout is the root. Without it Next infers the root from the nearest lockfile it finds
+  // further up (a stray package-lock.json in the user's home folder did exactly that): the standalone
+  // server then lands in .next-desktop/standalone/<path below that folder>/ and the desktop build
+  // cannot find it, and file tracing may pull files from outside the project into the package.
+  outputFileTracingRoot: path.dirname(fileURLToPath(import.meta.url)),
   // The download route reads dist-desktop/ under `next dev` only (src/site/release.ts), but the
   // file tracer follows that path and copied every built installer (1.3 GB incl. win-unpacked)
   // into the standalone server, so each desktop package embedded the previous one. (Next applies
