@@ -189,11 +189,48 @@ scanning of the unpacked files, cold disk cache) on a machine with free memory.
   sign-in and data intact, first run, debugger / `RUN_AS_NODE` / tampered-asar
   refusals). The packaged server was ready **2.9 s** after the database step.
 - The run immediately before it, the first launch of the freshly unpacked files,
-  timed out after 120 s waiting for the server's health check; the log was not
-  kept. The cause is not proven (antivirus scanning of new files is the leading
-  suspect, as in the start-up section above). No installer (`desktop:dist`) was
+  timed out after 120 s waiting for the server's health check; that run's log was
+  deleted by `desktop:verify`'s cleanup (it now keeps the folder when a check
+  fails). Investigation on 2026-10-21 (below). No installer (`desktop:dist`) was
   built: the version is still `1.0.0-rc.1` and an rc.2 needs the release decision
   described above.
+
+### 2026-10-21 first-launch timeout investigation
+Measured with the packaged server (`resources/server`) started with the app's
+environment, event-loop gap monitoring and CPU profiles, plus seven full
+`desktop:verify` runs. The original >120 s failure was **not reproduced** (three
+attempts right after `desktop:pack`); two causes of slow starts were proven:
+
+1. **Next.js preloaded every route at start-up (fixed).** Next 15's default
+   `experimental.preloadEntriesOnStart` loads all 164 routes and evaluates every
+   module when the server starts. That blocked the server's event loop for
+   2.6–4.3 s in one stretch, so the launcher's first health check failed on
+   **every** start with "database ping timed out" (the database answers in
+   ~50 ms; the timer and the answer were both stuck behind the blocked loop), and
+   a critical "database unavailable" alert was logged. In one stalled warm start
+   the health check answered only after 48.8 s (the launcher gives up at 60 s).
+   With it off (desktop build only; `next.config.mjs`, enforced by
+   `desktop/scripts/build.mjs`, test `tests/config/next-desktop-preload.test.ts`):
+   first health check succeeds every time, health at 1.6–2.1 s instead of
+   4.0–7.6 s (once 5.3 s, when the process itself was slow to launch), total start-up blocking ~2.0 s instead of ≥ 4.1–6.6 s.
+2. **Reading freshly written files is very slow the first time (outside the
+   app).** Right after `desktop:pack`, reading every file of the package once took
+   **108 s** (2,972 files, 457 MB, ≈ 4 MB/s; `.js` files slowest); a second read
+   took 2.5 s. Launching straight after packaging took 28.8 s (before the fix) and
+   31.2 s (after) to serve; after that one pre-read, the same launch served in
+   **1.7 s**. A control test with identical bytes saved as `.js` and `.dat`
+   showed intermittent first-read penalties for `.js` only, and electron-builder
+   itself once failed with `EPERM` renaming its just-extracted folder. This is
+   consistent with on-access antivirus scanning (Defender real-time protection is
+   on), but it is **not proven**: Defender's own counters are not readable here
+   without administrator rights (`New-MpPerformanceRecording` would show it).
+   An installer writes the same fresh files, so a real first launch after
+   installation can pay this cost too; it is within the 60 s limit in every run
+   measured after the fix, but on slower PCs it is untested.
+
+Launch times after the fix (`Aharos server ready on loopback`): warm 2.1 s,
+fresh copy 2.7 s, straight after packaging 31.2 s, after packaging + pre-read
+1.7 s; upgrade from the previous release with data preserved passed in every run.
 
 ## Code signing — NOT configured (installers are unsigned)
 No certificate exists in this repository or CI. Unsigned installers trigger
