@@ -41,6 +41,12 @@ const NEXT_DIR = ".next-desktop";
 const nextDir = path.join(root, NEXT_DIR);
 const standalone = path.join(nextDir, "standalone");
 if (!fs.existsSync(path.join(standalone, "server.js"))) throw new Error(`No standalone build found (${NEXT_DIR}/standalone/server.js); run without --skip-next`);
+// The standalone server.js embeds the Next config. Preloading every route at start-up blocked the
+// desktop server long enough to fail the launcher's readiness check (next.config.mjs): refuse to
+// package a server that would still do it (e.g. after a Next upgrade renames the option).
+if (!fs.readFileSync(path.join(standalone, "server.js"), "utf8").includes('"preloadEntriesOnStart":false')) {
+  throw new Error(`${NEXT_DIR}/standalone/server.js does not disable preloadEntriesOnStart; the desktop server would preload every route at start-up`);
+}
 
 // 2. assemble the server payload
 step("assembling server payload");

@@ -11,7 +11,13 @@ const nextConfig = {
   // that `output: "standalone"` produces; `next start` / the web build are unchanged.
   // It builds into its own directory so a `next dev` running in the same checkout
   // (which writes to .next) cannot mix its chunks into the packaged server.
-  ...(process.env.AHAROS_STANDALONE === "1" ? { output: "standalone", distDir: ".next-desktop" } : {}),
+  //
+  // preloadEntriesOnStart (Next 15 default true) makes the server load every route and evaluate
+  // every module at start-up, blocking its event loop for seconds: the desktop launcher's health
+  // checks then fail ("database ping timed out" although the database is fine), and a stalled start
+  // took 48.8 s to answer (the launcher gives up at 60 s). Off for the desktop server: each screen's
+  // code loads when first opened.
+  ...(process.env.AHAROS_STANDALONE === "1" ? { output: "standalone", distDir: ".next-desktop", experimental: { preloadEntriesOnStart: false } } : {}),
   // This checkout is the root. Without it Next infers the root from the nearest lockfile it finds
   // further up (a stray package-lock.json in the user's home folder did exactly that): the standalone
   // server then lands in .next-desktop/standalone/<path below that folder>/ and the desktop build
