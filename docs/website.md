@@ -49,6 +49,8 @@ node scripts/site/capture-screens.mjs http://localhost:3100   # → public/site/
 node scripts/site/og-image.mjs http://localhost:3100          # → public/site/og.png
 ```
 Never run the seed or `demo-state.ts` against real data (both refuse when non-demo users exist).
+This `next start` line is for a disposable local website demo only: `ALLOW_MOCK_PROVIDERS=true` runs the mock payment/POS adapters (which approve anything) and also tolerates the development placeholder webhook/cron secrets in `.env`. Never set it on a real Production deployment.
+`demo-state.ts` gives the guest-menu table a random QR token (never a fixed one) and writes its `/t/<token>` path to the gitignored `artifacts/table-qr/site-demo/guest-path.txt`, which `capture-screens.mjs` reads; the path is not printed.
 
 ## QA
 - `npx vitest run tests/site`

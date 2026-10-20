@@ -14,11 +14,15 @@ import { chromium } from "@playwright/test";
 import sharp from "sharp";
 import fs from "node:fs";
 import path from "node:path";
+import { readGuestPath } from "./guest-path.mjs";
 
 const BASE = process.argv[2] ?? "http://localhost:3100";
 const ONLY = (process.argv[3] ?? "").split(",").filter(Boolean);
 const OUT = path.join(process.cwd(), "public", "site", "screens");
 const PASSWORD = "Demo@12345"; // prisma/seed.ts demo password (disposable database only)
+// Random guest token issued by scripts/site/demo-state.ts (gitignored file, never printed);
+// read only when a guest shot runs, so the other shots work without it.
+const guestPath = async () => readGuestPath();
 fs.mkdirSync(OUT, { recursive: true });
 
 const DESKTOP = { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 };
@@ -71,8 +75,8 @@ const SHOTS = [
   { name: "printers", role: "owner", device: DESKTOP, path: "/settings/printers" },
   { name: "captain", role: "captain", device: PHONE, path: "/captain" },
   { name: "manager", role: "manager", device: PHONE, path: "/manager" },
-  { name: "guest-menu", device: PHONE, path: "/t/site-demo-table-qr" },
-  { name: "guest-cart", device: PHONE, path: "/t/site-demo-table-qr", act: async (page) => {
+  { name: "guest-menu", device: PHONE, path: guestPath },
+  { name: "guest-cart", device: PHONE, path: guestPath, act: async (page) => {
     for (const i of [3, 7, 6]) {
       await page.getByRole("button", { name: /^Add/ }).nth(i).click();
       await page.waitForTimeout(250);

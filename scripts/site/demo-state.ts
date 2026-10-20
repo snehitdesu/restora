@@ -2,7 +2,8 @@
  * Website screenshot state. Run AFTER the demo seed, on a DISPOSABLE copy of the
  * database, to give the product screenshots a believable service in progress:
  * two weeks of settled orders (analytics), open tables (POS / captain), kitchen
- * tickets in every KDS column and a QR token on one table (guest menu).
+ * tickets in every KDS column and a random QR token on one table (guest menu;
+ * its path is written to artifacts/table-qr/site-demo/guest-path.txt).
  *
  * Everything goes through the real domain services (orders, KOTs, payments,
  * recipe consumption); only `createdAt` of past orders is moved back in time so
@@ -15,6 +16,7 @@ import { systemContext } from "@/server/auth/context";
 import { createOrder, addOrderItem, submitOrder } from "@/server/services/orders";
 import { updateKOTStatus } from "@/server/services/kot";
 import { createPayment, verifyPayment } from "@/server/services/payment";
+import { assignSiteDemoQrToken } from "./demo-qr";
 
 if (process.env.ALLOW_DEMO_SEED !== "true") throw new Error("Refusing: set ALLOW_DEMO_SEED=true on a disposable database copy.");
 
@@ -96,8 +98,8 @@ async function main() {
 
   // 3. A QR token for the guest-menu screenshot.
   const qrTable = tables[10] ?? tables[tables.length - 1];
-  await prisma.restaurantTable.update({ where: { id: qrTable.id }, data: { qrToken: "site-demo-table-qr" } });
-  console.log(`settled ${n} past orders, ${live.length} live tables, QR table ${qrTable.code} -> /t/site-demo-table-qr`);
+  const guestPathFile = await assignSiteDemoQrToken(prisma, qrTable.id);
+  console.log(`settled ${n} past orders, ${live.length} live tables, QR table ${qrTable.code} (guest path in ${guestPathFile})`);
 }
 
 main().finally(() => prisma.$disconnect());
