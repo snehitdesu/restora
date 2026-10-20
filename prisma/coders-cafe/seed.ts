@@ -1,19 +1,24 @@
 /**
  * Coders' Cafe dataset: one organization + outlet with the real menu
- * (./menu.ts), ten dine-in tables T01–T10 with stable QR tokens, and one user
+ * (./menu.ts), ten dine-in tables T01–T10 with random QR tokens, and one user
  * per operating role. Built through RESTORA's own menu / master-data services
  * (audited, validated), so the dataset is exactly what an operator would create
  * by hand.
  *
- *  - Deterministic: the same tables, tokens, users and menu on every run.
+ *  - Deterministic data: the same tables, users and menu on every run. QR
+ *    tokens are random (src/server/qr/tableToken.ts) and are issued only when
+ *    the tables are created: rerunning the CLI without --reset changes nothing,
+ *    and --reset rebuilds the whole organization (new ids, new tokens).
  *  - Additive: it lives in its own organization next to whatever else the
  *    database holds; it never touches another organization's rows.
  *  - Resettable: `reset` deletes ONLY the Coders' Cafe organization (every
  *    org-scoped row, then the organization) and rebuilds it.
  *
- * Demo-only: the users share the public demo password and the QR tokens are
- * derived from public constants. The CLI (prisma/seed-coders-cafe.ts) refuses
- * production; rotate every QR and set real passwords before real use.
+ * Demo-only: the users share the public demo password. The CLI
+ * (prisma/seed-coders-cafe.ts) refuses production; set real passwords before
+ * real use. Databases seeded before 2026-10-20 hold the old derivable tokens
+ * (legacyCafeTableToken); `npm run qr:audit` finds them and
+ * docs/qr-token-rotation.md retires them.
  */
 import { createHash } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
@@ -21,6 +26,7 @@ import { systemContext } from "@/server/auth/context";
 import { hashPassword } from "@/server/auth/password";
 import { importCodersCafeStarter, STARTER_TABLE_CODES } from "@/server/services/starterMenu";
 import { withAppendOnlyGuardsOff } from "@/server/db/appendOnly";
+import { seedCodersCafeDraftRecipes } from "./recipes";
 
 export const CAFE = {
   orgName: "Coders' Cafe",
@@ -39,8 +45,13 @@ export const CAFE = {
   ],
 } as const;
 
-/** Stable, URL-safe QR token for a demo table (matches guestOrdering's token format). */
-export function cafeTableToken(code: string): string {
+/**
+ * The token this seed USED to store (before 2026-10-20): a hash of public
+ * constants, so anyone with the source can compute it. Kept only to recognise
+ * tables still carrying it (scripts/qr/audit-table-tokens.ts) and for the
+ * legacy demo images (scripts/qr/demo-assets.ts). Never issue it.
+ */
+export function legacyCafeTableToken(code: string): string {
   return `cc${createHash("sha256").update(`restora-demo:coders-cafe:table:${code}`).digest("base64url").slice(0, 22)}`;
 }
 
@@ -51,6 +62,8 @@ export type CafeSeedResult = {
   users: Array<{ email: string; role: string }>;
   categories: number;
   items: number;
+  /** DRAFT recipes with estimated quantities (./recipes.ts): never used for stock or food cost until confirmed and approved. */
+  draftRecipes: number;
 };
 
 const SPECIAL: Record<string, (orgId: string) => Record<string, unknown>> = {
@@ -124,17 +137,13 @@ export function demoStaffPasswordForCli(env: DemoSeedEnv = process.env): string 
 }
 
 /** Create the dataset. With `reset`, an existing Coders' Cafe organization is deleted first; without it, an existing one is an error. */
-export async function seedCodersCafe(db: PrismaClient, opts: { reset?: boolean; password?: string } = {}): Promise<CafeSeedResult> {
+export async function seedCodersCafe(db: PrismaClient, opts: { reset?: boolean; password?: string; draftRecipes?: boolean } = {}): Promise<CafeSeedResult> {
   const existing = await findCafe(db);
   if (existing) {
     if (!opts.reset) throw new Error(`${CAFE.orgName} already exists (organization ${existing.id}); pass reset to rebuild it`);
     // The audit trail and the ledger refuse deletion (src/server/db/appendOnly.ts); rebuilding the demo café is the one deliberate exception.
     await withAppendOnlyGuardsOff(db, () => deleteOrganizationData(db, existing.id));
   }
-  // Tokens are unique across the database: a leftover table elsewhere holding one would collide.
-  const clash = await db.restaurantTable.findFirst({ where: { qrToken: { in: CAFE.tableCodes.map(cafeTableToken) } } });
-  if (clash) throw new Error(`QR token of a ${CAFE.orgName} demo table is already used by table ${clash.id}`);
-
   const org = await db.organization.create({ data: { name: CAFE.orgName, currency: CAFE.currency, timezone: CAFE.timezone } });
   const outlet = await db.outlet.create({ data: { organizationId: org.id, code: CAFE.outletCode, name: CAFE.outletName, currency: CAFE.currency, timezone: CAFE.timezone, invoiceSeries: CAFE.invoiceSeries } });
   await db.department.create({ data: { organizationId: org.id, outletId: outlet.id, name: "Kitchen", kind: "KITCHEN" } });
@@ -146,10 +155,11 @@ export async function seedCodersCafe(db: PrismaClient, opts: { reset?: boolean; 
     await db.membership.create({ data: { organizationId: org.id, userId: user.id, outletId: u.outlet ? outlet.id : null, role: u.role } });
   }
 
-  // The same builder the desktop app uses (src/server/services/starterMenu.ts); demo tables get the fixed, printable tokens.
+  // The same builder the desktop app uses (src/server/services/starterMenu.ts), so the tables get its random QR tokens.
   const ctx = systemContext(org.id, [outlet.id]);
-  const menu = await importCodersCafeStarter(ctx, { outletId: outlet.id, tableToken: cafeTableToken }, db);
+  const menu = await importCodersCafeStarter(ctx, { outletId: outlet.id }, db);
+  const recipes = opts.draftRecipes === false ? null : await seedCodersCafeDraftRecipes(db, ctx);
   const rows = await db.restaurantTable.findMany({ where: { outletId: outlet.id }, orderBy: { code: "asc" }, select: { id: true, code: true, qrToken: true } });
   const tables: CafeSeedResult["tables"] = rows.map((t) => ({ id: t.id, code: t.code, token: t.qrToken! }));
-  return { organizationId: org.id, outletId: outlet.id, tables, users: CAFE.users.map((u) => ({ email: u.email, role: u.role })), categories: menu.categories, items: menu.items };
+  return { organizationId: org.id, outletId: outlet.id, tables, users: CAFE.users.map((u) => ({ email: u.email, role: u.role })), categories: menu.categories, items: menu.items, draftRecipes: recipes?.created ?? 0 };
 }

@@ -561,6 +561,9 @@ model RecipeVersion {
   // Overhead added on top of ingredient cost (proposal p. 4): plate cost =
   // ingredients x (1 + overheadPct / 100). Food cost % stays ingredients only.
   overheadPct    Decimal   @default(0)
+  // Quantities are estimates (e.g. a demo draft written without the kitchen's weights). An
+  // estimated version cannot be approved until someone with recipe.manage confirms them.
+  estimated      Boolean   @default(false)
   notes          String?
   approvedById   String?
   approvedAt     DateTime?
@@ -938,8 +941,14 @@ model Payment {
   status         String    @default("PENDING") // PENDING | SUCCESS | FAILED | REFUNDED | PARTIAL
   amount         Decimal
   providerRef    String?
-  provider       String? // mock | razorpay | stripe
+  provider       String? // sbi_upi | upi_emulator (tests) | mock (dev/tests) | razorpay (legacy: verification / refunds only)
   verifiedAt     DateTime?
+  /// Public checkout data the guest's screen shows (e.g. the bank's UPI QR string and expiry), stored so a
+  /// refresh shows the same QR instead of asking the bank for a second one. Never a credential.
+  checkoutData      String?
+  checkoutExpiresAt DateTime?
+  /// Last time the pending-payment recovery job asked the bank about this payment (durable throttle + claim).
+  recheckedAt       DateTime?
   actorId        String?
   /// Client Idempotency-Key: a retried creation returns this payment instead of a second one.
   idempotencyKey String?
@@ -953,6 +962,7 @@ model Payment {
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, outletId, createdAt])
   @@index([orderId])
+  @@index([status, createdAt])
 }
 
 model Refund {
@@ -2003,7 +2013,7 @@ model Anomaly {
   organizationId String
   outletId       String?
   departmentId   String?
-  type           String // NEGATIVE_STOCK | COUNT_VARIANCE | PRICE_SPIKE | UNMAPPED_ITEM | HEAVY_WASTAGE
+  type           String // NEGATIVE_STOCK | COUNT_VARIANCE | PRICE_SPIKE | UNMAPPED_ITEM | HEAVY_WASTAGE | RECONCILIATION_MISMATCH | LATE_PAYMENT_HELD
   severity       String    @default("MEDIUM") // LOW | MEDIUM | HIGH | CRITICAL
   entityType     String?
   entityId       String?

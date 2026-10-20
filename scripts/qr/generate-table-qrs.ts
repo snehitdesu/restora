@@ -1,13 +1,15 @@
 /**
  * Write Coders' Cafe table QR labels from the tokens already stored in the database.
  *
- *   npm run qr:tables
  *   npm run qr:tables -- --base-url http://localhost:3000
  *   npm run qr:tables -- --mode production --base-url https://pos.example.com
+ *   npm run qr:tables -- --base-url http://192.168.1.20:3000 --purpose investor-demo
  *
- * Local mode (the default on this computer) writes a sheet marked
- * NOT FOR CUSTOMER PRINTING. Production mode refuses localhost, private
- * addresses, and any URL that is not public https, and it writes nothing
+ * --base-url is required on every run; PUBLIC_BASE_URL and localhost are never
+ * used as a fallback. Local mode (the default on this computer) writes a sheet
+ * marked NOT FOR CUSTOMER PRINTING. With --purpose, --base-url must be
+ * localhost, loopback, or a private LAN address.
+ * Production mode refuses localhost, private addresses, and any URL that is not public https, and it writes nothing
  * when the URL is refused. Tokens are not created or rotated here.
  */
 import path from "node:path";
@@ -22,8 +24,8 @@ import {
   buildTableQrPack,
   parseQrArgs,
   qrBaseUrlProblem,
+  qrPurposeBaseUrlProblem,
   writeTableQrFiles,
-  type QrEnvironment,
   type TableQrPack,
 } from "@/server/qr/tableLabels";
 
@@ -39,11 +41,11 @@ export async function loadCafeTableRows(db: PrismaClient): Promise<Array<{ code:
   });
 }
 
-export async function runQrGenerate(argv: string[], db: PrismaClient, env: QrEnvironment = process.env): Promise<{ help: true } | { help: false; dir: string; pack: TableQrPack }> {
-  const opts = parseQrArgs(argv, env);
+export async function runQrGenerate(argv: string[], db: PrismaClient): Promise<{ help: true } | { help: false; dir: string; pack: TableQrPack }> {
+  const opts = parseQrArgs(argv);
   if (opts.help) return { help: true };
-  // Refuse a bad production URL before reading tokens or writing files.
-  const problem = qrBaseUrlProblem(opts.baseUrl, opts.mode);
+  // Refuse a missing or bad URL before reading tokens or writing files.
+  const problem = qrBaseUrlProblem(opts.baseUrl, opts.mode) ?? (opts.purpose ? qrPurposeBaseUrlProblem(opts.baseUrl) : null);
   if (problem) throw new TableQrError(problem);
   const rows = await loadCafeTableRows(db);
   const pack = buildTableQrPack({
@@ -52,6 +54,7 @@ export async function runQrGenerate(argv: string[], db: PrismaClient, env: QrEnv
     restaurantName: CAFE.orgName,
     tables: rows,
     expectedCodes: CAFE.tableCodes,
+    purpose: opts.purpose,
   });
   const dir = writeTableQrFiles(opts.outDir, pack);
   return { help: false, dir, pack };

@@ -5,17 +5,18 @@
  *   npx tsx scripts/qr/demo-assets.ts --out artifacts/coders-cafe-qr
  *
  * Reads no database and no environment. Each payload is the existing guest
- * route `/t/<token>` with the token from `cafeTableToken` (the same function
- * the demo seed stores), on one of the allow-listed public origins. Tokens are
- * derived from public constants, so every image is stamped
- * DEMO / NOT FOR CUSTOMER USE. Nothing is created, rotated or written to a
+ * route `/t/<token>` with the LEGACY token from `legacyCafeTableToken` (what
+ * the demo seed stored before 2026-10-20), on one of the allow-listed public
+ * origins. Those tokens are derived from public constants, so every image is
+ * stamped DEMO / NOT FOR CUSTOMER USE, and the images stop working once
+ * Production's tables are rotated (docs/qr-token-rotation.md). Nothing is created, rotated or written to a
  * database. An existing, non-empty output directory is never overwritten: the
  * files go into a timestamped child directory instead.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { cafeTableToken } from "../../prisma/coders-cafe/seed";
+import { legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
 import { CAFE_TABLE_CODES, TableQrError, buildTableQrPack } from "@/server/qr/tableLabels";
 import { qrSvgPath } from "@/lib/qrSvg";
 import { guestTableUrl } from "@/lib/qr/tableQrUrl";
@@ -42,7 +43,7 @@ export function buildDemoPayloads(origin: string, codes: readonly string[] = CAF
   if (!codes.length) throw new TableQrError("No table codes to generate.");
   const rows = codes.map((code) => {
     if (!/^T\d{2}$/.test(code)) throw new TableQrError(`Unsupported table code ${JSON.stringify(code)}.`);
-    return { code, qrToken: cafeTableToken(code) };
+    return { code, qrToken: legacyCafeTableToken(code) };
   });
   // buildTableQrPack applies the repo's own URL/token/duplicate checks.
   const pack = buildTableQrPack({ mode: "local", baseUrl: clean, restaurantName: "Coders' Cafe", tables: rows, expectedCodes: codes });

@@ -11,9 +11,8 @@ function assertMaySeeCost(ctx: AccessContext, outletId: string) {
 }
 import {
   listRecipes, getRecipe, createRecipe, createRecipeVersion, updateRecipeVersion, addRecipeLine, removeRecipeLine,
-  approveRecipeVersion, archiveRecipeVersion, calculateRecipeCost, menuItemCostAndMargin, describeCostLines, setRecipeStocked,
+  approveRecipeVersion, archiveRecipeVersion, calculateRecipeCost, menuItemCostAndMargin, describeCostLines, describeRecipeCost, setRecipeStocked,
 } from "@/server/services/recipe";
-import { num } from "@/domain/money";
 
 export const runtime = "nodejs";
 
@@ -38,7 +37,7 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
       assertOutletAccess(ctx, q.outletId);
       assertMaySeeCost(ctx, q.outletId);
       const c = await calculateRecipeCost(prisma, ctx, params.id, q);
-      return { total: num(c.total), quantity: num(c.quantity), lines: await describeCostLines(prisma, ctx, c.lines) };
+      return describeRecipeCost(prisma, ctx, c);
     },
   },
   {

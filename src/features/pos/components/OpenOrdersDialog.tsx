@@ -8,10 +8,19 @@ import { Dialog } from "@/components/ui/Dialog";
 import { Badge } from "@/components/ui/Badge";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/States";
 
-export type OpenOrder = { id: string; channel: string; source: string; status: string; total: string | number; createdAt: string; tableId: string | null; table?: { code: string } | null; customer?: { name: string } | null; kots?: Array<{ status: string }>; holdLabel?: string | null; heldAt?: string | null };
+export type OpenOrder = { id: string; channel: string; source: string; status: string; total: string | number; createdAt: string; tableId: string | null; table?: { code: string } | null; customer?: { name: string } | null; kots?: Array<{ status: string }>; holdLabel?: string | null; heldAt?: string | null; heldForReview?: boolean };
 
-/** A guest's QR order that no one at the outlet has accepted yet. */
-export const isIncomingQr = (o: Pick<OpenOrder, "source" | "status">) => o.source === "QR" && o.status === "OPEN";
+/**
+ * A guest's QR order not in the kitchen yet: it is waiting for the guest's online payment, and the server
+ * refuses to send it to the kitchen or settle it at the counter before that (kitchenGate.ts).
+ */
+export const isIncomingQr = (o: { source?: string; status: string; heldForReview?: boolean }) => o.source === "QR" && o.status === "OPEN" && !o.heldForReview;
+
+/**
+ * A guest's QR order that IS paid online in full, but the payment was confirmed after the fulfilment window, so it
+ * was not sent to the kitchen by itself. Staff decide: Send (it goes to the kitchen and the bill settles) or refund it.
+ */
+export const isPaidLateQr = (o: { source?: string; status: string; heldForReview?: boolean }) => o.source === "QR" && o.status === "OPEN" && Boolean(o.heldForReview);
 
 /** A bill saved at the counter and not sent to the kitchen (the hold list). */
 export const isHeld = (o: Pick<OpenOrder, "status" | "heldAt">) => o.status === "OPEN" && Boolean(o.heldAt);
@@ -50,7 +59,8 @@ export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { out
   // Incoming QR orders first (oldest first: they have waited longest), then the rest newest first.
   // A guest paying at the counter is already in the kitchen (SENT…): still listed here, unpaid.
   const shown = orders && qrOnly ? orders.filter((o) => o.source === "QR") : orders;
-  const sorted = shown && tab === "open" ? [...shown.filter(isIncomingQr).reverse(), ...shown.filter((o) => !isIncomingQr(o))] : shown;
+  const first = (o: OpenOrder) => isPaidLateQr(o) || isIncomingQr(o);
+  const sorted = shown && tab === "open" ? [...shown.filter(isPaidLateQr), ...shown.filter(isIncomingQr).reverse(), ...shown.filter((o) => !first(o))] : shown;
 
   return (
     <Dialog open onClose={onClose} title="Open orders" description={tab === "open" ? "Orders not yet paid or cancelled" : tab === "held" ? "Bills saved without sending them to the kitchen — pick one up where you left it" : "Latest orders — open a bill or reprint a receipt"} size="lg">
@@ -80,7 +90,7 @@ export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { out
                 <button type="button" disabled={closed} onClick={() => onOpen(o.id)} className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 px-2 py-2.5 text-left text-sm hover:bg-ink-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-500 disabled:cursor-default disabled:hover:bg-transparent">
                   <span className="font-mono text-ink-500">#{o.id.slice(-6).toUpperCase()}</span>
                   <span className="font-medium">{where(o, tableCode)}{o.customer?.name ? ` · ${o.customer.name}` : ""}</span>
-                  {isIncomingQr(o) ? <Badge tone="warn">New QR order</Badge> : o.source === "QR" ? <Badge tone="neutral">{closed ? "QR" : "QR · unpaid"}</Badge> : null}
+                  {isIncomingQr(o) ? <Badge tone="warn">New QR order · awaiting online payment</Badge> : isPaidLateQr(o) ? <Badge tone="bad">QR · paid late · send or refund</Badge> : o.source === "QR" ? <Badge tone="neutral">{closed ? "QR" : "QR · unpaid"}</Badge> : null}
                   {isHeld(o) && <Badge tone={heldMinutes(o) >= STALE_HOLD_MINUTES ? "warn" : "neutral"}>Held{o.holdLabel ? ` · ${o.holdLabel}` : ""}{heldMinutes(o) >= STALE_HOLD_MINUTES ? " · old" : ""}</Badge>}
                   <Badge tone={o.status === "PAID" ? "ok" : o.status === "CANCELLED" ? "bad" : "info"}>{o.status}</Badge>
                   {stage && stage !== "AWAITING_ACCEPTANCE" && <span className="text-xs text-ink-600">{FULFILMENT_LABEL[stage]}</span>}

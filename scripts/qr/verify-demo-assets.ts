@@ -1,5 +1,5 @@
 /**
- * Decode every generated demo PNG and check it against cafeTableToken.
+ * Decode every generated demo PNG and check it against legacyCafeTableToken.
  *   npx tsx scripts/qr/verify-demo-assets.ts <dir>
  * Writes <dir>/verification.json. Never prints or stores a token or full URL.
  */
@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import jsQR from "jsqr";
-import { cafeTableToken } from "../../prisma/coders-cafe/seed";
+import { legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
 import { CAFE_TABLE_CODES } from "@/server/qr/tableLabels";
 import { guestTableUrl, parseTableQr } from "@/lib/qr/tableQrUrl";
 import { DEMO_ORIGINS, DEMO_WARNING, sheetHtml, buildDemoPayloads } from "./demo-assets";
@@ -25,7 +25,7 @@ export function checkPayload(code: string, decoded: string | null, origin: strin
   const parsed = parseTableQr(decoded ?? "", { trustedOrigins: [origin] });
   const route = parsed.ok && decoded !== null && /^https:\/\/[^/]+\/t\/[^/?#]+$/.test(decoded);
   const sameOrigin = parsed.ok && parsed.origin === origin;
-  const matchesSeed = decoded === guestTableUrl(origin, cafeTableToken(code));
+  const matchesSeed = decoded === guestTableUrl(origin, legacyCafeTableToken(code));
   return { route: !!route, origin: !!sameOrigin, matchesSeedToken: matchesSeed };
 }
 

@@ -10,11 +10,13 @@
  *                      amount tampering, restaurant / outlet / table tampering
  *
  * Real browsers (a phone for the customer, desktops for owner / manager / chef), the production build,
- * a real SQLite database built from nothing by prepare-db.ts, and the Razorpay emulator
- * (tests/support/razorpayEmulator.ts) behind RAZORPAY_API_BASE. The browser's checkout.js is replaced by a
- * stub that plays the customer's side of Razorpay's window through the emulator; everything RESTORA does
- * (gateway order for the server's amount, signature + capture lookup, signed webhooks, settlement) is the
- * real code path. Database reads in this file are read-only and independent of the application's own APIs.
+ * a real SQLite database built from nothing by prepare-db.ts, and the dynamic-UPI-QR bank emulator
+ * (tests/support/upiBankEmulator.ts) behind UPI_EMULATOR_BASE — RESTORA's own TEST wire format, not SBI's.
+ * The test plays the payer's UPI app by telling the emulator a QR was paid (or declined); the bank then
+ * sends its signed callback. Everything RESTORA does (the QR for the server's amount, the page polling
+ * RESTORA, the server's own status lookup at the bank, signed callbacks, settlement) is the real code path.
+ * Classification: LOCAL EMULATOR evidence — not SBI UAT, not production. Database reads in this file are
+ * read-only and independent of the application's own APIs.
  *
  * Every step records what it observed (ids, statuses, amounts, HTTP codes); the run writes them to
  * e2e/.evidence-acceptance/acceptance-evidence.{json,md} (+ screenshots). A step that fails is reported
@@ -24,8 +26,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect, request as pwRequest, type APIRequestContext, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { PrismaClient } from "@prisma/client";
-import { RazorpayEmulator, type CheckoutResponse } from "../../tests/support/razorpayEmulator";
-import { ACCEPTANCE_PORT, ACCEPTANCE_EMULATOR_PORT, ACCEPTANCE_RZP } from "../../playwright.acceptance.config";
+import { UpiBankEmulator, type UpiCallback } from "../../tests/support/upiBankEmulator";
+import { ACCEPTANCE_PORT, ACCEPTANCE_EMULATOR_PORT, ACCEPTANCE_UPI } from "../../playwright.acceptance.config";
 import { ACCEPTANCE_DB_PATH, CAFE_GSTIN, DISH, INGREDIENTS, OTHER } from "./fixture";
 
 const BASE = `http://localhost:${ACCEPTANCE_PORT}`;
@@ -87,8 +89,12 @@ async function shot(page: Page, name: string) {
 
 // ------------------------------------------------------------------ infrastructure
 
-const emu = new RazorpayEmulator({ ...ACCEPTANCE_RZP, port: ACCEPTANCE_EMULATOR_PORT, webhookUrl: `${BASE}/api/webhooks/payment/razorpay` });
-const webhooks: Array<Promise<{ status: number; body: unknown }>> = [];
+const emu = new UpiBankEmulator({ ...ACCEPTANCE_UPI, port: ACCEPTANCE_EMULATOR_PORT, webhookUrl: `${BASE}/api/webhooks/payment/upi_emulator` });
+/** A bank callback delivered to RESTORA: HTTP status + RESTORA's answer. */
+async function deliver(cb: UpiCallback | string, signature?: string) {
+  const r = await emu.deliver(cb, signature);
+  return { status: r.status, body: (await r.json().catch(() => null)) as unknown };
+}
 const db = new PrismaClient({ datasourceUrl: `file:${ACCEPTANCE_DB_PATH.replace(/\\/g, "/")}?connection_limit=1&socket_timeout=30` });
 let anon: APIRequestContext; // a stranger: no cookies
 /** Each simulated visitor is a different customer on a different connection (guest writes are limited to 60 a minute per address). */
@@ -104,7 +110,6 @@ test.beforeAll(async () => {
   restore();
 });
 test.afterAll(async () => {
-  await Promise.allSettled(webhooks);
   await emu.stop();
   await anon.dispose();
   await db.$disconnect();
@@ -139,38 +144,14 @@ async function staff(browser: Browser, email: string): Promise<{ context: Browse
   return { context, page };
 }
 
-type CheckoutStep = { failed?: string; response?: CheckoutResponse };
-type CheckoutHook = (c: { gatewayOrderId: string; amountPaise: number; key: string; page: Page }) => Promise<CheckoutStep[]>;
 type Traffic = { path: string; headers: Record<string, string>; body: string | null };
-const opened: Array<{ key: string; gatewayOrderId: string; amountPaise: number }> = [];
 
-/** The customer's phone. Razorpay's checkout.js is a stub driven by `hook` (see the header). */
-async function customerPhone(browser: Browser, hook: CheckoutHook) {
+/** The customer's phone. No payment script is loaded: the bank's UPI QR is drawn by RESTORA. */
+async function customerPhone(browser: Browser) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const page = await context.newPage();
   const traffic: Traffic[] = [];
   const responses: string[] = [];
-  await context.exposeFunction("__rzpCheckout", async (gatewayOrderId: string, amountPaise: number, key: string) => {
-    opened.push({ key, gatewayOrderId, amountPaise });
-    return hook({ gatewayOrderId, amountPaise, key, page });
-  });
-  await context.route("https://checkout.razorpay.com/v1/checkout.js", (route) =>
-    route.fulfill({
-      contentType: "application/javascript",
-      body: `window.Razorpay = class {
-        constructor(o) { this.o = o; this.failed = function () {}; }
-        on(e, cb) { if (e === "payment.failed") this.failed = cb; }
-        open() {
-          const o = this.o;
-          window.__rzpCheckout(o.order_id, o.amount, o.key).then((steps) => {
-            for (const s of steps) if (s.failed) this.failed({ error: { description: s.failed } });
-            const last = steps[steps.length - 1];
-            if (last && last.response) o.handler(last.response); else o.modal.ondismiss();
-          });
-        }
-      };`,
-    })
-  );
   page.on("request", (r) => {
     if (r.method() === "POST" && r.url().includes("/api/qr/")) traffic.push({ path: new URL(r.url()).pathname, headers: r.headers(), body: r.postData() });
   });
@@ -178,6 +159,12 @@ async function customerPhone(browser: Browser, hook: CheckoutHook) {
     if (r.url().includes("/api/qr/")) void r.text().then((t) => responses.push(t)).catch(() => undefined);
   });
   return { context, page, traffic, responses };
+}
+
+/** The bank reference of the QR currently shown for an order (read-only, from the database). */
+async function shownQr(orderId: string) {
+  const p = await until("the bank's QR for the order", () => db.payment.findFirst({ where: { orderId, status: "PENDING", providerRef: { not: null } }, orderBy: { createdAt: "desc" } }));
+  return { paymentId: p.id, reference: p.providerRef! };
 }
 
 // ------------------------------------------------------------------ small helpers
@@ -235,7 +222,7 @@ async function shopFront(tableCode: string) {
 }
 
 /** The customer's journey from the QR page to the placed order (cart priced by the server). */
-async function orderFromTable(guest: Page, link: string, tableCode: string, cart: Array<{ item: string; times?: number }>, expectedTotal: number, pay: "ONLINE" | "CASH") {
+async function orderFromTable(guest: Page, link: string, tableCode: string, cart: Array<{ item: string; times?: number }>, expectedTotal: number, pay: "ONLINE" = "ONLINE") {
   await guest.goto(link);
   await expect(guest.getByLabel(`Table ${tableCode}`).first()).toBeVisible();
   for (const line of cart) {
@@ -246,7 +233,9 @@ async function orderFromTable(guest: Page, link: string, tableCode: string, cart
   await expect(guest.getByTestId("cart-total")).toHaveText(inr(expectedTotal));
   await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await expect(guest.getByText(`Table ${tableCode}`).first()).toBeVisible();
-  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Simulated online payment|Pay online/ }).check();
+  // Online payment is the only way a QR order is paid (no pay-at-the-counter option exists).
+  if (pay === "ONLINE") await expect(guest.getByRole("radio", { name: /Simulated online payment|Pay online|Pay by UPI/ })).toBeChecked();
+  expect(await guest.getByRole("radio", { name: /^Cash/ }).count()).toBe(0);
 }
 async function placeOrder(guest: Page) {
   await guest.getByRole("button", { name: /^Place order/ }).click();
@@ -263,10 +252,10 @@ async function menuItemId(name: string) {
   return (await db.menuItem.findFirstOrThrow({ where: { name, organizationId: await cafeOrgId() } })).id;
 }
 
-/** A gateway payment for an order the customer holds (what the phone does after "Pay online"). */
+/** A bank QR payment for an order the customer holds (what the phone does after "Pay online"). */
 async function startPayment(orderId: string, key: string, body: Record<string, unknown> = {}, idemKey = idem("pay")) {
   const r = await call(anon, "POST", `/api/qr/orders/${orderId}/payments`, { data: body, headers: guestHeaders(key, idemKey) });
-  return { reply: r, paymentId: r.json?.data?.paymentId as string | undefined, gatewayOrderId: (r.json?.data?.checkout as { orderId?: string } | undefined)?.orderId };
+  return { reply: r, paymentId: r.json?.data?.paymentId as string | undefined, reference: (r.json?.data?.checkout as { reference?: string } | undefined)?.reference };
 }
 
 // =====================================================================================================
@@ -294,47 +283,37 @@ test("ACC-A  steps 1-25: T07 → live menu → cart → pay online → verified 
   const stockBefore = await data<Array<{ name: string; quantity: number; avgCost: number }>>(api, `/api/inventory/stock?outletId=${outlet.id}`);
   for (const ing of INGREDIENTS) expect(stockBefore.find((s) => s.name === ing.name)?.quantity, `opening stock of ${ing.name}`).toBeCloseTo(ing.openingQty, 3);
 
-  // ---- the customer's phone; the hook plays Razorpay's window and, FIRST, tries every shortcut to "paid"
+  // ---- the customer's phone. While the bank's QR is on screen (payment PENDING) every shortcut to "paid" is tried first.
   const shortcuts: Array<{ attack: string; httpStatus: number; response: string; paymentAfter: string; orderAfter: string; kotsAfter: number; invoicesAfter: number }> = [];
-  let hookError: string | null = null;
-  const guest = await customerPhone(browser, async ({ gatewayOrderId, page }) => {
-    try {
-      const { orderId, key } = parseOrderUrl(page);
-      const pay = await db.payment.findFirstOrThrow({ where: { orderId, providerRef: gatewayOrderId } });
-      const attack = async (what: string, run: () => Promise<Reply>) => {
-        const r = await run();
-        const p = await db.payment.findUniqueOrThrow({ where: { id: pay.id } });
-        const o = await db.order.findUniqueOrThrow({ where: { id: orderId } });
-        shortcuts.push({ attack: what, httpStatus: r.status, response: message(r) || JSON.stringify(r.json?.data ?? {}).slice(0, 120), paymentAfter: p.status, orderAfter: o.status, kotsAfter: await db.kot.count({ where: { orderId } }), invoicesAfter: await db.taxInvoice.count({ where: { orderId } }) });
-      };
-      const confirm = (body: unknown) => call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: body, headers: guestHeaders(key) });
-      await attack("confirm { paymentId, status: 'SUCCESS' }", () => confirm({ paymentId: pay.id, status: "SUCCESS" }));
-      await attack("confirm { paymentId, paid: true, amount: 157.5 }", () => confirm({ paymentId: pay.id, paid: true, amount: DISH.total }));
-      await attack("confirm { paymentId } (no proof: 'did it go through?')", () => confirm({ paymentId: pay.id }));
-      await attack("confirm { paymentId, providerRef: <real gateway order> } (a claim without a payment)", () => confirm({ paymentId: pay.id, providerRef: gatewayOrderId }));
-      await attack("confirm { paymentId, providerRef: <someone else's gateway order> }", () => confirm({ paymentId: pay.id, providerRef: "order_ForgedByTheGuest01" }));
-      await attack("start payment { status: 'SUCCESS' }", () => call(anon, "POST", `/api/qr/orders/${orderId}/payments`, { data: { status: "SUCCESS" }, headers: guestHeaders(key, idem("shortcut")) }));
-      await attack("staff API as a stranger: POST /api/payments CASH for the full amount", () => call(anon, "POST", "/api/payments", { data: { orderId, method: "CASH", amount: DISH.total } }));
-      await attack("staff API as a stranger: POST /api/payments/:id/verify", () => call(anon, "POST", `/api/payments/${pay.id}/verify`, { data: {} }));
-      await attack("staff API as a stranger: POST /api/orders/:id/submit (send to kitchen unpaid)", () => call(anon, "POST", `/api/orders/${orderId}/submit`, { data: {} }));
-      const forged = JSON.stringify({ entity: "event", account_id: ACCEPTANCE_RZP.accountId, event: "payment.captured", payload: { payment: { entity: { id: "pay_ForgedCapture0001", entity: "payment", amount: Math.round(DISH.total * 100), currency: "INR", status: "captured", order_id: gatewayOrderId, notes: {}, amount_refunded: 0, error_description: null, created_at: 1 } } } });
-      await attack("webhook: payment.captured with a forged signature", async () => {
-        const r = await fetch(emu.cfg.webhookUrl!, { method: "POST", headers: { "content-type": "application/json", "x-razorpay-signature": "0".repeat(64) }, body: forged });
-        return { status: r.status, json: (await r.json().catch(() => null)) as Reply["json"] };
-      });
-      await attack("webhook: payment.captured with no signature at all", async () => {
-        const r = await fetch(emu.cfg.webhookUrl!, { method: "POST", headers: { "content-type": "application/json" }, body: forged });
-        return { status: r.status, json: (await r.json().catch(() => null)) as Reply["json"] };
-      });
-    } catch (e) {
-      hookError = String((e as Error).stack ?? e);
-    }
-    // Now the customer really pays: Razorpay captures, calls the page's handler, and (shortly after) sends its webhook.
-    const ok = emu.attempt(gatewayOrderId, "captured");
-    ids.gatewayPaymentId = ok.payment.id;
-    webhooks.push(new Promise((r) => setTimeout(r, 400)).then(() => emu.deliver("payment.captured", ok.payment.id)));
-    return [{ response: ok.response! }];
-  });
+  const guest = await customerPhone(browser);
+  async function tryEveryShortcut(orderId: string, key: string, payId: string, reference: string) {
+    const attack = async (what: string, run: () => Promise<Reply>) => {
+      const r = await run();
+      const p = await db.payment.findUniqueOrThrow({ where: { id: payId } });
+      const o = await db.order.findUniqueOrThrow({ where: { id: orderId } });
+      shortcuts.push({ attack: what, httpStatus: r.status, response: message(r) || JSON.stringify(r.json?.data ?? {}).slice(0, 120), paymentAfter: p.status, orderAfter: o.status, kotsAfter: await db.kot.count({ where: { orderId } }), invoicesAfter: await db.taxInvoice.count({ where: { orderId } }) });
+    };
+    const confirm = (body: unknown) => call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: body, headers: guestHeaders(key) });
+    await attack("confirm { paymentId, status: 'SUCCESS' }", () => confirm({ paymentId: payId, status: "SUCCESS" }));
+    await attack("confirm { paymentId, paid: true, amount: 157.5 }", () => confirm({ paymentId: payId, paid: true, amount: DISH.total }));
+    await attack("confirm { paymentId } (no proof: 'did it go through?')", () => confirm({ paymentId: payId }));
+    await attack("confirm { paymentId, gateway: { status: SUCCESS, rrn } } ('I paid' + a made-up bank reference)", () => confirm({ paymentId: payId, gateway: { status: "SUCCESS", rrn: "123456789012" } }));
+    await attack("confirm { paymentId, providerRef: <the real QR's reference> } (a claim without a payment)", () => confirm({ paymentId: payId, providerRef: reference }));
+    await attack("confirm { paymentId, providerRef: <someone else's reference> }", () => confirm({ paymentId: payId, providerRef: "RSTForgedByTheGuest01" }));
+    await attack("start payment { status: 'SUCCESS' }", () => call(anon, "POST", `/api/qr/orders/${orderId}/payments`, { data: { status: "SUCCESS" }, headers: guestHeaders(key, idem("shortcut")) }));
+    await attack("staff API as a stranger: POST /api/payments CASH for the full amount", () => call(anon, "POST", "/api/payments", { data: { orderId, method: "CASH", amount: DISH.total } }));
+    await attack("staff API as a stranger: POST /api/payments/:id/verify", () => call(anon, "POST", `/api/payments/${payId}/verify`, { data: {} }));
+    await attack("staff API as a stranger: POST /api/orders/:id/submit (send to kitchen unpaid)", () => call(anon, "POST", `/api/orders/${orderId}/submit`, { data: {} }));
+    const forged = JSON.stringify({ eventId: "forged-success-0001", merchantId: ACCEPTANCE_UPI.merchantId, reference, status: "SUCCESS", amountPaise: Math.round(DISH.total * 100), currency: "INR", rrn: "999999999999" });
+    await attack("bank callback: SUCCESS with a forged signature", async () => {
+      const r = await deliver(forged, "0".repeat(64));
+      return { status: r.status, json: r.body as Reply["json"] };
+    });
+    await attack("bank callback: SUCCESS with no signature at all", async () => {
+      const r = await fetch(emu.cfg.webhookUrl!, { method: "POST", headers: { "content-type": "application/json" }, body: forged });
+      return { status: r.status, json: (await r.json().catch(() => null)) as Reply["json"] };
+    });
+  }
   const g = guest.page;
 
   // ---------------------------------------------------------------- CUSTOMER
@@ -404,29 +383,36 @@ test("ACC-A  steps 1-25: T07 → live menu → cart → pay online → verified 
     return { checkoutShows: "Table T07", screenshot: await shot(g, "customer-checkout") };
   });
 
-  await step(7, "CUSTOMER", "Choose online payment (the configured Razorpay test / emulator flow)", async () => {
-    const online = g.getByRole("radio", { name: /Simulated online payment|Pay online/ });
-    await online.check();
+  await step(7, "CUSTOMER", "Online payment (the bank's UPI QR — here the local bank emulator) is the only payment option", async () => {
+    const online = g.getByRole("radio", { name: /Simulated online payment|Pay online|Pay by UPI/ });
     await expect(online).toBeChecked();
+    expect(await g.getByRole("radio", { name: /^Cash/ }).count()).toBe(0);
     const options = (await call(anon, "GET", `/api/qr/t/${t07.qrToken}`)).json!.data!.payment as Record<string, unknown>;
     expect(options.online).toBe(true);
-    return { paymentOptionsFromServer: options, gateway: "Razorpay adapter → local emulator (RAZORPAY_API_BASE), key id " + ACCEPTANCE_RZP.keyId };
+    return { paymentOptionsFromServer: options, bank: `upi_emulator adapter → local bank emulator (UPI_EMULATOR_BASE), merchant ${ACCEPTANCE_UPI.merchantId}` };
   });
 
   let orderId = "";
   let orderKey = "";
-  await step(8, "CUSTOMER", "Complete the payment (Razorpay window plays the customer: success)", async () => {
+  await step(8, "CUSTOMER", "Complete the payment: the bank's QR is shown; after every shortcut fails, the payer pays it; the page learns it from RESTORA", async () => {
     await g.getByRole("button", { name: /^Place order/ }).click();
     await g.waitForURL(/\/o\/[^/#]+#k=/);
     ({ orderId, key: orderKey } = parseOrderUrl(g));
     mainOrderKey = orderKey;
-    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible();
-    await Promise.all(webhooks);
-    expect(hookError, "the shortcut attempts themselves must not crash").toBeNull();
-    const pay = await db.payment.findFirstOrThrow({ where: { orderId } });
-    Object.assign(ids, { orderId, orderRef: `#${ref(orderId)}`, restoraPaymentId: pay.id, gatewayOrderId: pay.providerRef });
-    expect(opened.at(-1)).toMatchObject({ key: ACCEPTANCE_RZP.keyId, amountPaise: Math.round(DISH.total * 100) });
-    return { orderId, razorpayWindowOpenedWith: opened.at(-1), pageShows: "Payment successful. Thank you!", screenshot: await shot(g, "customer-paid") };
+    await expect(g.getByTestId("upi-qr")).toBeVisible();
+    await expect(g.getByTestId("upi-amount")).toHaveText(inr(DISH.total));
+    const qr = await shownQr(orderId);
+    expect(emu.txn(qr.reference)).toMatchObject({ amountPaise: Math.round(DISH.total * 100), currency: "INR", status: "PENDING" });
+    const qrScreenshot = await shot(g, "customer-upi-qr");
+    await tryEveryShortcut(orderId, orderKey, qr.paymentId, qr.reference);
+    await expect(g.getByText("Payment successful. Thank you!")).toHaveCount(0);
+    // Now the payer really pays in their UPI app; the bank confirms and sends its signed callback.
+    const cb = await emu.pay(qr.reference);
+    ids.bankCallback = cb;
+    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible({ timeout: 30_000 });
+    const pay = await db.payment.findFirstOrThrow({ where: { orderId, status: "SUCCESS" } });
+    Object.assign(ids, { orderId, orderRef: `#${ref(orderId)}`, restoraPaymentId: pay.id, bankReference: pay.providerRef, bankRrn: cb.rrn });
+    return { orderId, qrShownFor: inr(DISH.total), bankReference: qr.reference, bankRrn: cb.rrn, pageShows: "Payment successful. Thank you!", screenshots: [qrScreenshot, await shot(g, "customer-paid")] };
   });
 
   // ---------------------------------------------------------------- BACKEND
@@ -445,23 +431,22 @@ test("ACC-A  steps 1-25: T07 → live menu → cart → pay online → verified 
     return { orderId, ref: `#${ref(orderId)}`, channel: o.channel, source: o.source, lines: o.items.map((i) => `${rupees(i.qty)} × ${i.name} @ ₹${rupees(i.unitPrice)}`), subtotal: rupees(o.subtotal), gst: rupees(o.tax), total: rupees(o.total), orderRequestTheBrowserSent: sentBody, createAuditEntry: { id: audit.id, action: audit.action, after: audit.after } };
   });
 
-  await step(10, "BACKEND", "The payment is actually verified server-side (signature + the server's own lookup at the gateway)", async () => {
-    const p = await db.payment.findFirstOrThrow({ where: { orderId } });
-    expect(p).toMatchObject({ method: "ONLINE", provider: "razorpay", status: "SUCCESS" });
+  await step(10, "BACKEND", "The payment is actually verified server-side (the server's own status lookup at the bank: merchant, reference, amount, INR, final status)", async () => {
+    const p = await db.payment.findFirstOrThrow({ where: { orderId, status: "SUCCESS" } });
+    expect(p).toMatchObject({ method: "ONLINE", provider: "upi_emulator", status: "SUCCESS" });
     expect(p.verifiedAt).not.toBeNull();
     expect(rupees(p.amount)).toBe(DISH.total);
-    expect(p.providerRef).toMatch(/^order_/);
-    const gwOrder = emu.orders.get(p.providerRef!)!;
-    expect(gwOrder.amount).toBe(Math.round(DISH.total * 100)); // the gateway order was created for the SERVER's amount
-    expect(gwOrder.status).toBe("paid");
-    const posts = emu.calls.filter((c) => c.method === "POST" && c.path === "/orders");
-    const paymentLookups = emu.calls.filter((c) => c.method === "GET" && c.path === `/payments/${ids.gatewayPaymentId}`);
-    expect(posts).toHaveLength(1);
-    expect(paymentLookups.length, "the server asked the gateway about the payment itself").toBeGreaterThanOrEqual(1);
-    const browserSawSecret = [...guest.responses, await g.content()].some((t) => t.includes(ACCEPTANCE_RZP.keySecret) || t.includes(ACCEPTANCE_RZP.webhookSecret));
+    expect(p.providerRef).toBe(`RST${p.id}`.slice(0, 35)); // RESTORA's own reference, never the client's
+    const txn = emu.txn(p.providerRef!);
+    expect(txn).toMatchObject({ amountPaise: Math.round(DISH.total * 100), merchantId: ACCEPTANCE_UPI.merchantId, status: "SUCCESS" }); // the QR was created for the SERVER's amount
+    const creates = emu.calls.filter((c) => c.method === "POST" && c.path === "/v1/qr");
+    const lookups = emu.calls.filter((c) => c.method === "GET" && c.path === `/v1/qr/${encodeURIComponent(p.providerRef!)}/status`);
+    expect(creates).toHaveLength(1);
+    expect(lookups.length, "the server asked the bank about the payment itself").toBeGreaterThanOrEqual(1);
+    const browserSawSecret = [...guest.responses, await g.content()].some((t) => t.includes(ACCEPTANCE_UPI.apiKey) || t.includes(ACCEPTANCE_UPI.webhookSecret));
     expect(browserSawSecret).toBe(false);
     const audit = await db.auditLog.findMany({ where: { entityType: "Payment", entityId: p.id }, orderBy: { createdAt: "asc" } });
-    return { restoraPaymentId: p.id, status: p.status, method: p.method, provider: p.provider, amount: rupees(p.amount), gatewayOrderId: p.providerRef, gatewayPaymentId: ids.gatewayPaymentId, verifiedAt: p.verifiedAt, gatewayOrderCreatedForPaise: gwOrder.amount, gatewayCallsMadeByTheServer: emu.calls.map((c) => `${c.method} ${c.path}`), keySecretNeverReachedTheBrowser: !browserSawSecret, paymentAudit: audit.map((a) => ({ action: a.action, after: a.after })) };
+    return { restoraPaymentId: p.id, status: p.status, method: p.method, provider: p.provider, amount: rupees(p.amount), bankReference: p.providerRef, bankRrn: ids.bankRrn, verifiedAt: p.verifiedAt, qrCreatedForPaise: txn.amountPaise, bankCallsMadeByTheServer: emu.calls.map((c) => `${c.method} ${c.path}`), bankCredentialsNeverReachedTheBrowser: !browserSawSecret, paymentAudit: audit.map((a) => ({ action: a.action, after: a.after })) };
   });
 
   await step(11, "BACKEND", "The order moves to the correct paid / confirmed state", async () => {
@@ -476,8 +461,8 @@ test("ACC-A  steps 1-25: T07 → live menu → cart → pay online → verified 
     return { orderStatus: o.status, paidAt: o.paidAt, kotStatusRightAfterPayment: o.kots[0].status, guestPageStage: stage, auditTrail: trail.map((a) => `${a.action} ${a.after ?? ""}`) };
   });
 
-  await step(12, "BACKEND", "No client-side 'paid' shortcut can bypass verification (11 attacks made while the real payment was PENDING)", async () => {
-    expect(shortcuts.length).toBeGreaterThanOrEqual(11);
+  await step(12, "BACKEND", "No client-side 'paid' shortcut can bypass verification (12 attacks made while the real payment was PENDING)", async () => {
+    expect(shortcuts.length).toBeGreaterThanOrEqual(12);
     for (const s of shortcuts) {
       expect(s.paymentAfter, `${s.attack}: payment`).toBe("PENDING");
       expect(s.orderAfter, `${s.attack}: order`).toBe("OPEN");
@@ -489,8 +474,9 @@ test("ACC-A  steps 1-25: T07 → live menu → cart → pay online → verified 
     for (const s of byAttack("stranger")) expect(s.httpStatus, s.attack).toBe(401);
     for (const s of byAttack("webhook")) expect(s.httpStatus, s.attack).toBe(401);
     expect(byAttack("no proof")[0].httpStatus).toBe(200); // an honest status check: still PENDING
+    expect(byAttack("made-up bank reference")[0].httpStatus).toBe(200); // the browser's payload is ignored: still PENDING
     expect(byAttack("someone else's")[0].httpStatus).toBe(422);
-    return { attempts: shortcuts, conclusion: "after every attempt the payment was still PENDING, the order OPEN, with no KOT and no invoice; only the real, signed, gateway-confirmed capture settled it" };
+    return { attempts: shortcuts, conclusion: "after every attempt the payment was still PENDING, the order OPEN, with no KOT and no invoice; only the bank's own confirmation (status lookup) settled it" };
   });
 
   await step(13, "BACKEND", "Exactly one KOT is generated", async () => {
@@ -586,9 +572,9 @@ test("ACC-A  steps 1-25: T07 → live menu → cart → pay online → verified 
 
   await step(22, "BACK OFFICE", "The payment appears in Finance / Money Desk", async () => {
     const payRow = await data<{ items: Array<{ id: string; orderId: string; status: string; amount: number; method: string; providerRef: string | null }> }>(api, `/api/finance/payments?outletId=${outlet.id}&orderId=${orderId}`);
-    expect(payRow.items.filter((p) => p.status === "SUCCESS").map((p) => [p.method, p.amount, p.providerRef])).toEqual([["ONLINE", DISH.total, ids.gatewayOrderId]]);
+    expect(payRow.items.filter((p) => p.status === "SUCCESS").map((p) => [p.method, p.amount, p.providerRef])).toEqual([["ONLINE", DISH.total, ids.bankReference]]);
     await owner.page.goto("/finance/payments");
-    const uiRow = owner.page.getByRole("row").filter({ hasText: String(ids.gatewayOrderId) });
+    const uiRow = owner.page.getByRole("row").filter({ hasText: String(ids.bankReference) });
     await expect(uiRow).toHaveCount(1);
     await expect(uiRow).toContainText(inr(DISH.total));
     const paymentsScreenRow = (await uiRow.innerText()).replace(/\s+/g, " ");
@@ -680,48 +666,46 @@ test("ACC-B  step 26: a failed payment must NOT reach the kitchen as PAID", asyn
   const { table, link } = await shopFront("T08");
   const before = await books();
   let bankPayment = "";
-  const guest = await customerPhone(browser, async ({ gatewayOrderId }) => {
-    const d = emu.attempt(gatewayOrderId, "failed");
-    bankPayment = d.payment.id;
-    webhooks.push(emu.deliver("payment.failed", d.payment.id));
-    await webhooks.at(-1);
-    return [{ failed: d.payment.error_description! }];
-  });
+  const guest = await customerPhone(browser);
 
   await step(26, "NEGATIVE", "Failed payment must NOT reach the kitchen as PAID", async () => {
     const checks: Array<{ check: string; observed: unknown }> = [];
-    // (a) the bank declines in the Razorpay window, the customer closes it
+    // (a) the payer's bank declines the QR payment (the bank's callback says FAILED)
     await orderFromTable(guest.page, link, "T08", [{ item: SECOND_DISH.name }], SECOND_DISH.total, "ONLINE");
     const { orderId, key } = await placeOrder(guest.page);
-    await expect(guest.page.getByRole("alert").filter({ hasText: /declined by the bank.*You can try again\./ })).toBeVisible();
-    await Promise.all(webhooks);
+    await expect(guest.page.getByTestId("upi-qr")).toBeVisible();
+    const first = await shownQr(orderId);
+    bankPayment = first.reference;
+    await emu.pay(first.reference, "FAILED");
+    await expect(guest.page.getByRole("alert").filter({ hasText: /declined.*You can try again/ })).toBeVisible({ timeout: 30_000 });
     let s = await orderState(orderId);
-    checks.push({ check: "(a) declined by the bank, window closed", observed: s });
+    checks.push({ check: "(a) declined by the payer's bank", observed: s });
     expect(s).toMatchObject({ status: "OPEN", successPayments: 0, kots: 0, invoiceNo: null });
     expect(s.payments).toEqual(["FAILED"]);
     const failedAudit = await db.auditLog.findFirst({ where: { entityType: "Payment", action: "PAYMENT", after: { contains: '"FAILED"' } } });
     checks.push({ check: "the failure is audited", observed: failedAudit ? JSON.parse(failedAudit.after!) : null });
     expect(failedAudit).not.toBeNull();
 
-    // (b) a second attempt is only AUTHORIZED at the bank (money not captured yet): the customer's handler fires, the webhook claims capture
+    // (b) a second QR, still unpaid at the bank: the guest's check stays PENDING, and a correctly signed callback that CLAIMS success
+    //     is not believed (RESTORA asks the bank, which says PENDING)
     const second = await startPayment(orderId, key);
     expect(second.reply.status).toBe(200);
-    const auth = emu.attempt(second.gatewayOrderId!, "authorized");
-    const confirm = await call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: { paymentId: second.paymentId, gateway: auth.response }, headers: guestHeaders(key) });
-    checks.push({ check: "(b) authorized-not-captured: confirm", observed: { http: confirm.status, paymentStatus: confirm.json?.data?.paymentStatus, pending: confirm.json?.data?.pending } });
+    expect(second.reference).not.toBe(first.reference);
+    const confirm = await call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: { paymentId: second.paymentId }, headers: guestHeaders(key) });
+    checks.push({ check: "(b) unpaid at the bank: the guest's status check", observed: { http: confirm.status, paymentStatus: confirm.json?.data?.paymentStatus, pending: confirm.json?.data?.pending } });
     expect(confirm.status).toBe(200);
     expect(confirm.json!.data).toMatchObject({ paymentStatus: "PENDING", pending: true });
-    const hook = await emu.deliver("payment.captured", auth.payment.id);
-    checks.push({ check: "(b) a webhook that CLAIMS capture for an uncaptured payment (a 5xx tells the gateway to deliver it again later)", observed: { http: hook.status, body: hook.body } });
-    expect(hook.status, "a capture the gateway does not confirm is never acknowledged as processed").toBeGreaterThanOrEqual(500);
+    const hook = await deliver(emu.callbackFor({ ...emu.txn(second.reference!), status: "SUCCESS", rrn: "000000000001" }, `claim-${second.reference}`));
+    checks.push({ check: "(b) a signed callback that CLAIMS success the bank's status API does not confirm (a 5xx tells the bank to deliver it again later)", observed: { http: hook.status, body: hook.body } });
+    expect(hook.status, "a success the bank does not confirm is never acknowledged as processed").toBeGreaterThanOrEqual(500);
     s = await orderState(orderId);
     expect(s).toMatchObject({ status: "OPEN", successPayments: 0, kots: 0, invoiceNo: null });
     expect(s.payments.sort()).toEqual(["FAILED", "PENDING"]);
     checks.push({ check: "(b) state", observed: s });
 
-    // (c) a forged / invalid checkout proof
-    const forged = await call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: { paymentId: second.paymentId, gateway: { razorpay_payment_id: auth.payment.id, razorpay_order_id: second.gatewayOrderId, razorpay_signature: "f".repeat(64) } }, headers: guestHeaders(key) });
-    checks.push({ check: "(c) forged checkout signature", observed: { http: forged.status, paymentStatus: forged.json?.data?.paymentStatus } });
+    // (c) a forged "proof" from the browser (a made-up bank reference and status)
+    const forged = await call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: { paymentId: second.paymentId, gateway: { status: "SUCCESS", rrn: "424242424242", reference: second.reference! } }, headers: guestHeaders(key) });
+    checks.push({ check: "(c) forged payment proof sent by the browser", observed: { http: forged.status, paymentStatus: forged.json?.data?.paymentStatus } });
     s = await orderState(orderId);
     expect(s).toMatchObject({ status: "OPEN", successPayments: 0, kots: 0 });
     expect(s.payments.every((p) => p !== "SUCCESS")).toBe(true);
@@ -753,21 +737,21 @@ test("ACC-C  step 27: a duplicate payment / webhook must NOT create a duplicate 
     const before = await books();
     const payment = await db.payment.findFirstOrThrow({ where: { orderId } });
     const kotBefore = await db.kot.findFirstOrThrow({ where: { orderId } });
-    const gwPayId = ids.gatewayPaymentId as string;
+    const cb = ids.bankCallback as UpiCallback;
 
-    const one = await emu.deliver("payment.captured", gwPayId);
-    checks.push({ check: "the same payment.captured webhook delivered again", observed: one });
+    const one = await deliver(cb);
+    checks.push({ check: "the same SUCCESS callback delivered again", observed: one });
     expect(one.status).toBe(200);
     expect(one.body).toMatchObject({ status: "DUPLICATE" });
 
-    const burst = await Promise.all(Array.from({ length: 8 }, () => emu.deliver("payment.captured", gwPayId)));
+    const burst = await Promise.all(Array.from({ length: 8 }, () => deliver(cb)));
     checks.push({ check: "8 simultaneous deliveries of the same event", observed: burst.map((b) => `${b.status} ${(b.body as { status?: string })?.status}`) });
     expect(burst.every((b) => b.status === 200)).toBe(true);
 
-    // a late failure notice for an earlier attempt must not undo a settled payment
-    const late = emu.attempt(payment.providerRef!, "failed");
-    const lateHook = await emu.deliver("payment.failed", late.payment.id);
-    checks.push({ check: "a late payment.failed webhook after the payment succeeded", observed: lateHook });
+    // a late failure notice (signed) after the payment succeeded must not undo it
+    const late: UpiCallback = { ...cb, eventId: `${cb.reference}:LATE-FAILED`, status: "FAILED", rrn: null };
+    const lateHook = await deliver(late);
+    checks.push({ check: "a late FAILED callback after the payment succeeded", observed: lateHook });
 
     // customer pays again: a second payment on a settled order is refused; a re-sent confirm changes nothing
     const orderKey = mainOrderKey;
@@ -778,12 +762,12 @@ test("ACC-C  step 27: a duplicate payment / webhook must NOT create a duplicate 
     checks.push({ check: "3 simultaneous re-sent confirms", observed: replays.map((r) => `${r.status} ${r.json?.data?.paymentStatus}`) });
     expect(replays.every((r) => r.status === 200)).toBe(true);
     // Webhook events are recorded once per (provider, event id); the id is namespaced by the merchant account.
-    const events = await db.webhookEvent.findMany({ where: { eventId: { endsWith: `payment.captured:${gwPayId}` } } });
+    const events = await db.webhookEvent.findMany({ where: { eventId: { endsWith: cb.eventId } } });
     expect(events).toHaveLength(1);
-    checks.push({ check: "the one stored webhook event for the capture", observed: { eventId: events[0].eventId, status: events[0].status, note: events[0].error } });
-    const lateFailure = await db.webhookEvent.findMany({ where: { eventId: { endsWith: `payment.failed:${late.payment.id}` } } });
+    checks.push({ check: "the one stored callback event for the success", observed: { eventId: events[0].eventId, status: events[0].status, note: events[0].error } });
+    const lateFailure = await db.webhookEvent.findMany({ where: { eventId: { endsWith: late.eventId } } });
     expect(lateFailure).toHaveLength(1);
-    checks.push({ check: "the late payment.failed notice was recorded and ignored", observed: { status: lateFailure[0].status, note: lateFailure[0].error } });
+    checks.push({ check: "the late FAILED notice was recorded and ignored", observed: { status: lateFailure[0].status, note: lateFailure[0].error } });
     const after = await books();
     const paymentAfter = await db.payment.findUniqueOrThrow({ where: { id: payment.id } });
     expect(after).toEqual(before);
@@ -801,7 +785,7 @@ test("ACC-D  step 28: a duplicate customer submission must NOT create duplicate 
   await asVisitor("203.0.113.28");
   const { table, link } = await shopFront("T09");
   const penne = await menuItemId(SECOND_DISH.name);
-  const guest = await customerPhone(browser, async () => []);
+  const guest = await customerPhone(browser);
   await step(28, "NEGATIVE", "Duplicate customer submission must NOT create duplicate orders", async () => {
     const checks: Array<{ check: string; observed: unknown }> = [];
     const countOrders = () => db.order.count({ where: { tableId: table.id } });
@@ -843,15 +827,20 @@ test("ACC-D  step 28: a duplicate customer submission must NOT create duplicate 
     expect(await countOrders()).toBe(2);
 
     // (e) "Pay online" pressed again and again: the browser already opened one payment when the order was placed; more taps resume it
-    const gatewayOrdersFor = () => [...emu.orders.values()].filter((o) => (o.notes as { aharos_order?: string }).aharos_order === orderId).length;
-    expect(gatewayOrdersFor()).toBe(1);
+    const gatewayOrdersFor = async () => {
+      const refs = new Set((await db.payment.findMany({ where: { orderId }, select: { providerRef: true } })).map((p) => p.providerRef));
+      return [...emu.txns.values()].filter((t) => refs.has(t.reference)).length;
+    };
+    await until("the browser's own QR", async () => (await gatewayOrdersFor()) === 1);
+    expect(await gatewayOrdersFor()).toBe(1);
     const p1 = await startPayment(orderId, key, {}, idem("tap1"));
     const p2 = await startPayment(orderId, key, {}, idem("tap2"));
     const p3 = await startPayment(orderId, key, {}, idem("tap1")); // a retry of the first tap's own key
     const rows = await db.payment.findMany({ where: { orderId } });
-    checks.push({ check: "(e) Pay online pressed again (3 more taps after the browser's own)", observed: { samePaymentEveryTime: new Set([p1.paymentId, p2.paymentId, p3.paymentId, rows[0]?.id]).size === 1, sameGatewayOrder: new Set([p1.gatewayOrderId, p2.gatewayOrderId, p3.gatewayOrderId, rows[0]?.providerRef]).size === 1, gatewayOrdersForThisOrder: gatewayOrdersFor(), paymentRows: rows.length } });
+    checks.push({ check: "(e) Pay online pressed again (3 more taps after the browser's own)", observed: { samePaymentEveryTime: new Set([p1.paymentId, p2.paymentId, p3.paymentId, rows[0]?.id]).size === 1, sameBankQr: new Set([p1.reference, p2.reference, p3.reference, rows[0]?.providerRef]).size === 1, bankQrsForThisOrder: await gatewayOrdersFor(), paymentRows: rows.length } });
     expect(new Set([p1.paymentId, p2.paymentId, p3.paymentId, rows[0].id]).size).toBe(1);
-    expect(gatewayOrdersFor()).toBe(1);
+    expect(new Set([p1.reference, p2.reference, p3.reference, rows[0].providerRef]).size).toBe(1);
+    expect(await gatewayOrdersFor()).toBe(1);
     expect(rows).toHaveLength(1);
 
     // (f) different keys are different submissions — by design not merged, but a table cannot flood the kitchen
@@ -873,7 +862,7 @@ test("ACC-E  step 29: tampering with the amount must fail", async ({ browser }) 
   const { table, link } = await shopFront("T10");
   const penne = await menuItemId(SECOND_DISH.name);
   const manager = await staff(browser, USERS.manager);
-  const guest = await customerPhone(browser, async () => []);
+  const guest = await customerPhone(browser);
   await step(29, "NEGATIVE", "Tampering with the amount must fail", async () => {
     const checks: Array<{ check: string; observed: unknown }> = [];
     const before = await books();
@@ -907,7 +896,7 @@ test("ACC-E  step 29: tampering with the amount must fail", async ({ browser }) 
     checks.push({ check: "(b) browser request rewritten to unitPrice 1 / total 1", observed: { screenShows: (await guest.page.getByRole("alert").first().innerText()).replace(/\s+/g, " "), ordersCreated: 0 } });
     await guest.page.unroute("**/api/qr/t/*/orders");
 
-    // (c) an honest order; the amount sent to the gateway is the SERVER's
+    // (c) an honest order; the amount of the bank's QR is the SERVER's
     const placed = await call(anon, "POST", `/api/qr/t/${table.qrToken}/orders`, { data: cartBody(penne), headers: { "idempotency-key": idem("honest") } });
     expect(placed.status).toBe(200);
     const orderId = placed.json!.data!.orderId as string;
@@ -922,26 +911,30 @@ test("ACC-E  step 29: tampering with the amount must fail", async ({ browser }) 
     checks.push({ check: "(c) start-payment bodies { amount }, { total }, { parts: 0 | -1 | 1 | 99 | 1.5 }", observed: "all 422, no payment row created" });
     const pay = await startPayment(orderId, key);
     expect(pay.reply.status).toBe(200);
-    const gwOrder = emu.orders.get(pay.gatewayOrderId!)!;
-    expect(gwOrder.amount).toBe(Math.round(SECOND_DISH.total * 100));
+    const txn = emu.txn(pay.reference!);
+    expect(txn.amountPaise).toBe(Math.round(SECOND_DISH.total * 100));
     expect(rupees((await db.payment.findUniqueOrThrow({ where: { id: pay.paymentId! } })).amount)).toBe(SECOND_DISH.total);
-    checks.push({ check: "(c) gateway order amount vs the bill", observed: { billRupees: SECOND_DISH.total, gatewayOrderPaise: gwOrder.amount, paymentRowRupees: SECOND_DISH.total } });
+    checks.push({ check: "(c) bank QR amount vs the bill", observed: { billRupees: SECOND_DISH.total, qrPaise: txn.amountPaise, paymentRowRupees: SECOND_DISH.total } });
 
-    // (d) the customer pays ONE RUPEE at the gateway for the ₹194.25 bill; the checkout response and the webhook both arrive
-    const cheap = emu.attempt(pay.gatewayOrderId!, "captured", { amount: 100 });
-    const confirm = await call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: { paymentId: pay.paymentId, gateway: cheap.response }, headers: guestHeaders(key) });
-    const hook = await emu.deliver("payment.captured", cheap.payment.id);
+    // (d) the bank reports a success of ONE RUPEE for the ₹194.25 bill (status API and callback both say ₹1)
+    await emu.pay(pay.reference!, "SUCCESS", { callback: false });
+    emu.faults.set(pay.reference!, { override: { amountPaise: 100 } });
+    const confirm = await call(anon, "POST", `/api/qr/orders/${orderId}/payments/confirm`, { data: { paymentId: pay.paymentId }, headers: guestHeaders(key) });
+    const cheap: UpiCallback = { ...emu.callbackFor(emu.txn(pay.reference!)), amountPaise: 100 };
+    const hook = await deliver(cheap);
     const s = await orderState(orderId);
-    checks.push({ check: "(d) ₹1 captured at the gateway for a ₹194.25 bill", observed: { confirmHttp: confirm.status, confirmPaymentStatus: confirm.json?.data?.paymentStatus, webhookHttp: hook.status, state: s } });
+    const mismatch = await db.anomaly.findFirst({ where: { entityId: pay.paymentId!, type: "RECONCILIATION_MISMATCH" } });
+    checks.push({ check: "(d) the bank reports ₹1 paid for a ₹194.25 bill", observed: { confirmHttp: confirm.status, confirmPaymentStatus: confirm.json?.data?.paymentStatus, callbackHttp: hook.status, state: s, staffAlerted: mismatch ? { type: mismatch.type, severity: mismatch.severity } : null } });
     expect(s).toMatchObject({ status: "OPEN", successPayments: 0, kots: 0, invoiceNo: null });
-    expect(s.payments).toEqual(["FAILED"]);
+    expect(s.payments).toEqual(["PENDING"]); // never paid; money may have moved, so a person checks (HIGH anomaly)
+    expect(mismatch?.severity).toBe("HIGH");
 
-    // (e) a webhook edited in transit (amount rewritten, original signature kept)
-    const real = emu.webhook("payment.captured", cheap.payment.id);
-    const edited = real.rawBody.replace(`"amount":100`, `"amount":19425`);
-    expect(edited).not.toBe(real.rawBody);
-    const tampered = await fetch(emu.cfg.webhookUrl!, { method: "POST", headers: { "content-type": "application/json", "x-razorpay-signature": real.signature }, body: edited });
-    checks.push({ check: "(e) webhook body amount edited after signing", observed: { http: tampered.status } });
+    // (e) a callback edited in transit (amount rewritten, original signature kept)
+    const rawBody = JSON.stringify(cheap);
+    const edited = rawBody.replace(`"amountPaise":100`, `"amountPaise":19425`);
+    expect(edited).not.toBe(rawBody);
+    const tampered = await deliver(edited, emu.sign(rawBody));
+    checks.push({ check: "(e) callback body amount edited after signing", observed: { http: tampered.status } });
     expect(tampered.status).toBe(401);
 
     // (f) staff side: cash for far more than the bill is refused; nothing settles
@@ -978,7 +971,7 @@ test("ACC-F  step 30: tampering with restaurant / outlet / table identifiers mus
   expect(mainOrderId).toBeTruthy();
   const foreign = await staff(browser, OTHER.ownerEmail);
   const manager = await staff(browser, USERS.manager);
-  const guest = await customerPhone(browser, async () => []);
+  const guest = await customerPhone(browser);
 
   await step(30, "NEGATIVE", "Tampering with restaurant / outlet / table identifiers must fail", async () => {
     const checks: Array<{ check: string; observed: unknown }> = [];
@@ -1067,10 +1060,10 @@ test("ACC-F  step 30: tampering with restaurant / outlet / table identifiers mus
     checks.push({ check: "(g) Coders' Cafe manager names the other restaurant's outlet", observed: crossOutlet });
     for (const r of Object.values(crossOutlet)) expect([403, 404], JSON.stringify(r)).toContain(r.http);
 
-    // (h) a webhook for a merchant account RESTORA does not know (signed correctly, wrong tenant)
-    const authPay = emu.attempt((await startPayment(myId, myKey)).gatewayOrderId!, "authorized");
-    const stranger = await emu.deliver("payment.captured", authPay.payment.id, { accountId: "acc_SomeoneElse0001" });
-    checks.push({ check: "(h) payment.captured for a merchant account that is not Coders' Cafe's", observed: stranger });
+    // (h) a callback for a merchant RESTORA does not know (signed correctly, wrong tenant)
+    const theirs = await startPayment(myId, myKey);
+    const stranger = await deliver({ ...emu.callbackFor({ ...emu.txn(theirs.reference!), status: "SUCCESS" }), merchantId: "EMU-SOMEONE-ELSE-0001" });
+    checks.push({ check: "(h) a SUCCESS callback for a merchant that is not Coders' Cafe's", observed: stranger });
     expect(stranger.status).toBeGreaterThanOrEqual(400);
 
     // nothing changed in the main order, the kitchen, the money

@@ -16,7 +16,6 @@
  * used as a base unit cannot be deactivated; a material's base unit cannot
  * change once stock has moved; SKU / codes stay unique. Every mutation audits.
  */
-import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { gstinSchema } from "@/domain/gst";
@@ -25,6 +24,7 @@ import { prisma } from "@/server/db/client";
 import { type AccessContext, assertOutletAccess, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
 import { assertCan, can, type Permission } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
+import { issueTableQrToken } from "@/server/qr/tableToken";
 import { type Client, type Tx, runInTx, assertTransition } from "@/server/services/_workflow";
 import { isValidTimeZone } from "@/domain/time";
 import { D, money, type Decimalish } from "@/domain/money";
@@ -501,7 +501,7 @@ export async function rotateTableQr(ctx: AccessContext, tableId: string, db: Cli
   return runInTx(db, async (tx) => {
     const t = await loadTable(tx, ctx, tableId);
     assertOutletManager(ctx, t.outletId);
-    const qrToken = randomBytes(18).toString("base64url");
+    const qrToken = await issueTableQrToken(tx);
     const updated = await tx.restaurantTable.update({ where: { id: tableId }, data: { qrToken } });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "RestaurantTable", entityId: tableId, outletId: t.outletId, after: { qrRotated: true } });
     return updated;

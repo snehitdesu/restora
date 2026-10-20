@@ -24,7 +24,7 @@ import { isDraining } from "@/server/ops/lifecycle";
  * BOTH prisma/migrations (SQLite) and prisma/postgres/migrations —
  * tests/ops/infrastructure.test.ts fails the build otherwise.
  */
-export const EXPECTED_MIGRATION = "20261023100000_owner_recovery";
+export const EXPECTED_MIGRATION = "20261025100000_recipe_estimates";
 
 export type CheckState = "up" | "down";
 export type MigrationState = "ok" | "pending" | "failed" | "unknown";

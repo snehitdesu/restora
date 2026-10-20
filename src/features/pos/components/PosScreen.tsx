@@ -15,7 +15,7 @@ import { CustomerPicker } from "@/features/pos/components/CustomerPicker";
 import { PaymentDialog } from "@/features/pos/components/PaymentDialog";
 import { DiscountDialog } from "@/features/pos/components/DiscountDialog";
 import { UpsellStrip } from "@/features/pos/components/UpsellStrip";
-import { OpenOrdersDialog, isIncomingQr, isHeld, type OpenOrder } from "@/features/pos/components/OpenOrdersDialog";
+import { OpenOrdersDialog, isIncomingQr, isHeld, isPaidLateQr, type OpenOrder } from "@/features/pos/components/OpenOrdersDialog";
 import { createPoller } from "@/lib/polling";
 import { BACKGROUND_HEADER } from "@/constants/auth";
 import { Button } from "@/components/ui/Button";
@@ -46,7 +46,7 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
   const [held, setHeld] = useState(0);
   const [holdName, setHoldName] = useState("");
 
-  // Guests' QR orders arrive without anyone at the till: poll for ones awaiting acceptance.
+  // Guests' QR orders arrive without anyone at the till: poll for ones still waiting for their online payment.
   useEffect(() => {
     const p = createPoller<{ items: OpenOrder[] }>({
       intervalMs: 10_000,
@@ -183,10 +183,21 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
   /** Running order: add the new round, then fire it (or submit if the order was only saved). */
   async function addToRunning(thenPay: boolean, action: Action) {
     if (!running) return;
+    // A guest's QR order reaches the kitchen only once its online payment is verified; the server refuses
+    // sending it, adding to it with a kitchen ticket, or settling it at the counter (no override).
+    if (isIncomingQr(running)) {
+      toast.show(`Order #${running.id.slice(-6).toUpperCase()} is waiting for the guest's online payment. It goes to the kitchen automatically once the payment is verified.`, "bad");
+      return;
+    }
+    // Paid online but confirmed late: Send releases it to the kitchen and settles the bill (the server checks it is paid).
+    // Adding dishes is refused: the guest paid for exactly this order.
+    if (isPaidLateQr(running) && cart.lines.length > 0) {
+      toast.show(`Order #${running.id.slice(-6).toUpperCase()} was paid online for exactly these dishes. Send it as it is, or refund it.`, "bad");
+      return;
+    }
     if (cart.lines.length === 0) {
-      // Nothing new to add. An order still OPEN (saved here, or a guest's QR order
-      // awaiting acceptance) goes to the kitchen first: once PAID it can no longer
-      // be fired, and the food would never be made.
+      // Nothing new to add. An order still OPEN (saved here) goes to the kitchen
+      // first: once PAID it can no longer be fired, and the food would never be made.
       if (running.status === "OPEN") {
         setBusy(action);
         const result = await guard.current.run(`accept:${running.id}`, () => api(`/api/orders/${running.id}/submit`, { method: "POST", body: {} }));

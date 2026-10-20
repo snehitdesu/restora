@@ -258,6 +258,8 @@ export const AnomalyType = makeEnum([
   "UNMAPPED_ITEM",
   "HEAVY_WASTAGE",
   "RECONCILIATION_MISMATCH",
+  // A guest's online payment verified after the fulfilment window: recorded, order held for staff (kitchenGate.ts).
+  "LATE_PAYMENT_HELD",
 ] as const);
 export type AnomalyType = (typeof AnomalyType.values)[number];
 

@@ -111,7 +111,7 @@ function Hero({ data, onOrder, heroRef, immersive }: { data: GuestMenuData; onOr
           <span key={l}>{l}</span>
         ))}
       </h1>
-      <p className="sf-hero-strap">Order from your table, pay by cash or online, and follow your order live.</p>
+      <p className="sf-hero-strap">Order from your table and follow your order live.</p>
       <div className="sf-hero-ctas">
         <button type="button" className="sf-btn sf-btn-accent sf-btn-lg" onClick={onOrder}>
           Order now

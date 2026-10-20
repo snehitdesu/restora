@@ -1,26 +1,27 @@
 /**
  * The real restaurant menu (Coders' Cafe, prisma/coders-cafe) through the
- * complete guest transaction with the Razorpay adapter:
+ * complete guest transaction with a direct-bank UPI QR:
  *
- *   table QR -> real menu -> cart -> server-priced order -> Razorpay order
- *   (server amount) -> Checkout attempt -> signed response / webhooks ->
- *   server verification with "Razorpay" -> PAID -> KOT -> kitchen -> invoice
- *   -> sales / payments analytics
+ *   table QR -> real menu -> cart -> server-priced order -> the bank's
+ *   transaction-specific QR (server amount, RESTORA's reference) -> the payer
+ *   pays -> the server's own status lookup / signed callbacks -> PAID -> KOT
+ *   -> kitchen -> invoice -> sales / payments analytics
  *
- * plus every failure path the gateway can produce: decline then retry inside
- * the same checkout, window closed before paying, authorized-not-captured,
- * late capture, duplicate / forged / mismatched webhooks, unknown accounts,
- * and a capture for an order that was meanwhile paid in cash.
+ * plus every failure path the bank can produce: decline then a new QR,
+ * browser closed before the bank answered, a signed callback the bank's
+ * status API does not confirm, duplicate / forged / mismatched / foreign
+ * callbacks, and a payment for an order that was meanwhile cancelled.
  *
- * "Razorpay" here is tests/support/razorpayEmulator.ts (RAZORPAY_API_BASE):
- * the adapter, payment service, webhook pipeline and database are the real
- * code paths; only the gateway on the far end of HTTP is emulated.
+ * "The bank" here is tests/support/upiBankEmulator.ts (UPI_EMULATOR_BASE, RESTORA's
+ * own TEST wire format — not SBI's): the adapter, payment service, webhook
+ * pipeline and database are the real code paths; only the bank on the far end
+ * of HTTP is emulated. Classification: LOCAL EMULATOR tests (not SBI UAT).
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { prisma } from "@/server/db/client";
 import { type AccessContext } from "@/server/db/scope";
 import { guestMenu, placeGuestOrder, getGuestOrder, startGuestPayment, confirmGuestPayment, resolveTable } from "@/server/services/guestOrdering";
-import { submitOrder } from "@/server/services/orders";
+import { submitOrder, cancelOrder } from "@/server/services/orders";
 import { createPayment, verifyPayment } from "@/server/services/payment";
 import { listKOTs, updateKOTStatus } from "@/server/services/kot";
 import { getOrderBill } from "@/server/services/bill";
@@ -28,15 +29,15 @@ import { paymentsByMethod, salesSummary } from "@/server/services/analytics";
 import { receiveWebhook } from "@/server/services/webhooks";
 import { revokeTableQr } from "@/server/services/masterData";
 import { num } from "@/domain/money";
-import { seedCodersCafe, cafeTableToken, type CafeSeedResult } from "../../prisma/coders-cafe/seed";
+import { seedCodersCafe, legacyCafeTableToken, type CafeSeedResult } from "../../prisma/coders-cafe/seed";
 import { CODERS_CAFE_MENU, menuItemCount } from "../../prisma/coders-cafe/menu";
-import { RazorpayEmulator } from "../support/razorpayEmulator";
+import { UpiBankEmulator, type UpiCallback } from "../support/upiBankEmulator";
 import { bindWebhook } from "./webhookBinding";
 
 const RUN = Date.now().toString(36);
-const ACCOUNT = `acc_cafe${RUN}`;
-const emu = new RazorpayEmulator({ keyId: `rzp_test_cafe${RUN}`, keySecret: `cafe-secret-${RUN}`, webhookSecret: `cafe-webhook-${RUN}`, accountId: ACCOUNT });
-const ENV = ["PAYMENT_PROVIDER", "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET", "RAZORPAY_API_BASE"] as const;
+const MERCHANT = `EMU-CAFE-${RUN}`;
+const bank = new UpiBankEmulator({ apiKey: `cafe-bank-key-${RUN}`, merchantId: MERCHANT, webhookSecret: `cafe-bank-webhook-${RUN}` });
+const ENV = ["PAYMENT_PROVIDER", "UPI_EMULATOR_BASE", "UPI_EMULATOR_API_KEY", "UPI_EMULATOR_MERCHANT_ID", "UPI_EMULATOR_WEBHOOK_SECRET"] as const;
 const saved: Partial<Record<(typeof ENV)[number], string | undefined>> = {};
 
 let cafe: CafeSeedResult;
@@ -51,7 +52,13 @@ const ctxFor = async (email: string): Promise<AccessContext> => {
   const u = await prisma.user.findFirstOrThrow({ where: { email, organizationId: cafe.organizationId } });
   return buildAccessContext(prisma, u.id);
 };
-const sendWebhook = (w: { rawBody: string; signature: string }) => receiveWebhook({ kind: "PAYMENT", provider: "razorpay", rawBody: w.rawBody, signature: w.signature });
+/** Deliver a bank callback to RESTORA's webhook pipeline (signed with the bank's secret unless told otherwise). */
+const sendCallback = (cb: UpiCallback | string, opts: { secret?: string; signature?: string } = {}) => {
+  const rawBody = typeof cb === "string" ? cb : JSON.stringify(cb);
+  return receiveWebhook({ kind: "PAYMENT", provider: "upi_emulator", rawBody, signature: opts.signature ?? bank.sign(rawBody, opts.secret) });
+};
+/** The bank reference RESTORA stored for a payment (the QR's transaction reference). */
+const refOf = async (paymentId: string) => (await prisma.payment.findUniqueOrThrow({ where: { id: paymentId } })).providerRef!;
 const item = (name: string) => {
   const it = items.get(name);
   if (!it) throw new Error(`not on the Coders' Cafe menu: ${name}`);
@@ -73,11 +80,11 @@ const counts = async (orderId: string) => ({
 
 beforeAll(async () => {
   for (const k of ENV) saved[k] = process.env[k];
-  await emu.start();
-  Object.assign(process.env, { PAYMENT_PROVIDER: "razorpay", RAZORPAY_KEY_ID: emu.cfg.keyId, RAZORPAY_KEY_SECRET: emu.cfg.keySecret, RAZORPAY_WEBHOOK_SECRET: emu.cfg.webhookSecret, RAZORPAY_API_BASE: emu.url });
+  const base = await bank.start();
+  Object.assign(process.env, { PAYMENT_PROVIDER: "upi_emulator", UPI_EMULATOR_BASE: base, UPI_EMULATOR_API_KEY: bank.cfg.apiKey, UPI_EMULATOR_MERCHANT_ID: MERCHANT, UPI_EMULATOR_WEBHOOK_SECRET: bank.cfg.webhookSecret });
   cafe = await seedCodersCafe(prisma, { reset: true });
   table07 = cafe.tables.find((t) => t.code === "T07")!.token;
-  await bindWebhook({ kind: "PAYMENT", provider: "razorpay", organizationId: cafe.organizationId, outletId: cafe.outletId, externalRef: ACCOUNT });
+  await bindWebhook({ kind: "PAYMENT", provider: "upi_emulator", organizationId: cafe.organizationId, outletId: cafe.outletId, externalRef: MERCHANT });
   for (const i of await prisma.menuItem.findMany({ where: { organizationId: cafe.organizationId }, include: { variants: true, modifierGroups: { include: { group: { include: { options: true } } } } } })) {
     items.set(i.name, { id: i.id, variants: new Map(i.variants.map((v) => [v.name, v.id])), options: new Map(i.modifierGroups.flatMap((g) => g.group.options.map((o) => [o.name, o.id] as const))) });
   }
@@ -92,7 +99,7 @@ afterAll(async () => {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
-  await emu.stop();
+  await bank.stop();
   await prisma.$disconnect();
 });
 
@@ -112,19 +119,19 @@ describe("Coders' Cafe dataset", () => {
         expect(m.variants.map((v) => [v.name, it.price + v.priceDelta]).sort()).toEqual((it.sizes ?? []).map((s) => [s.name, s.price]).sort());
       }
     }
-    expect(menu.payment).toMatchObject({ online: true, testMode: false, mode: "MOCK" }); // emulated gateway, labelled as such
+    expect(menu.payment).toMatchObject({ online: true, testMode: false, mode: "MOCK" }); // emulated bank, labelled as such
   });
 
-  it("tables T01–T10 resolve to the cafe's own outlet; the seed is deterministic", async () => {
-    for (const t of cafe.tables) expect(t.token).toBe(cafeTableToken(t.code));
+  it("tables T01–T10 resolve to the cafe's own outlet; their tokens are random, not derivable", async () => {
+    for (const t of cafe.tables) expect(t.token).not.toBe(legacyCafeTableToken(t.code));
     const t = await resolveTable(table07);
     expect(t.outlet.id).toBe(cafe.outletId);
     expect(t.ctx.organizationId).toBe(cafe.organizationId);
   });
 });
 
-describe("Razorpay through the guest QR flow", () => {
-  it("success: one Razorpay order for the server's amount, verified capture, PAID, one KOT, kitchen, invoice, analytics", async () => {
+describe("a bank UPI QR through the guest QR flow", () => {
+  it("success: one QR for the server's amount, verified by the bank, PAID, one KOT, kitchen, invoice, analytics", async () => {
     const placed = await placeGuestOrder(table07, investorCart(), key());
     const view = await getGuestOrder(placed.orderId, placed.accessKey);
     // (160 + 60) + 2 × 110 = 440, GST 5% = 22.00
@@ -132,28 +139,28 @@ describe("Razorpay through the guest QR flow", () => {
     expect(view.bill.lines.map((l) => l.name)).toEqual(["Classic Margherita Pizza (Medium)", "Classic Fries (Large)"]);
 
     const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    expect(start).toMatchObject({ provider: "razorpay", amount: "462.00", checkout: { provider: "razorpay", keyId: emu.cfg.keyId, amount: 46200, currency: "INR" } });
-    const rzpOrder = emu.orders.get(String(start.checkout!.orderId))!;
-    expect(rzpOrder.amount).toBe(46200);
-    // A refresh mid-checkout resumes the same gateway order (with the public key to reopen it).
+    expect(start).toMatchObject({ provider: "upi_emulator", amount: "462.00", checkout: { provider: "upi_emulator", kind: "upi_qr", amount: 46200, currency: "INR" } });
+    const ref = await refOf(start.paymentId);
+    expect(bank.txn(ref)).toMatchObject({ amountPaise: 46200, merchantId: MERCHANT, status: "PENDING" });
+    // A refresh mid-payment shows the same QR (stored), never a second bank transaction.
     const again = await startGuestPayment(placed.orderId, placed.accessKey, key());
     expect(again.paymentId).toBe(start.paymentId);
-    expect(again.checkout).toMatchObject({ orderId: rzpOrder.id, keyId: emu.cfg.keyId });
-    expect(emu.calls.filter((c) => c.method === "POST" && c.path === "/orders")).toHaveLength(1);
+    expect(again.checkout).toMatchObject({ qr: start.checkout!.qr, reference: ref });
+    expect(bank.calls.filter((c) => c.method === "POST" && c.path === "/v1/qr")).toHaveLength(1);
 
-    const { payment, response } = emu.attempt(rzpOrder.id, "captured");
-    const confirmed = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, gateway: response! });
+    const cb = await bank.pay(ref, "SUCCESS", { callback: false });
+    const confirmed = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId });
     expect(confirmed).toMatchObject({ paymentStatus: "SUCCESS", status: "PAID", pending: false });
-    // Razorpay's own webhook for the same capture changes nothing.
-    expect(await sendWebhook(emu.webhook("payment.captured", payment.id))).toMatchObject({ ok: true, status: "PROCESSED" });
-    expect(await sendWebhook(emu.webhook("payment.captured", payment.id))).toMatchObject({ status: "DUPLICATE" });
+    // The bank's own callback for the same payment changes nothing.
+    expect(await sendCallback(cb)).toMatchObject({ ok: true, status: "PROCESSED" });
+    expect(await sendCallback(cb)).toMatchObject({ status: "DUPLICATE" });
     expect(await counts(placed.orderId)).toEqual({ orders: 1, success: 1, kots: 1, invoices: 1 });
 
     // The manager sees the same order; the kitchen gets the same items as a KOT.
     const kots = await listKOTs(prisma, chef, { outletId: cafe.outletId });
     const kot = kots.find((k) => k.orderId === placed.orderId)!;
     expect(kot.items.map((i) => [i.name, num(i.qty)])).toEqual([["Classic Margherita Pizza (Medium)", 1], ["Classic Fries (Large)", 2]]);
-    for (const s of ["ACCEPTED", "PREPARING", "READY", "SERVED"] as const) await updateKOTStatus(chef, kot.id, s);
+    for (const st of ["ACCEPTED", "PREPARING", "READY", "SERVED"] as const) await updateKOTStatus(chef, kot.id, st);
     await expect(updateKOTStatus(chef, kot.id, "PREPARING")).rejects.toThrow(); // invalid transition
     await expect(updateKOTStatus(cashier, kot.id, "SERVED")).rejects.toThrow();
 
@@ -171,83 +178,89 @@ describe("Razorpay through the guest QR flow", () => {
     expect(await prisma.auditLog.count({ where: { entityType: "Payment", entityId: start.paymentId, action: "PAYMENT" } })).toBe(1);
   });
 
-  it("decline, then a retry inside the same checkout is captured: the payment recovers, nothing doubles", async () => {
+  it("the payer's bank declines; a new QR is paid: nothing doubles", async () => {
     const placed = await placeGuestOrder(table07, { items: [{ menuItemId: item("Loaded Chicken Nachos").id, qty: 1 }] }, key()); // 160 + 8 = 168
     const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    const orderRef = String(start.checkout!.orderId);
-    const declined = emu.attempt(orderRef, "failed");
-    expect(await sendWebhook(emu.webhook("payment.failed", declined.payment.id))).toMatchObject({ status: "PROCESSED" });
+    const declined = await bank.pay(await refOf(start.paymentId), "FAILED", { callback: false });
+    expect(await sendCallback(declined)).toMatchObject({ status: "PROCESSED" });
     expect((await prisma.payment.findUniqueOrThrow({ where: { id: start.paymentId } })).status).toBe("FAILED");
-    // Same Razorpay window, second attempt succeeds.
-    const ok = emu.attempt(orderRef, "captured");
-    const confirmed = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, gateway: ok.response! });
+    // The guest asks for a new QR: a new payment and a new bank transaction.
+    const retry = await startGuestPayment(placed.orderId, placed.accessKey, key());
+    expect(retry.paymentId).not.toBe(start.paymentId);
+    const ok = await bank.pay(await refOf(retry.paymentId), "SUCCESS", { callback: false });
+    const confirmed = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: retry.paymentId });
     expect(confirmed).toMatchObject({ paymentStatus: "SUCCESS", status: "PAID" });
-    expect(await sendWebhook(emu.webhook("payment.captured", ok.payment.id))).toMatchObject({ ok: true });
+    expect(await sendCallback(ok)).toMatchObject({ ok: true });
     expect(await counts(placed.orderId)).toEqual({ orders: 1, success: 1, kots: 1, invoices: 1 });
-    expect(await prisma.payment.count({ where: { orderId: placed.orderId } })).toBe(1);
+    expect(await prisma.payment.count({ where: { orderId: placed.orderId } })).toBe(2);
   });
 
-  it("window closed before paying: the payment stays PENDING (not failed) and a late capture settles it via webhook", async () => {
+  it("the browser closed before the bank answered: the payment stays PENDING (not failed) and the bank's late callback settles it", async () => {
     const placed = await placeGuestOrder(table07, { items: [{ menuItemId: item("Simply Veg").id, qty: 1 }] }, key());
     const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
     const closed = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId });
     expect(closed).toMatchObject({ paymentStatus: "PENDING", pending: true, status: "OPEN", canPay: true, pendingPaymentId: start.paymentId });
     expect(await prisma.notification.count({ where: { type: "PAYMENT_FAILED", body: { contains: placed.orderId.slice(-6).toUpperCase() } } })).toBe(0);
-    // Paid later (e.g. the UPI app confirmed after the tab closed): only the webhook arrives.
-    const late = emu.attempt(String(start.checkout!.orderId), "captured");
-    expect(await sendWebhook(emu.webhook("payment.captured", late.payment.id))).toMatchObject({ status: "PROCESSED" });
+    // Paid later (from another phone, after the tab closed): only the bank's callback arrives.
+    const late = await bank.pay(await refOf(start.paymentId), "SUCCESS", { callback: false });
+    expect(await sendCallback(late)).toMatchObject({ status: "PROCESSED" });
     const v = await getGuestOrder(placed.orderId, placed.accessKey);
     expect(v.status).toBe("PAID");
     expect(await counts(placed.orderId)).toEqual({ orders: 1, success: 1, kots: 1, invoices: 1 });
   });
 
-  it("authorized but not yet captured is pending; the capture webhook completes it", async () => {
+  it("a signed callback the bank's status API does not confirm is retried, not applied; once the bank confirms it settles", async () => {
     const placed = await placeGuestOrder(table07, { items: [{ menuItemId: item("Corn Special").id, qty: 1 }] }, key());
     const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    const auth = emu.attempt(String(start.checkout!.orderId), "authorized");
-    expect(await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, gateway: auth.response! })).toMatchObject({ paymentStatus: "PENDING", pending: true });
-    // A capture event that Razorpay's API does not show yet is retried, not applied.
-    expect(await sendWebhook(emu.webhook("payment.captured", auth.payment.id))).toMatchObject({ status: "FAILED", httpStatus: 503 });
-    emu.capture(auth.payment.id);
-    expect(await sendWebhook(emu.webhook("payment.captured", auth.payment.id))).toMatchObject({ status: "PROCESSED" });
+    const ref = await refOf(start.paymentId);
+    expect(await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId })).toMatchObject({ paymentStatus: "PENDING", pending: true });
+    // The callback says SUCCESS, the bank's status API still says PENDING: 503, the bank redelivers.
+    const claim = bank.callbackFor({ ...bank.txn(ref), status: "SUCCESS" }, `${ref}:early`);
+    expect(await sendCallback(claim)).toMatchObject({ status: "FAILED", httpStatus: 503 });
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).status).toBe("OPEN");
+    const real = await bank.pay(ref, "SUCCESS", { callback: false });
+    expect(await sendCallback(real)).toMatchObject({ status: "PROCESSED" });
     expect((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).status).toBe("PAID");
   });
 
-  it("forged, tampered and foreign webhooks change nothing", async () => {
+  it("forged, tampered and foreign callbacks — and the browser's own 'proof' — change nothing", async () => {
     const placed = await placeGuestOrder(table07, { items: [{ menuItemId: item("Farmpizza").id, qty: 1 }] }, key());
     const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    const p = emu.attempt(String(start.checkout!.orderId), "captured");
-    expect(await sendWebhook(emu.webhook("payment.captured", p.payment.id, { secret: "not-the-secret" }))).toMatchObject({ status: "INVALID_SIGNATURE", httpStatus: 401 });
-    expect(await sendWebhook(emu.webhook("payment.captured", p.payment.id, { amount: 100 }))).toMatchObject({ status: "FAILED", reason: "Amount mismatch" });
-    expect(await sendWebhook(emu.webhook("payment.captured", p.payment.id, { accountId: "acc_nobody" }))).toMatchObject({ status: "FAILED", reason: "Unknown integration account" });
-    const malformed = await receiveWebhook({ kind: "PAYMENT", provider: "razorpay", rawBody: "{not json", signature: "x" });
+    const ref = await refOf(start.paymentId);
+    const cb = await bank.pay(ref, "SUCCESS", { callback: false });
+    expect(await sendCallback(cb, { secret: "not-the-secret" })).toMatchObject({ status: "INVALID_SIGNATURE", httpStatus: 401 });
+    const raw = JSON.stringify(cb);
+    expect(await sendCallback(raw.replace(`"amountPaise":${cb.amountPaise}`, `"amountPaise":100`), { signature: bank.sign(raw) })).toMatchObject({ status: "INVALID_SIGNATURE", httpStatus: 401 });
+    expect(await sendCallback({ ...cb, eventId: `${cb.eventId}:cheap`, amountPaise: 100 })).toMatchObject({ status: "FAILED", reason: "Amount mismatch" });
+    expect(await sendCallback({ ...cb, eventId: `${cb.eventId}:foreign`, merchantId: "EMU-NOBODY" })).toMatchObject({ status: "FAILED", reason: "Unknown integration account" });
+    const malformed = await receiveWebhook({ kind: "PAYMENT", provider: "upi_emulator", rawBody: "{not json", signature: "x" });
     expect(malformed.ok).toBe(false);
     expect((await prisma.payment.findUniqueOrThrow({ where: { id: start.paymentId } })).status).toBe("PENDING");
-    // A forged checkout response (bad signature) is not a success.
-    const forged = { ...p.response!, razorpay_signature: "0".repeat(64) };
-    expect((await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, gateway: forged })).paymentStatus).toBe("FAILED");
-    // ...and cannot point verification at another gateway order.
-    await expect(confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, providerRef: "order_someone_else", gateway: p.response! })).rejects.toThrow(/does not match/);
-    // The genuine capture still lands (recovery asks Razorpay, not the client).
-    expect(await sendWebhook(emu.webhook("payment.captured", p.payment.id))).toMatchObject({ status: "PROCESSED" });
+    // The browser's "proof" is not looked at; the server asks the bank, which says SUCCESS for our exact payment.
+    // ...and the browser cannot point verification at another bank transaction.
+    await expect(confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, providerRef: "RSTsomeone-else" })).rejects.toThrow(/does not match/);
+    // The genuine callback lands.
+    expect(await sendCallback(cb)).toMatchObject({ status: "PROCESSED" });
     expect(await counts(placed.orderId)).toMatchObject({ success: 1, kots: 1, invoices: 1 });
   });
 
-  it("a capture for an order already paid in cash is surfaced for refund, never applied twice", async () => {
+  it("a payment for an order that can no longer take it (cancelled meanwhile) is surfaced for refund, never applied", async () => {
     const placed = await placeGuestOrder(table07, { items: [{ menuItemId: item("Chicken Nuggets").id, qty: 1 }] }, key()); // 150 + 7.50
     const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    await submitOrder(manager, placed.orderId);
-    const cash = await createPayment(cashier, placed.orderId, { method: "CASH", amount: 157.5 });
-    expect((await verifyPayment(cashier, cash.id)).orderSettled).toBe(true);
-    const late = emu.attempt(String(start.checkout!.orderId), "captured");
-    expect(await sendWebhook(emu.webhook("payment.captured", late.payment.id))).toMatchObject({ ok: true, status: "PROCESSED" });
+    // The counter cannot settle a QR order waiting for its online payment; the guest left and staff cancelled it.
+    await expect(createPayment(cashier, placed.orderId, { method: "CASH", amount: 157.5 })).rejects.toThrow(/cannot be settled at the counter/);
+    await cancelOrder(manager, placed.orderId, "guest left");
+    const late = await bank.pay(await refOf(start.paymentId), "SUCCESS", { callback: false });
+    expect(await sendCallback(late)).toMatchObject({ ok: true, status: "PROCESSED" });
     expect(await prisma.payment.findUniqueOrThrow({ where: { id: start.paymentId } })).toMatchObject({ status: "FAILED" });
-    expect(await prisma.payment.count({ where: { orderId: placed.orderId, status: "SUCCESS" } })).toBe(1);
+    expect(await prisma.payment.count({ where: { orderId: placed.orderId, status: "SUCCESS" } })).toBe(0);
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).toMatchObject({ status: "CANCELLED" });
+    expect(await prisma.kot.count({ where: { orderId: placed.orderId } })).toBe(0); // never released to the kitchen
     const anomaly = await prisma.anomaly.findFirstOrThrow({ where: { organizationId: cafe.organizationId, entityType: "Payment", entityId: start.paymentId } });
     expect(anomaly).toMatchObject({ type: "RECONCILIATION_MISMATCH", severity: "HIGH", status: "OPEN" });
     expect(anomaly.message).toMatch(/Refund the guest/);
     // Redelivery does not raise it twice.
-    expect(await sendWebhook(emu.webhook("payment.captured", late.payment.id))).toMatchObject({ status: "DUPLICATE" });
+    expect(await sendCallback(late)).toMatchObject({ status: "DUPLICATE" });
     expect(await prisma.anomaly.count({ where: { entityType: "Payment", entityId: start.paymentId } })).toBe(1);
   });
 });

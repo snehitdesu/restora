@@ -64,6 +64,8 @@ npm-debug.log*
 
 # Generated table-QR sheets (live tokens; local output is not customer print)
 /artifacts/table-qr/
+# Legacy demo images that point at the live Production site (scripts/qr/demo-assets.ts)
+/artifacts/coders-cafe-qr/
 
 # Local agent tooling and generated promo renders (not application source)
 /.agents/

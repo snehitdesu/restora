@@ -69,7 +69,9 @@ test.describe("customer storefront", () => {
       await noSideScroll(g, `cart @${w}`);
       await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
       await expect(g.getByRole("heading", { name: "Checkout" })).toBeVisible();
-      await expect(g.getByRole("radio", { name: /Cash/ })).toBeChecked();
+      // QR orders are paid online before they reach the kitchen: the only choice offered is the (test) online payment.
+      await expect(g.getByRole("radio", { name: /Simulated online payment/ })).toBeChecked();
+      await expect(g.getByRole("radio", { name: /Cash/ })).toHaveCount(0);
       await noSideScroll(g, `checkout @${w}`);
       await guest.context.close();
     }
@@ -106,9 +108,17 @@ test.describe("customer storefront", () => {
       await g.getByRole("button", { name: "Place order" }).click();
       await g.waitForURL(/\/o\/[^/#]+#k=/);
       const id = decodeURIComponent(new URL(g.url()).pathname.split("/").pop()!);
-      expect((await order(page.request, id)).total).toBe("47.25");
-      // Cash at the counter (the default): the order is already in the kitchen.
+      let o = await order(page.request, id);
+      expect(o.total).toBe("47.25");
+      // Not in the kitchen until the online payment for the server's total is verified.
+      expect(o.kots ?? []).toHaveLength(0);
+      const gw = g.getByRole("region", { name: "Test payment gateway" });
+      await expect(gw).toContainText(money(47.25));
+      await gw.getByRole("button", { name: "Approve payment" }).click();
       await expect(g.getByRole("heading", { name: "Order confirmed" })).toBeVisible();
+      o = await order(page.request, id);
+      expect(o.status).toBe("PAID");
+      expect(o.kots).toHaveLength(1);
     } finally {
       await apiCall(manager, "POST", `/api/menu/outlets/${outlet.id}/items/${chai.id}`, { price: null });
       await apiCall(manager, "POST", `/api/menu/outlets/${outlet.id}/items/${tikka.id}`, { soldOut: false });

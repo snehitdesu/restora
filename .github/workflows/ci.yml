@@ -12,7 +12,7 @@
 #   web-e2e  — the web release gate: every browser spec (e2e/*.spec.ts) against the
 #              production build in real Chromium on SQLite, then the investor
 #              acceptance suite and the 30-step customer acceptance (Coders' Cafe,
-#              Razorpay emulator, evidence uploaded as an artifact)
+#              UPI bank emulator, evidence uploaded as an artifact)
 #   web-e2e-postgres — the same browser specs on PostgreSQL 16 (production path):
 #              fresh database, committed migrations, demo seed, `next start`
 #
@@ -166,9 +166,9 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: "E2E: build, then every browser spec on the production build (serial, one seeded SQLite database)"
         run: npm run e2e
-      - name: "E2E: investor acceptance (real Coders' Cafe menu, Razorpay emulator, cash) on the same build"
+      - name: "E2E: investor acceptance (real Coders' Cafe menu, UPI bank emulator, counter cash) on the same build"
         run: npm run e2e:investor
-      - name: "E2E: Coders' Cafe 30-step customer acceptance (fresh database, Razorpay emulator, five attack families) on the same build"
+      - name: "E2E: Coders' Cafe 30-step customer acceptance (fresh database, UPI bank emulator, five attack families) on the same build"
         run: npm run e2e:acceptance
       - name: Keep the acceptance evidence (order, payment, KOT and invoice ids, every step's observations, screenshots)
         if: always()

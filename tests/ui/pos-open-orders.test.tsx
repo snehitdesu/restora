@@ -35,7 +35,7 @@ describe("POS open orders and QR visibility", () => {
     render(<OpenOrdersDialog outletId="out-a" tableCode={() => null} onOpen={vi.fn()} onClose={vi.fn()} />);
     const rows = await screen.findAllByRole("listitem");
     expect(rows).toHaveLength(4);
-    expect(rows[0]).toHaveTextContent("New QR order");
+    expect(rows[0]).toHaveTextContent("New QR order · awaiting online payment");
     expect(rows[0]).toHaveTextContent("Table T02");
     const cash = rows.find((r) => r.textContent?.includes("Table T01"))!;
     expect(within(cash).getByText("QR · unpaid")).toBeInTheDocument();

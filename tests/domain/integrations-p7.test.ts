@@ -1,10 +1,11 @@
 /**
  * Phase 7 integrations against the real services and database:
- *  - Razorpay (SANDBOX contract, fake Razorpay over fetch): guest checkout for the
- *    SERVER amount, tampered checkout refused, capture → PAID once (one invoice,
- *    one consumption), webhook capture / duplicate / bad signature / wrong account /
- *    amount mismatch, gateway refunds deduped with refund webhooks, provider down
- *    during checkout leaves a resumable PENDING payment
+ *  - Razorpay LEGACY (SANDBOX contract, fake Razorpay over fetch): Razorpay is
+ *    retired for new checkouts (refused, never a fallback), but a Razorpay
+ *    payment created before the switch still resolves: tampered checkout
+ *    refused, capture → PAID once (one invoice, one consumption), webhook
+ *    capture / duplicate / bad signature / wrong account / amount mismatch,
+ *    gateway refunds deduped with refund webhooks
  *  - printing + cash drawer against a real TCP endpoint (raw ESC/POS): receipt,
  *    KOT routing + auto-print, first print once, audited reprint, printer down →
  *    FAILED → bounded retry, SSRF-safe addresses, RBAC, drawer kick after a cash sale
@@ -153,7 +154,21 @@ async function guestTableToken(code: string) {
   return (await rotateTableQr(sys, t.id)).qrToken!;
 }
 
-describe("payment gateway — Razorpay (SANDBOX contract)", () => {
+/**
+ * A Razorpay payment as it was created before Razorpay was retired: a Razorpay order for the server's
+ * amount and a PENDING ONLINE payment that references it. (New checkouts can no longer create either.)
+ */
+async function legacyRazorpayPayment(orderId: string) {
+  const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } });
+  const amount = num(order.total);
+  const o: RzpOrder = { id: `order_${RUN}${++rzp.seq}`, amount: Math.round(amount * 100), amount_paid: 0, status: "created", payments: [] };
+  rzp.orders.set(o.id, o);
+  const p = await createPayment(sys, orderId, { method: "ONLINE", amount, provider: "razorpay", idempotencyKey: key() });
+  await prisma.payment.update({ where: { id: p.id }, data: { providerRef: o.id } });
+  return { paymentId: p.id, gatewayOrderId: o.id };
+}
+
+describe("payment gateway — Razorpay LEGACY (payments created before it was retired)", () => {
   beforeAll(async () => {
     process.env.PAYMENT_PROVIDER = "razorpay";
     await upsertIntegration(owner, { kind: "PAYMENT", provider: "razorpay", externalRef: `acc_${RUN}`, webhookSecret: RZP_WH, mode: "SANDBOX" });
@@ -163,33 +178,40 @@ describe("payment gateway — Razorpay (SANDBOX contract)", () => {
     else process.env.PAYMENT_PROVIDER = envBefore.PAYMENT_PROVIDER;
   });
 
-  it("guest checkout uses the server's amount; a tampered checkout is refused; capture settles once", async () => {
-    const placed = await placeGuestOrder(await guestTableToken("G1"), { items: [{ menuItemId: dosa, qty: 2 }] }, key());
-    const k = key();
-    const start = await startGuestPayment(placed.orderId, placed.accessKey, k);
-    expect(start).toMatchObject({ provider: "razorpay", mode: "SANDBOX", amount: "210.00", checkout: { keyId: KEY_ID, amount: 21000 } });
-    const orderRef = String(start.checkout!.orderId);
-    expect((await startGuestPayment(placed.orderId, placed.accessKey, k)).checkout?.orderId ?? (await prisma.payment.findUniqueOrThrow({ where: { id: start.paymentId } })).providerRef).toBe(orderRef); // no second gateway order
-    expect([...rzp.orders.values()].filter((o) => o.id === orderRef)).toHaveLength(1);
+  it("PAYMENT_PROVIDER=razorpay no longer offers online payment: nothing is created, nothing falls back to another gateway", async () => {
+    const orders = rzp.orders.size;
+    const placed = await placeGuestOrder(await guestTableToken("G0"), { items: [{ menuItemId: tea, qty: 1 }] }, key()).catch((e: Error) => e);
+    // Guest QR ordering itself is refused while online payment is unavailable (orders are paid online first).
+    expect(placed).toBeInstanceOf(ValidationError);
+    expect(String((placed as Error).message)).toMatch(/Online payment isn't available/);
+    expect(rzp.orders.size).toBe(orders);
+  });
 
-    const real = captureAtRazorpay(orderRef);
-    const forged = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, gateway: { ...real, razorpay_signature: "0".repeat(64) } });
+  it("a legacy payment is verified by the server: a tampered checkout is refused; capture settles once", async () => {
+    process.env.PAYMENT_PROVIDER = "mock"; // only so that the guest can place the order today
+    const placed = await placeGuestOrder(await guestTableToken("G1"), { items: [{ menuItemId: dosa, qty: 2 }] }, key());
+    process.env.PAYMENT_PROVIDER = "razorpay";
+    const first = await legacyRazorpayPayment(placed.orderId);
+    const real = captureAtRazorpay(first.gatewayOrderId);
+    const forged = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: first.paymentId, gateway: { ...real, razorpay_signature: "0".repeat(64) } });
     expect(forged).toMatchObject({ paymentStatus: "FAILED", status: "OPEN" });
 
-    const retry = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    const ref2 = String(retry.checkout!.orderId);
-    const done = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: retry.paymentId, gateway: captureAtRazorpay(ref2) });
+    const second = await legacyRazorpayPayment(placed.orderId);
+    const done = await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: second.paymentId, gateway: captureAtRazorpay(second.gatewayOrderId) });
     expect(done).toMatchObject({ paymentStatus: "SUCCESS", status: "PAID" });
     expect(await prisma.taxInvoice.count({ where: { orderId: placed.orderId, kind: "INVOICE" } })).toBe(1);
     // Re-confirming the same capture changes nothing.
-    await expect(confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: retry.paymentId, gateway: { razorpay_payment_id: "x", razorpay_order_id: ref2, razorpay_signature: "y" } })).resolves.toMatchObject({ status: "PAID" });
+    await expect(confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: second.paymentId, gateway: { razorpay_payment_id: "x", razorpay_order_id: second.gatewayOrderId, razorpay_signature: "y" } })).resolves.toMatchObject({ status: "PAID" });
     expect(await prisma.payment.count({ where: { orderId: placed.orderId, status: "SUCCESS" } })).toBe(1);
   });
 
-  it("webhook capture settles a payment once; duplicate, bad signature, other account and wrong amount change nothing", async () => {
+  it("legacy webhook capture settles a payment once; duplicate, bad signature, other account and wrong amount change nothing", async () => {
+    process.env.PAYMENT_PROVIDER = "mock";
     const placed = await placeGuestOrder(await guestTableToken("G2"), { items: [{ menuItemId: tea, qty: 5 }] }, key());
-    const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    const order = rzp.orders.get(String(start.checkout!.orderId))!;
+    const p2 = await placeGuestOrder(await guestTableToken("G3"), { items: [{ menuItemId: tea, qty: 1 }] }, key());
+    process.env.PAYMENT_PROVIDER = "razorpay";
+    const start = await legacyRazorpayPayment(placed.orderId);
+    const order = rzp.orders.get(start.gatewayOrderId)!;
     captureAtRazorpay(order.id);
     const body = rzpWebhook("payment.captured", order);
     expect(await receiveWebhook({ kind: "PAYMENT", provider: "razorpay", rawBody: body, signature: signed(body, "wrong-secret-000000000") })).toMatchObject({ status: "INVALID_SIGNATURE", httpStatus: 401 });
@@ -206,23 +228,24 @@ describe("payment gateway — Razorpay (SANDBOX contract)", () => {
     const other = body.replace(`acc_${RUN}`, `acc_unknown_${RUN}`);
     expect((await receiveWebhook({ kind: "PAYMENT", provider: "razorpay", rawBody: other, signature: signed(other) })).ok).toBe(false);
 
-    const p2 = await placeGuestOrder(await guestTableToken("G3"), { items: [{ menuItemId: tea, qty: 1 }] }, key());
-    const s2 = await startGuestPayment(p2.orderId, p2.accessKey, key());
-    const o2 = rzp.orders.get(String(s2.checkout!.orderId))!;
+    const s2 = await legacyRazorpayPayment(p2.orderId);
+    const o2 = rzp.orders.get(s2.gatewayOrderId)!;
     captureAtRazorpay(o2.id);
     const tampered = rzpWebhook("payment.captured", { ...o2, payments: [{ ...o2.payments[0], amount: 1 }] });
     expect(await receiveWebhook({ kind: "PAYMENT", provider: "razorpay", rawBody: tampered, signature: signed(tampered) })).toMatchObject({ status: "FAILED", reason: "Amount mismatch" });
     expect((await prisma.order.findUniqueOrThrow({ where: { id: p2.orderId } })).status).toBe("OPEN");
   });
 
-  it("refunds go to Razorpay once; the gateway's refund webhook is recognized, not applied again; partial refunds add up", async () => {
+  it("legacy refunds go to Razorpay once; the gateway's refund webhook is recognized, not applied again; partial refunds add up", async () => {
+    process.env.PAYMENT_PROVIDER = "mock";
     const placed = await placeGuestOrder(await guestTableToken("G4"), { items: [{ menuItemId: dosa, qty: 1 }] }, key());
-    const start = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, gateway: captureAtRazorpay(String(start.checkout!.orderId)) });
+    process.env.PAYMENT_PROVIDER = "razorpay";
+    const start = await legacyRazorpayPayment(placed.orderId);
+    await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: start.paymentId, gateway: captureAtRazorpay(start.gatewayOrderId) });
     const r1 = await refundPayment(sys, start.paymentId, { amount: 40, reason: "Cold", idempotencyKey: key() });
     expect(r1.refund.providerRef).toMatch(/^rfnd_/);
     expect(rzp.refunds.at(-1)).toMatchObject({ amount: 4000 });
-    const order = rzp.orders.get(String(start.checkout!.orderId))!;
+    const order = rzp.orders.get(start.gatewayOrderId)!;
     const wh = rzpWebhook("refund.processed", order, { refund: { entity: { id: r1.refund.providerRef, payment_id: order.payments[0].id, amount: 4000 } } });
     expect(await receiveWebhook({ kind: "PAYMENT", provider: "razorpay", rawBody: wh, signature: signed(wh) })).toMatchObject({ status: "DUPLICATE" });
     expect(await prisma.refund.count({ where: { paymentId: start.paymentId } })).toBe(1);
@@ -232,26 +255,16 @@ describe("payment gateway — Razorpay (SANDBOX contract)", () => {
     expect(await prisma.taxInvoice.count({ where: { orderId: placed.orderId, kind: "CREDIT_NOTE" } })).toBe(2);
   });
 
-  it("gateway unhealthy: online payment is refused before anything is created", async () => {
+  it("a guest cannot start a new Razorpay payment, even for an order that has an older Razorpay payment", async () => {
+    process.env.PAYMENT_PROVIDER = "mock";
     const placed = await placeGuestOrder(await guestTableToken("G6"), { items: [{ menuItemId: tea, qty: 2 }] }, key());
-    rzp.down = true;
-    await expect(startGuestPayment(placed.orderId, placed.accessKey, key())).rejects.toThrow(/not available/);
-    rzp.down = false;
-    expect(await prisma.payment.count({ where: { orderId: placed.orderId } })).toBe(0);
-  });
-
-  it("gateway fails while creating the checkout: the payment stays PENDING without a reference and the next attempt resumes it", async () => {
-    const placed = await placeGuestOrder(await guestTableToken("G5"), { items: [{ menuItemId: tea, qty: 2 }] }, key());
-    rzp.ordersDown = true;
-    const k = key();
-    await expect(startGuestPayment(placed.orderId, placed.accessKey, k)).rejects.toBeTruthy();
-    const pending = await prisma.payment.findMany({ where: { orderId: placed.orderId } });
-    expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({ status: "PENDING", providerRef: null });
-    rzp.ordersDown = false;
-    const again = await startGuestPayment(placed.orderId, placed.accessKey, key());
-    expect(again.paymentId).toBe(pending[0].id);
-    expect(again.checkout?.orderId).toMatch(/^order_/);
+    process.env.PAYMENT_PROVIDER = "razorpay";
+    await legacyRazorpayPayment(placed.orderId);
+    const before = await prisma.payment.count({ where: { orderId: placed.orderId } });
+    const orders = rzp.orders.size;
+    await expect(startGuestPayment(placed.orderId, placed.accessKey, key())).rejects.toThrow(/Online payment isn't available/);
+    expect(await prisma.payment.count({ where: { orderId: placed.orderId } })).toBe(before);
+    expect(rzp.orders.size).toBe(orders);
   });
 });
 

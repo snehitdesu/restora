@@ -8,8 +8,10 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 vi.mock("next/headers", async () => (await import("./harness")).nextHeadersMock());
 import { prisma } from "@/server/db/client";
 import { buildAccessContext } from "@/server/auth/context";
-import { cancelOrder } from "@/server/services/orders";
-import { getGuestOrder } from "@/server/services/guestOrdering";
+import { cancelOrder, placeOrder } from "@/server/services/orders";
+import { getGuestOrder, startGuestPayment, confirmGuestPayment } from "@/server/services/guestOrdering";
+import { guestTracker } from "@/domain/orderProgress";
+import { orderRef } from "@/server/services/bill";
 import { rotateTableQr } from "@/server/services/masterData";
 import { decryptSecret } from "@/server/integrations/secrets";
 import { CloudClient, CloudOfflineError, setCloudTransportForTests } from "@/server/sync/cloudClient";
@@ -80,6 +82,18 @@ async function guestOrder(items = [{ menuItemId: cloud.coffee, qty: 1 }]) {
   const res = await call(Guest, "POST", `t/${token}/orders`, { headers: { "idempotency-key": `guest-${RUN}-${++n}-sync-key` }, body: { items } });
   expect(res.status).toBe(200);
   return res.json.data as { orderId: string; ref: string; accessKey: string };
+}
+/**
+ * A cloud order the desktop may accept before payment: an ONLINE-channel order on a fresh table. A guest's
+ * QR order cannot be accepted (or settled at the counter) before its online payment is verified
+ * (kitchenGate.ts), so the acceptance / kitchen / offline mechanics are exercised on this one.
+ */
+async function onlineOrder(items = [{ menuItemId: cloud.coffee, qty: 1 }]) {
+  const table = await prisma.restaurantTable.create({ data: { organizationId: cloud.orgId, outletId: cloud.outletId, code: `D${++n}` } });
+  await prisma.restaurantTable.create({ data: { organizationId: desk.orgId, outletId: desk.outletId, code: table.code } });
+  await prisma.restaurantTable.create({ data: { organizationId: desk2.orgId, outletId: desk2.outletId, code: table.code } });
+  const o = await placeOrder(cloud.ctx, { outletId: cloud.outletId, channel: "ONLINE", source: "ONLINE", tableId: table.id, items, idempotencyKey: `online-${RUN}-${++n}-sync-key` });
+  return { orderId: o.id, ref: orderRef(o.id) };
 }
 const localOf = (cloudId: string) => mirrorId("ORDER", cloudId, desk.orgId);
 const cycle = () => runSyncCycle(prisma, desk.orgId);
@@ -202,7 +216,7 @@ suite("mirroring a QR order (scenarios 3, 4, 5, 6, 7, 14)", () => {
 
 suite("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
   it("accepts on the desktop: the cloud order is accepted once, with one KOT, and the customer sees it", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     const res = await submit(placed.orderId);
     expect(res.status).toBe(200);
@@ -212,7 +226,7 @@ suite("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
     const l = await localOrder(placed.orderId);
     expect(l.status).toBe("SENT");
     expect(l.kots).toHaveLength(1);
-    expect((await getGuestOrder(placed.orderId, placed.accessKey)).tracker.confirmed).toBe(true);
+    expect(guestTracker(await cloudOrder(placed.orderId)).confirmed).toBe(true);
     // a second tap, or a hosted-POS accept afterwards: nothing more happens
     expect((await submit(placed.orderId)).json.data.sync).toMatchObject({ outcome: "ALREADY" });
     expect((await cloudOrder(placed.orderId)).kots).toHaveLength(1);
@@ -222,7 +236,7 @@ suite("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
   });
 
   it("accepts on the hosted POS: the desktop picks up the accepted order and its ticket on the next cycle", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     expect((await localOrder(placed.orderId)).status).toBe("OPEN");
     expect((await call(Orders, "POST", `${placed.orderId}/submit`, { session: cloudCashier.session, body: {} })).status).toBe(200);
@@ -234,7 +248,7 @@ suite("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
   });
 
   it("when both sides accept at once the cloud keeps a single acceptance and a single KOT", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await call(Orders, "POST", `${placed.orderId}/submit`, { session: cloudCashier.session, body: {} }); // hosted POS wins first
     const stale = await submit(placed.orderId); // the desktop still thinks it is OPEN
@@ -245,7 +259,7 @@ suite("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
   });
 
   it("moves kitchen tickets through the cloud from the desktop, and mirrors the hosted kitchen's progress", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await submit(placed.orderId);
     const local = await localOrder(placed.orderId);
@@ -263,13 +277,42 @@ suite("acceptance and kitchen from either side (scenarios 11, 12, 13)", () => {
     expect((await localOrder(placed.orderId)).kots[0].status).toBe("READY");
     expect((await call(Kitchen, "POST", `kots/${kotId}/status`, { session: deskKitchen.session, body: { status: "SERVED" } })).status).toBe(200);
     expect((await prisma.kot.findUniqueOrThrow({ where: { id: cloudKot.id } })).status).toBe("SERVED");
-    expect((await getGuestOrder(placed.orderId, placed.accessKey)).tracker.step).toBe(4);
+    expect(guestTracker(await cloudOrder(placed.orderId)).step).toBe(4);
+  });
+
+  it("cannot accept, or take a counter payment for, a guest QR order still waiting for its online payment; once the guest pays it arrives paid and in the kitchen", async () => {
+    const placed = await guestOrder();
+    await cycle();
+    expect((await localOrder(placed.orderId)).status).toBe("OPEN");
+    const res = await submit(placed.orderId);
+    expect(res.status).toBe(200);
+    expect(res.json.data.sync).toMatchObject({ state: "CONFLICT", outcome: "CONFLICT" });
+    expect(res.json.data.sync.detail).toMatch(/waiting for the guest's online payment/);
+    expect((await cloudOrder(placed.orderId))).toMatchObject({ status: "OPEN", kots: [] });
+    expect((await localOrder(placed.orderId)).kots).toHaveLength(0);
+    // The refusal is kept for a person to see (no silent retry), then dismissed.
+    const [op] = await listOperations(prisma, desk.orgId, { attention: true });
+    expect(op).toMatchObject({ status: "CONFLICT", action: "ACCEPT" });
+    expect(op.detail).toMatch(/online payment/);
+    await dismissOperation(prisma, desk.orgId, op.id);
+    const total = Number((await localOrder(placed.orderId)).total);
+    const cash = await call(Payments, "POST", "", { session: deskCashier.session, headers: { "idempotency-key": `pay-${RUN}-${++n}-gate` }, body: { orderId: localOf(placed.orderId), method: "CASH", amount: total } });
+    expect(cash.status).toBe(422);
+    expect((await cloudOrder(placed.orderId)).payments).toHaveLength(0);
+    // The guest pays online in the cloud: the verified payment sends it to the kitchen; the desktop mirrors that.
+    const pay = await startGuestPayment(placed.orderId, placed.accessKey, `gp-${RUN}-${++n}-key`);
+    await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: pay.paymentId });
+    await cycle();
+    const l = await localOrder(placed.orderId);
+    expect(l.status).toBe("PAID");
+    expect(l.kots).toHaveLength(1);
+    expect((await cloudOrder(placed.orderId)).kots).toHaveLength(1);
   });
 });
 
 suite("payments and cancellations (scenarios 14, 15)", () => {
   it("never treats an imported order as paid; a payment taken on the desktop is verified by the cloud and mirrored", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await submit(placed.orderId);
     expect((await localOrder(placed.orderId)).payments).toHaveLength(0);
@@ -327,7 +370,7 @@ suite("payments and cancellations (scenarios 14, 15)", () => {
   });
 
   it("needs the cloud for a payment: offline it is refused and nothing is recorded anywhere", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await submit(placed.orderId);
     fc.offline = true;
@@ -339,7 +382,7 @@ suite("payments and cancellations (scenarios 14, 15)", () => {
   });
 
   it("a cloud 503 on a mirrored payment is unavailable, not Internal server error", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await submit(placed.orderId);
     fc.cloudHttpStatus = 503;
@@ -353,7 +396,7 @@ suite("payments and cancellations (scenarios 14, 15)", () => {
   });
 
   it("a revoked device cannot take a mirrored payment as if the till were merely offline", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await submit(placed.orderId);
     await prisma.cloudDevice.updateMany({ where: { enrolledById: syncUser.id, status: "ACTIVE" }, data: { status: "REVOKED", revokedAt: new Date() } });
@@ -391,7 +434,7 @@ suite("payments and cancellations (scenarios 14, 15)", () => {
 
 suite("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
   it("queues an acceptance made offline, does not pretend it happened, and sends it once on reconnect", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     fc.offline = true;
     const res = await submit(placed.orderId);
@@ -455,7 +498,7 @@ suite("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
   });
 
   it("a lost response never causes a second acceptance or a second KOT", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     fc.loseNextResponse = true;
     const res = await submit(placed.orderId);
@@ -470,7 +513,7 @@ suite("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
   });
 
   it("keeps ticket progress queued in order while offline", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await submit(placed.orderId);
     const kotId = (await localOrder(placed.orderId)).kots[0].id;
@@ -486,7 +529,7 @@ suite("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
   });
 
   it("detects a conflicting change (cancelled in the cloud while an acceptance waited) and keeps it for a person", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     fc.offline = true;
     await submit(placed.orderId);
@@ -507,7 +550,7 @@ suite("offline, retries and conflicts (scenarios 16, 17, 18)", () => {
 
 suite("session expiry and revocation (scenario 8)", () => {
   it("stops all cloud traffic once the cloud ends the session, queues work, and resumes after signing in again", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     await prisma.cloudDevice.updateMany({ where: { enrolledById: syncUser.id, status: "ACTIVE" }, data: { status: "REVOKED", revokedAt: new Date() } });
     const r = await cycle();
@@ -576,7 +619,7 @@ suite("scope, privacy and the control API (scenarios 10, 20)", () => {
   });
 
   it("disconnects cleanly: refuses while actions wait, signs out of the cloud, forgets the token", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await cycle();
     fc.offline = true;
     await submit(placed.orderId);

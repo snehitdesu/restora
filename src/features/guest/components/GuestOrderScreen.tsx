@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { request, describeError } from "@/lib/api/client";
+import { ApiError, request, describeError } from "@/lib/api/client";
 import { createPoller, type Poller } from "@/lib/polling";
 import { newIdempotencyKey } from "@/lib/idempotency";
 import { loadCart, orderKeyFor, rememberedOrders, saveCart, takeNotice } from "@/features/guest/session";
@@ -12,12 +12,12 @@ import { BillView } from "@/features/billing/BillView";
 import type { GuestOrderView } from "@/server/services/guestOrdering";
 import { GUEST_AWAITING_PAYMENT_LABEL, GUEST_TRACKER_STEPS } from "@/domain/orderProgress";
 import { formatMoney } from "@/lib/format";
-import { openRazorpayCheckout, type RazorpaySuccess } from "@/features/guest/razorpay";
 import { guestOnlinePaymentCopy } from "@/features/guest/paymentCopy";
 import { brandFor } from "@/features/guest/brand";
 import { LogoMark } from "@/features/guest/components/Chrome";
 import { Alert, Spinner } from "@/features/guest/components/Bits";
 import { RateTheMeal } from "@/features/guest/components/GuestOffers";
+import { UpiQrPayment, upiQrCheckout, type UpiQrCheckout } from "@/features/guest/components/UpiQrPayment";
 import { SfIcon, type SfIconName } from "@/features/guest/components/SfIcon";
 
 type Checkout = { paymentId: string; amount: string; testMode: boolean; share?: { parts: number; remainingParts: number; last: boolean } };
@@ -33,7 +33,7 @@ function hashFlags(): { pay: boolean; isNew: boolean } {
   return { pay: p.get("pay") === "1", isNew: p.get("new") === "1" };
 }
 
-/** Drop one-shot flags (#…&pay=1&new=1) so a refresh does not reopen the payment window. */
+/** Drop one-shot flags (#…&pay=1&new=1) so a refresh does not start the payment again by itself. */
 function clearHashFlags() {
   try {
     const p = new URLSearchParams(window.location.hash.replace(/^#/, ""));
@@ -49,13 +49,20 @@ function clearHashFlags() {
 /**
  * A guest's order: confirmation, live status from the kitchen (KOT / KDS),
  * online payment and the bill / receipt. Every state shown comes from the
- * server; a payment is "paid" only after the server verified it with the gateway.
+ * server; a payment is "paid" only after the server verified it with the bank.
+ *
+ * Paying by a bank's UPI QR: the QR may be scanned from another phone, so
+ * nothing waits for the UPI app to come back to this page. While the QR is
+ * shown the page asks RESTORA's server (which asks the bank) every few
+ * seconds; success is shown only when the server answers that the verified
+ * payment is committed. A screenshot, an "I paid" tap or a URL is never proof.
  */
 export function GuestOrderScreen({ orderId }: { orderId: string }) {
   const [key, setKey] = useState<string | null | undefined>(undefined);
   const [view, setView] = useState<GuestOrderView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [checkout, setCheckout] = useState<Checkout | null>(null);
+  const [upi, setUpi] = useState<UpiQrCheckout | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
   const [payIntent, setPayIntent] = useState(false);
@@ -101,6 +108,7 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
   function settle(res: Confirmed, closedWindow = false, declined?: string) {
     setView(res);
     setCheckout(null);
+    setUpi(null);
     if (res.paymentStatus === "SUCCESS") {
       attempt.current = null;
       shareAttempt.current = null;
@@ -122,28 +130,23 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
     return res;
   }
 
-  /** Razorpay Checkout: the signed response (or the closed window) goes to the server, which asks Razorpay. */
-  async function payWithRazorpay(started: StartedPayment, current: GuestOrderView | null) {
-    const c = started.checkout ?? {};
-    let declined: string | undefined;
-    if (typeof c.keyId !== "string" || typeof c.orderId !== "string" || !c.orderId) throw new Error("Online payment could not be started. Please pay at the counter.");
-    const outcome = await openRazorpayCheckout({
-      keyId: c.keyId,
-      orderId: c.orderId,
-      amountPaise: Number(c.amount),
-      currency: String(c.currency ?? "INR"),
-      restaurantName: current?.bill.restaurant.name ?? "Restaurant",
-      description: `Order #${current?.ref ?? ""}`,
-      onAttemptFailed: (text) => {
-        declined = text;
-        setMessage({ tone: "bad", text: `${text} You can try again in the payment window.` });
-      },
-    });
-    setBusy(true);
-    if (outcome.kind === "success") await confirm(started.paymentId, outcome.response as RazorpaySuccess & Record<string, string>);
-    // Closed: ask the server (it asks Razorpay). A decline seen in the window stays on screen.
-    else await confirm(started.paymentId, undefined, true, declined);
-  }
+  /**
+   * One check while the bank's QR is on screen: the server asks the bank. Still pending: the QR stays and the
+   * view refreshes. Decided (paid, declined, expired): settle() shows the server's verdict and removes the QR.
+   */
+  // Latest values for the polling callback (it outlives renders).
+  const upiRef = useRef<UpiQrCheckout | null>(null);
+  upiRef.current = upi;
+  const settleRef = useRef(settle);
+  settleRef.current = settle;
+  const checkUpi = useCallback(async () => {
+    const current = upiRef.current;
+    if (!current) return;
+    const res = await request<Confirmed>(`/api/qr/orders/${encodeURIComponent(orderId)}/payments/confirm`, { method: "POST", headers: { "x-order-key": key ?? "" }, body: { paymentId: current.paymentId } });
+    if (upiRef.current?.paymentId !== current.paymentId) return; // replaced meanwhile
+    if (res.paymentStatus === "PENDING") setView(res);
+    else settleRef.current(res);
+  }, [orderId, key]);
 
   /** `shareOf`: pay an equal part of what is due between that many people; the server works out the amount. */
   async function startPayment(current: GuestOrderView | null = view, shareOf?: number) {
@@ -165,12 +168,16 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
         idempotencyKey = attempt.current;
       }
       const res = await request<StartedPayment>(`/api/qr/orders/${encodeURIComponent(orderId)}/payments`, { method: "POST", headers: headers(), idempotencyKey, ...(shareOf ? { body: { parts: shareOf } } : {}) });
-      if (res.provider === "razorpay") {
-        setBusy(false);
-        setMessage(null);
-        await payWithRazorpay(res, current);
-      } else setCheckout(res);
+      // A bank's transaction-specific UPI QR, or (development / tests) the simulated gateway.
+      const qr = upiQrCheckout(res);
+      if (qr) setUpi(qr);
+      else setCheckout(res);
     } catch (e) {
+      // 409: the payment changed while it was being started (decided elsewhere); the next attempt is a new payment.
+      if (e instanceof ApiError && e.status === 409) {
+        attempt.current = null;
+        shareAttempt.current = null;
+      }
       setMessage({ tone: "bad", text: describeError(e) });
       await poller.current?.refresh();
     } finally {
@@ -178,7 +185,7 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
     }
   }
 
-  // Checkout chose "Pay online": open the payment as soon as the order is loaded (once).
+  // Checkout chose "Pay online": start the payment as soon as the order is loaded (once).
   useEffect(() => {
     if (!view || !autoPay.current) return;
     autoPay.current = false;
@@ -272,7 +279,7 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
           <div className="sf-status-meta">
             <span>Order #{view.ref}</span>
             {bill.table && <span>Table {bill.table}</span>}
-            <span>{paid ? "Paid ✓" : bill.paymentStatus === "CANCELLED" ? "Cancelled" : bill.paymentStatus === "REFUNDED" ? "Refunded" : view.pendingPaymentId ? "Payment pending" : "Unpaid"}</span>
+            <span>{paid || view.heldForReview ? "Paid ✓" : bill.paymentStatus === "CANCELLED" ? "Cancelled" : bill.paymentStatus === "REFUNDED" ? "Refunded" : view.pendingPaymentId ? "Payment pending" : "Unpaid"}</span>
           </div>
           <p className="sf-stage-caption">
             Status: <span data-testid="order-stage" role="status" aria-live="polite">{status.caption ?? view.fulfilmentLabel}</span>
@@ -316,7 +323,29 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
                 {message.text}
               </Alert>
             )}
-            {checkout ? (
+            {upi ? (
+              <UpiQrPayment
+                checkout={upi}
+                onCheck={checkUpi}
+                busy={busy}
+                onRenew={() => {
+                  setUpi(null);
+                  attempt.current = null;
+                  shareAttempt.current = null;
+                  void startPayment();
+                }}
+              />
+            ) : view.heldForReview ? (
+              <Alert tone="info" role="status">
+                <span data-testid="held-for-review">
+                  Your payment of {formatMoney(bill.paid)} was received, but it was confirmed too late for the order to go to the kitchen by itself. The café will either send it to the kitchen or refund you — please speak to a member of staff and show order #{view.ref}.
+                </span>
+              </Alert>
+            ) : view.expired && due > 0 ? (
+              <p className="sf-alert sf-alert-info" data-testid="order-expired" style={{ margin: 0 }}>
+                This order wasn&apos;t paid in time, so it hasn&apos;t gone to the kitchen and can&apos;t be paid now. Please order again, or ask the staff.
+              </p>
+            ) : checkout ? (
               <div role="region" aria-label="Test payment gateway" style={{ border: "2px dashed var(--sf-accent)", borderRadius: 14, padding: 14 }}>
                 <p style={{ margin: 0, fontWeight: 700 }}>{checkout.testMode ? "Simulated online payment" : "Payment"}</p>
                 {checkout.share && <p className="sf-hint" data-testid="share-note" style={{ margin: "4px 0 0" }}>{checkout.share.last ? "Your part: everything that is left on the bill" : `Your part of the bill, split ${checkout.share.parts} ways`}</p>}
@@ -342,15 +371,25 @@ export function GuestOrderScreen({ orderId }: { orderId: string }) {
                 </button>
                 <p className="sf-hint" data-testid="gateway-mode">
                   {guestOnlinePaymentCopy(view.payment).detail}
-                  {view.payment.mode === "SANDBOX" ? " Use Razorpay's test cards or UPI ids." : ""}
                 </p>
-                <p className="sf-alert sf-alert-info" data-testid="pay-at-counter" style={{ margin: 0 }}>
-                  Prefer cash? Pay at the counter and show order #{view.ref}.
-                </p>
+                {/* Not in the kitchen yet: only a verified online payment sends it there (the counter cannot settle it). */}
+                {view.status === "OPEN" ? (
+                  <p className="sf-alert sf-alert-info" data-testid="pay-to-send" style={{ margin: 0 }}>
+                    Your order goes to the kitchen as soon as this payment is confirmed.
+                  </p>
+                ) : (
+                  <p className="sf-alert sf-alert-info" data-testid="pay-at-counter" style={{ margin: 0 }}>
+                    Prefer cash? Pay at the counter and show order #{view.ref}.
+                  </p>
+                )}
                 {due > 0 && (
                   <SplitBill open={splitOpen} onOpen={() => setSplitOpen(true)} onClose={() => setSplitOpen(false)} parts={parts} onParts={setParts} due={due} view={view} busy={busy} onPay={(n) => void startPayment(view, n)} />
                 )}
               </>
+            ) : due > 0 && view.status === "OPEN" ? (
+              <p className="sf-alert sf-alert-info" data-testid="pay-unavailable" style={{ margin: 0 }}>
+                Online payment isn&apos;t available right now, so order #{view.ref} hasn&apos;t been sent to the kitchen. Please ask the staff.
+              </p>
             ) : due > 0 && !["CANCELLED", "REFUNDED"].includes(bill.paymentStatus) ? (
               <p className="sf-alert sf-alert-info" data-testid="pay-at-counter" style={{ margin: 0 }}>
                 Balance due {formatMoney(due)}. Please pay at the counter (cash or card) and show order #{view.ref}.
@@ -438,6 +477,9 @@ function statusCopy(view: GuestOrderView, wantsOnline: boolean, due: number): St
   const t = view.tracker;
   const table = view.bill.table ? ` at Table ${view.bill.table}` : "";
   if (t.step < 0) return { tone: "cancelled", icon: "x", title: "Order cancelled", text: "This order was cancelled. Please ask the staff if you need help." };
+  // Paid, but confirmed by the bank after the fulfilment window: not in the kitchen, waiting for staff (never "preparing").
+  if (view.heldForReview) return { tone: "waiting", icon: "alert", title: "Payment received — please see the staff", text: "Your payment was confirmed too late for the order to go to the kitchen by itself. The café will send it to the kitchen or refund you.", caption: view.fulfilmentLabel };
+  if (view.expired && due > 0) return { tone: "waiting", icon: "alert", title: "Order not sent", text: "This order wasn't paid in time, so it hasn't gone to the kitchen. Please order again, or ask the staff." };
   if (!t.confirmed) {
     if (wantsOnline && view.canPay && due > 0) return { tone: "waiting", icon: "card", anim: "pulse", title: "Complete your payment", text: "Your order goes to the kitchen as soon as your payment is confirmed.", caption: GUEST_AWAITING_PAYMENT_LABEL };
     return {
@@ -445,7 +487,12 @@ function statusCopy(view: GuestOrderView, wantsOnline: boolean, due: number): St
       icon: "check",
       anim: "check",
       title: "Order received",
-      text: due > 0 ? `We've got your order${table}. The café will confirm it in a moment — pay ${formatMoney(due)} at the counter or online below.` : `We've got your order${table}. The café will confirm it in a moment.`,
+      text:
+        due > 0 && view.status === "OPEN"
+          ? `We've got your order${table}. It goes to the kitchen once your online payment of ${formatMoney(due)} is confirmed.`
+          : due > 0
+            ? `We've got your order${table}. The café will confirm it in a moment — pay ${formatMoney(due)} at the counter or online below.`
+            : `We've got your order${table}. The café will confirm it in a moment.`,
     };
   }
   switch (t.step) {

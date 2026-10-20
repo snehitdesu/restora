@@ -22,6 +22,7 @@ import { orderRef } from "@/server/services/bill";
 import { submitOrder } from "@/server/services/orders";
 import { updateKOTStatus } from "@/server/services/kot";
 import { runAfterCommit } from "@/server/services/afterCommit";
+import { ONLINE_PAYMENT_REQUIRED } from "@/server/services/kitchenGate";
 import { SYNC_SOURCES, type SyncOpInput, type SyncOpResult, type SyncOutcome, type WireFeed, type WireOrder, type WireOutlet } from "@/lib/sync/wire";
 
 const FINISHED = ["PAID", "CANCELLED", "REFUNDED"] as const;
@@ -195,6 +196,9 @@ async function applyAccept(ctx: AccessContext, orderId: string, db: PrismaClient
   try {
     await submitOrder(ctx, orderId, db);
   } catch (e) {
+    // A guest QR order still waiting for its online payment is never accepted from the desktop either
+    // (kitchenGate.ts); it reaches the kitchen by itself once the payment is verified in the cloud.
+    if (e instanceof ValidationError && (e.details as { code?: string } | undefined)?.code === ONLINE_PAYMENT_REQUIRED) return { outcome: "CONFLICT", detail: e.message };
     // Someone (the hosted POS) moved the order between our read and the write: classify by what it is now.
     const now = await db.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true } });
     const verdict = decide(now.status);

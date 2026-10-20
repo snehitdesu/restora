@@ -34,6 +34,7 @@ type Tx = Prisma.TransactionClient;
 type Client = PrismaClient | Tx;
 
 const MAX_DEPTH = 20;
+export const RECIPE_ESTIMATED = "RECIPE_ESTIMATED";
 
 /** Convert a quantity expressed in `fromUnitId` into the material's base unit. */
 export async function convertToBase(
@@ -149,7 +150,11 @@ async function explodeInto(
 }
 
 export type RecipeCostLine = { materialId: string; quantity: Prisma.Decimal; unitCost: Prisma.Decimal; cost: Prisma.Decimal };
-export type RecipeCost = { total: Prisma.Decimal; quantity: Prisma.Decimal; lines: RecipeCostLine[] };
+/**
+ * `unpricedMaterialIds`: materials the recipe uses that have no cost at the outlet. `total` then
+ * covers the priced lines only, so it is not the recipe's cost and must never be shown as one.
+ */
+export type RecipeCost = { total: Prisma.Decimal; quantity: Prisma.Decimal; lines: RecipeCostLine[]; unpricedMaterialIds: string[] };
 
 /** Cost a recipe version at an outlet, for `quantity` of output (default = yield). */
 export async function calculateRecipeCost(
@@ -170,15 +175,17 @@ export async function calculateRecipeCost(
   const costMap = new Map(costs.map((c) => [c.materialId, D(c.avgCost)]));
 
   const lines: RecipeCostLine[] = [];
+  const unpricedMaterialIds: string[] = [];
   let total = D(0);
   for (const [materialId, q] of exploded) {
     let unitCost = costMap.get(materialId) ?? D(0);
     if (unitCost.isZero()) unitCost = (await preparedUnitCost(db, ctx, materialId, opts.outletId)) ?? unitCost;
+    if (unitCost.isZero() && q.gt(0)) unpricedMaterialIds.push(materialId);
     const cost = money(dMul(q, unitCost));
     total = total.plus(cost);
     lines.push({ materialId, quantity: roundQty(q), unitCost, cost });
   }
-  return { total: money(total), quantity, lines };
+  return { total: money(total), quantity, lines, unpricedMaterialIds };
 }
 
 /**
@@ -195,6 +202,8 @@ async function preparedUnitCost(db: Client, ctx: AccessContext, materialId: stri
   const yieldBase = await convertToBase(db, ctx, materialId, D(version.yieldQty), version.yieldUnitId);
   if (yieldBase.lte(0)) return null;
   const cost = await calculateRecipeCost(db, ctx, version.id, { outletId, quantity: version.yieldQty });
+  // A partly priced sub-recipe has no known cost: passing on its partial sum would hide the gap.
+  if (cost.unpricedMaterialIds.length) return null;
   return dDiv(cost.total, yieldBase);
 }
 
@@ -301,6 +310,8 @@ const createRecipeSchema = z.object({
   yieldUnitId: z.string().optional(),
   servingSize: z.number().positive().default(1),
   overheadPct: z.number().min(0).max(500).default(0),
+  /** Quantities are estimates, not the kitchen's verified weights: version 1 cannot be approved until they are confirmed. */
+  estimated: z.boolean().default(false),
   notes: z.string().optional(),
   lines: z.array(z.unknown()).default([]),
 });
@@ -323,10 +334,10 @@ export async function createRecipe(ctx: AccessContext, input: Omit<z.input<typeo
     }
     const recipe = await tx.recipe.create({ data: { organizationId: ctx.organizationId, name: data.name, outputType: data.outputType, menuItemId: data.menuItemId, outputMaterialId: data.outputMaterialId, stocked: data.stocked, createdById: actor(ctx) } });
     const version = await tx.recipeVersion.create({
-      data: { organizationId: ctx.organizationId, recipeId: recipe.id, version: 1, status: "DRAFT", yieldQty: D(data.yieldQty), yieldUnitId: data.yieldUnitId, servingSize: D(data.servingSize), overheadPct: D(data.overheadPct), notes: data.notes, createdById: actor(ctx) },
+      data: { organizationId: ctx.organizationId, recipeId: recipe.id, version: 1, status: "DRAFT", yieldQty: D(data.yieldQty), yieldUnitId: data.yieldUnitId, servingSize: D(data.servingSize), overheadPct: D(data.overheadPct), estimated: data.estimated, notes: data.notes, createdById: actor(ctx) },
     });
     for (const line of data.lines) await insertLine(tx, ctx, version, line as RecipeLineInput);
-    await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "Recipe", entityId: recipe.id, after: { name: data.name, outputType: data.outputType, stocked: data.stocked, versionId: version.id } });
+    await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "Recipe", entityId: recipe.id, after: { name: data.name, outputType: data.outputType, stocked: data.stocked, versionId: version.id, estimated: data.estimated } });
     return { recipe, version };
   });
 }
@@ -360,6 +371,8 @@ const versionSchema = z.object({
   /** Overhead on top of ingredient cost, in % (proposal p. 4). */
   overheadPct: z.number().min(0).max(500).optional(),
   notes: z.string().optional(),
+  /** false = someone checked every quantity (the only way an estimated draft becomes approvable). */
+  estimated: z.boolean().optional(),
   effectiveFrom: z.coerce.date().optional(),
   /** Copy lines from this version (default: the latest version). */
   copyFromVersionId: z.string().optional(),
@@ -384,6 +397,8 @@ export async function createRecipeVersion(ctx: AccessContext, recipeId: string, 
         yieldQty: data.yieldQty !== undefined ? D(data.yieldQty) : source?.yieldQty ?? D(1),
         yieldUnitId: data.yieldUnitId ?? source?.yieldUnitId, servingSize: data.servingSize !== undefined ? D(data.servingSize) : source?.servingSize ?? D(1),
         overheadPct: data.overheadPct !== undefined ? D(data.overheadPct) : source?.overheadPct ?? D(0),
+        // Copied lines keep their provenance: estimates stay estimates until confirmed.
+        estimated: data.estimated ?? source?.estimated ?? false,
         notes: data.notes, ...(data.effectiveFrom ? { effectiveFrom: data.effectiveFrom } : {}), createdById: actor(ctx),
       },
     });
@@ -404,7 +419,7 @@ export async function updateRecipeVersion(ctx: AccessContext, versionId: string,
       where: { id: versionId },
       data: { ...data, ...(data.yieldQty !== undefined ? { yieldQty: D(data.yieldQty) } : {}), ...(data.servingSize !== undefined ? { servingSize: D(data.servingSize) } : {}), ...(data.overheadPct !== undefined ? { overheadPct: D(data.overheadPct) } : {}) },
     });
-    await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "RecipeVersion", entityId: versionId, before: { yieldQty: num(v.yieldQty), effectiveFrom: v.effectiveFrom }, after: data });
+    await writeAudit(tx, ctx, { action: "RECIPE_CHANGE", entityType: "RecipeVersion", entityId: versionId, before: { yieldQty: num(v.yieldQty), effectiveFrom: v.effectiveFrom, estimated: v.estimated }, after: data });
     return updated;
   });
 }
@@ -435,12 +450,17 @@ export async function removeRecipeLine(ctx: AccessContext, lineId: string, db: C
  * DRAFT -> APPROVED. Requires at least one line, a positive yield, and every
  * sub-recipe component to have an approved version (so the recipe can be
  * exploded). Earlier approved versions stay APPROVED as history; the active
- * one is chosen by effectiveFrom (see getActiveVersion).
+ * one is chosen by effectiveFrom (see getActiveVersion). An ESTIMATED version
+ * is refused: approval makes it drive stock consumption and food cost, so its
+ * quantities must first be confirmed (updateRecipeVersion { estimated: false }).
  */
 export async function approveRecipeVersion(ctx: AccessContext, recipeVersionId: string, db: Client = prisma) {
   assertOrgWide(ctx, "recipe.approve");
   return runInTx(db, async (tx) => {
     const version = await loadDraft(tx, ctx, recipeVersionId);
+    if (version.estimated) {
+      throw new ValidationError(`Version ${version.version} holds estimated quantities that the kitchen has not confirmed. Check every ingredient quantity, mark them confirmed, then approve: an approved recipe drives stock consumption and food cost.`, { code: RECIPE_ESTIMATED });
+    }
     const lines = await tx.recipeLine.findMany({ where: { recipeVersionId } });
     if (!lines.length) throw new ValidationError("Cannot approve a recipe version with no lines");
     for (const l of lines.filter((x) => x.componentType === "SUB_RECIPE")) {
@@ -530,7 +550,7 @@ export async function listRecipes(db: Client, ctx: AccessContext, opts: { output
     take: Math.min(opts.take ?? 100, 500),
     include: {
       menuItem: { select: { name: true } },
-      versions: { orderBy: { version: "desc" }, select: { id: true, version: true, status: true, effectiveFrom: true } },
+      versions: { orderBy: { version: "desc" }, select: { id: true, version: true, status: true, effectiveFrom: true, estimated: true } },
     },
     ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
   });
@@ -543,8 +563,20 @@ export async function describeCostLines(db: Client, ctx: AccessContext, lines: R
   const codes = await unitCodes(db, ctx, materials.map((m) => m.baseUnitId));
   return lines.map((l) => {
     const m = byId.get(l.materialId);
-    return { materialId: l.materialId, name: m?.name ?? null, sku: m?.sku ?? null, unit: m ? codes.get(m.baseUnitId) ?? null : null, quantity: num(l.quantity), unitCost: num(l.unitCost), cost: num(l.cost) };
+    const priced = !l.unitCost.isZero() || l.quantity.isZero();
+    return { materialId: l.materialId, name: m?.name ?? null, sku: m?.sku ?? null, unit: m ? codes.get(m.baseUnitId) ?? null : null, quantity: num(l.quantity), priced, unitCost: priced ? num(l.unitCost) : null, cost: priced ? num(l.cost) : null };
   });
+}
+
+/** API view of a recipe cost: no total unless every ingredient is priced (a partial sum is not a cost). */
+export async function describeRecipeCost(db: Client, ctx: AccessContext, c: RecipeCost) {
+  const complete = c.unpricedMaterialIds.length === 0;
+  return {
+    complete, total: complete ? num(c.total) : null,
+    /** Sum of the priced lines only; when incomplete this is a lower bound, never the cost. */
+    pricedSubtotal: num(c.total), unpricedCount: c.unpricedMaterialIds.length,
+    quantity: num(c.quantity), lines: await describeCostLines(db, ctx, c.lines),
+  };
 }
 
 /** Theoretical plate cost of a menu item at an outlet (active version, current avg cost) vs its price. */
@@ -562,9 +594,16 @@ export async function menuItemCostAndMargin(db: Client, ctx: AccessContext, menu
   const cost = await calculateRecipeCost(db, ctx, version.id, { outletId, quantity: 1 });
   const override = await db.outletMenuItem.findUnique({ where: { outletId_menuItemId: { outletId, menuItemId } }, select: { price: true } });
   const price = D(override?.price ?? item.price);
+  if (cost.unpricedMaterialIds.length) {
+    // Unpriced ingredients: there is no plate cost, margin or food cost % to report, only the gap.
+    return {
+      menuItemId, versionId: version.id, price: num(price), complete: false as const, unpricedMaterialIds: cost.unpricedMaterialIds,
+      cost: null, overheadPct: num(D(version.overheadPct)), overhead: null, plateCost: null, margin: null, foodCostPct: null, lines: cost.lines,
+    };
+  }
   const plate = plateCostOf(cost.total, version.overheadPct);
   return {
-    menuItemId, versionId: version.id, price: num(price),
+    menuItemId, versionId: version.id, price: num(price), complete: true as const, unpricedMaterialIds: [] as string[],
     /** Ingredient cost of one portion. */
     cost: num(cost.total),
     overheadPct: num(D(version.overheadPct)), overhead: num(money(plate.minus(cost.total))),

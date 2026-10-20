@@ -133,18 +133,20 @@ describe("splitting the bill between phones", () => {
     expect(num(whole.amount)).toBeGreaterThan(num(a.amount));
   });
 
-  it("works from what is still due: cash taken at the counter in between is respected", async () => {
+  it("works from what is still due: a payment staff took in between is respected (counter cash cannot settle it)", async () => {
     const placed = await place();
     const view = await getGuestOrder(placed.orderId, placed.accessKey);
     const total = num(view.bill.total);
     const first = await startGuestPayment(placed.orderId, placed.accessKey, key(), { parts: 4 });
     await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: first.paymentId });
     const cashier: AccessContext = { userId: `cash-${RUN}`, organizationId: orgId, outletIds: [outletId], roles: ["CASHIER"], outletRoles: { [outletId]: ["CASHIER"] }, orgRoles: [], isOrgWide: false, isSuperAdmin: false };
-    const cash = await createPayment(cashier, placed.orderId, { method: "CASH", amount: 300 });
-    await verifyPayment(cashier, cash.id);
+    // A QR order waiting for its online payment is not settled at the counter; staff can take a gateway payment for it.
+    await expect(createPayment(cashier, placed.orderId, { method: "CASH", amount: 300 })).rejects.toThrow(/cannot be settled at the counter/);
+    const staff = await createPayment(cashier, placed.orderId, { method: "UPI", amount: 300, provider: "mock" });
+    await verifyPayment(cashier, staff.id);
     const due = Math.round((total - num(first.amount) - 300) * 100) / 100;
     const next = await startGuestPayment(placed.orderId, placed.accessKey, key(), { parts: 4 });
-    // 4 people, one part paid online (the cash was not a part): three still to pay what is due, rounded down.
+    // 4 people, one part paid online (the staff's payment was not a part): three still to pay what is due, rounded down.
     expect(next.share).toMatchObject({ parts: 4, remainingParts: 3, last: false });
     expect(num(next.amount)).toBe(Math.floor((due / 3) * 100) / 100);
   });

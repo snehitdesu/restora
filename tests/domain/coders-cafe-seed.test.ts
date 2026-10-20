@@ -10,7 +10,7 @@ import { systemContext } from "@/server/auth/context";
 import { createMenuItem } from "@/server/services/menu";
 import { placeOrder, submitOrder } from "@/server/services/orders";
 import { createPayment, verifyPayment } from "@/server/services/payment";
-import { seedCodersCafe, findCafe, cafeTableToken, CAFE, demoStaffPasswordForCli } from "../../prisma/coders-cafe/seed";
+import { seedCodersCafe, findCafe, legacyCafeTableToken, CAFE, demoStaffPasswordForCli } from "../../prisma/coders-cafe/seed";
 import { menuItemCount, UNRESOLVED, CODERS_CAFE_MENU } from "../../prisma/coders-cafe/menu";
 
 const RUN = Date.now().toString(36);
@@ -56,7 +56,14 @@ describe("Coders' Cafe seed", () => {
     expect(await prisma.organization.count({ where: { id: first.organizationId } })).toBe(0);
     expect(await prisma.order.count({ where: { organizationId: second.organizationId } })).toBe(0);
     expect(await prisma.menuItem.count({ where: { organizationId: second.organizationId } })).toBe(menuItemCount());
-    expect(second.tables.map((t) => [t.code, t.token])).toEqual(CAFE.tableCodes.map((c) => [c, cafeTableToken(c)]));
+    expect(second.tables.map((t) => t.code)).toEqual([...CAFE.tableCodes]);
+    // Random per build: never the derivable legacy token, never reused across a reset, never shared between tables.
+    for (const t of second.tables) {
+      expect(t.token).toMatch(/^[A-Za-z0-9_-]{24}$/);
+      expect(t.token).not.toBe(legacyCafeTableToken(t.code));
+    }
+    expect(new Set(second.tables.map((t) => t.token)).size).toBe(10);
+    expect(second.tables.some((t) => first.tables.some((f) => f.token === t.token))).toBe(false);
     expect((await findCafe(prisma))?.id).toBe(second.organizationId);
     // The neighbour is untouched.
     expect(await prisma.order.findUnique({ where: { id: otherOrder.id } })).not.toBeNull();

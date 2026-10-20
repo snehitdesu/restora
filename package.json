@@ -18,6 +18,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:seed:cafe": "tsx prisma/seed-coders-cafe.ts",
     "qr:tables": "tsx --env-file=.env scripts/qr/generate-table-qrs.ts",
+    "qr:audit": "tsx --env-file=.env scripts/qr/audit-table-tokens.ts",
     "db:studio": "prisma studio",
     "bootstrap:owner": "tsx scripts/bootstrap-owner.ts",
     "setup": "prisma generate && prisma db push && tsx prisma/seed.ts",

@@ -3,44 +3,49 @@
  * against the production build, on the real Coders' Cafe menu:
  *
  *   DEVICE 1  owner   (desktop)  Tables → Table T07's QR; finance / analytics / audit
- *   DEVICE 2  manager (desktop)  sees the same order (already in the kitchen); takes cash
- *   DEVICE 3  customer (phone)   scans T07 → real menu → cart → order → pays
+ *   DEVICE 2  manager (desktop)  sees the paid order; rings up a counter sale and takes cash
+ *   DEVICE 3  customer (phone)   scans T07 → real menu → cart → order → pays by UPI QR
  *   KITCHEN   chef    (desktop)  KDS: accept → start → ready → served
  *
- * INV-001 Razorpay success · INV-002 cash · INV-003 Razorpay decline, window
- * closed, then a successful new attempt. After each: exactly one order, one
+ * INV-001 UPI QR success · INV-002 counter cash (staff order) · INV-003 the
+ * bank declines, then a new QR is paid. After each: exactly one order, one
  * successful payment, one KOT, one invoice; finance and analytics moved by the
  * order total; audit records exist.
  *
- * Razorpay = tests/support/razorpayEmulator.ts behind RAZORPAY_API_BASE (see
- * playwright.investor.config.ts). The browser's checkout.js is replaced by a
- * stub that plays the customer's side through the emulator (the real script
- * would load Razorpay's hosted payment page). Everything RESTORA does — the
- * gateway order for the server amount, signature + capture verification,
- * signed webhooks, settlement — is the real code path.
+ * The bank = tests/support/upiBankEmulator.ts (a dynamic-UPI-QR bank, RESTORA's
+ * own TEST wire format — NOT SBI) behind UPI_EMULATOR_BASE (see
+ * playwright.investor.config.ts); the adapter reports mode MOCK. The test plays
+ * the payer's UPI app by telling the emulator the QR was paid; the bank then
+ * sends its signed callback. Everything RESTORA does — the QR for the server's
+ * amount, the page polling RESTORA, the server asking the bank, the callback,
+ * settlement, the kitchen release — is the real code path.
  */
 import { test, expect, type Browser, type BrowserContext, type Page, type APIRequestContext } from "@playwright/test";
-import { RazorpayEmulator, type CheckoutResponse } from "../../tests/support/razorpayEmulator";
-import { INVESTOR_PORT, EMULATOR_PORT, INVESTOR_RZP } from "../../playwright.investor.config";
+import { PrismaClient } from "@prisma/client";
+import { UpiBankEmulator } from "../../tests/support/upiBankEmulator";
+import { INVESTOR_PORT, EMULATOR_PORT, INVESTOR_UPI, INVESTOR_DB_URL } from "../../playwright.investor.config";
 
 const BASE = `http://localhost:${INVESTOR_PORT}`;
 const PASSWORD = "Demo@12345";
 const USERS = { owner: "cafe.owner@demo.local", manager: "cafe.manager@demo.local", chef: "cafe.chef@demo.local" } as const;
 const inr = (n: number) => `₹${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-const emu = new RazorpayEmulator({ ...INVESTOR_RZP, port: EMULATOR_PORT, webhookUrl: `${BASE}/api/webhooks/payment/razorpay` });
-/** What the next Checkout window does: a declined attempt first, then pay or close. */
-let plan: { declineFirst?: boolean; finish: "pay" | "close" } = { finish: "pay" };
-const opened: Array<{ key: string; orderId: string; amount: number }> = [];
-const webhooks: Array<Promise<{ status: number }>> = [];
+const bank = new UpiBankEmulator({ ...INVESTOR_UPI, port: EMULATOR_PORT, webhookUrl: `${BASE}/api/webhooks/payment/upi_emulator` });
+const db = new PrismaClient({ datasourceUrl: `${INVESTOR_DB_URL}?connection_limit=1&socket_timeout=30` });
 
 test.beforeAll(async () => {
-  await emu.start();
+  await bank.start();
 });
 test.afterAll(async () => {
-  await Promise.allSettled(webhooks);
-  await emu.stop();
+  await bank.stop();
+  await db.$disconnect();
 });
+
+/** The bank reference of the QR currently shown for an order (read-only, from the database). */
+async function shownQr(orderId: string) {
+  const p = await db.payment.findFirstOrThrow({ where: { orderId, status: "PENDING", providerRef: { not: null } }, orderBy: { createdAt: "desc" } });
+  return { paymentId: p.id, reference: p.providerRef! };
+}
 
 // ---------------- devices ----------------
 
@@ -55,43 +60,9 @@ async function staff(browser: Browser, who: keyof typeof USERS): Promise<{ conte
   return { context, page };
 }
 
-/** The customer's phone. Razorpay's checkout.js is served by a stub driven from here (see header). */
+/** The customer's phone (no payment script: the bank's QR is drawn by RESTORA). */
 async function customerPhone(browser: Browser) {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-  await context.exposeFunction("__rzpCheckout", async (orderId: string, amount: number, key: string) => {
-    opened.push({ key, orderId, amount });
-    const steps: Array<{ failed?: string; response?: CheckoutResponse }> = [];
-    if (plan.declineFirst) {
-      const d = emu.attempt(orderId, "failed");
-      steps.push({ failed: d.payment.error_description ?? "Declined" });
-      webhooks.push(emu.deliver("payment.failed", d.payment.id));
-      await webhooks[webhooks.length - 1];
-    }
-    if (plan.finish === "pay") {
-      const ok = emu.attempt(orderId, "captured");
-      steps.push({ response: ok.response! });
-      // Razorpay also sends its webhook (shortly after the browser handler fires).
-      webhooks.push(new Promise((r) => setTimeout(r, 400)).then(() => emu.deliver("payment.captured", ok.payment.id)));
-    }
-    return steps;
-  });
-  await context.route("https://checkout.razorpay.com/v1/checkout.js", (route) =>
-    route.fulfill({
-      contentType: "application/javascript",
-      body: `window.Razorpay = class {
-        constructor(o) { this.o = o; this.failed = function () {}; }
-        on(e, cb) { if (e === "payment.failed") this.failed = cb; }
-        open() {
-          const o = this.o;
-          window.__rzpCheckout(o.order_id, o.amount, o.key).then((steps) => {
-            for (const s of steps) if (s.failed) this.failed({ error: { description: s.failed } });
-            const last = steps[steps.length - 1];
-            if (last && last.response) o.handler(last.response); else o.modal.ondismiss();
-          });
-        }
-      };`,
-    })
-  );
   return { context, page: await context.newPage() };
 }
 
@@ -132,7 +103,7 @@ async function scanTable07(owner: Page) {
   return link;
 }
 
-async function orderFromTable(guest: Page, link: string, cart: Array<{ item: string; size?: string; addOn?: string; times?: number }>, expectedTotal: number, pay: "CASH" | "ONLINE" = "CASH") {
+async function orderFromTable(guest: Page, link: string, cart: Array<{ item: string; size?: string; addOn?: string; times?: number }>, expectedTotal: number) {
   await guest.goto(link);
   await expect(guest.getByLabel("Table T07").first()).toBeVisible();
   await expect(guest.getByText("Coders' Cafe").first()).toBeVisible();
@@ -157,18 +128,20 @@ async function orderFromTable(guest: Page, link: string, cart: Array<{ item: str
   await expect(guest.getByTestId("cart-total")).toHaveText(inr(expectedTotal));
   await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await expect(guest.getByText("Table T07").first()).toBeVisible();
-  // Against the Razorpay emulator the adapter reports MOCK, so the option is labelled as simulated.
-  if (pay === "ONLINE") await guest.getByRole("radio", { name: /Pay online|Simulated online payment/ }).check();
+  // Online payment is the only way a QR order is paid; against the emulator the adapter reports MOCK ("simulated").
+  await expect(guest.getByRole("radio", { name: /Pay online|Simulated online payment|Pay by UPI/ })).toBeChecked();
+  expect(await guest.getByRole("radio", { name: /^Cash/ }).count()).toBe(0);
   await guest.getByRole("button", { name: /^Place order/ }).click();
   await guest.waitForURL(/\/o\/[^/#]+#k=/);
-  // Cash: the order went straight to the kitchen (unpaid until the counter). Online: the payment window is already opening.
-  if (pay === "CASH") await expect(guest.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
+  // The order page asks for the bank's QR by itself ("Place order & pay").
+  await expect(guest.getByTestId("upi-qr")).toBeVisible();
+  await expect(guest.getByTestId("upi-amount")).toHaveText(inr(expectedTotal));
   return orderIdFrom(guest);
 }
 
-async function kitchenCompletes(chef: Page, orderId: string, expectLines: string[]) {
+async function kitchenCompletes(chef: Page, orderId: string, expectLines: string[], channel: RegExp = /Table T07 · QR$/) {
   await chef.goto("/kitchen");
-  const ticket = chef.getByRole("article", { name: /Table T07 · QR$/ });
+  const ticket = chef.getByRole("article", { name: channel });
   await expect(ticket).toBeVisible();
   for (const l of expectLines) await expect(ticket).toContainText(l);
   await ticket.getByRole("button", { name: "Accept" }).click();
@@ -180,7 +153,7 @@ async function kitchenCompletes(chef: Page, orderId: string, expectLines: string
 }
 
 test.describe("investor acceptance — Coders' Cafe, Table 07", () => {
-  test("INV-001 Razorpay: scan T07, real menu, pay online, kitchen, bill, finance, analytics — nothing doubled", async ({ browser }) => {
+  test("INV-001 UPI QR: scan T07, real menu, pay by the bank's QR, kitchen, bill, finance, analytics — nothing doubled", async ({ browser }) => {
     const owner = await staff(browser, "owner");
     const manager = await staff(browser, "manager");
     const chef = await staff(browser, "chef");
@@ -197,23 +170,26 @@ test.describe("investor acceptance — Coders' Cafe, Table 07", () => {
     await expect(g.getByRole("listitem").filter({ hasText: "Classic Margherita Pizza" }).first()).toContainText("₹99");
     await expect(g.getByRole("listitem").filter({ hasText: "Guntur Chiken 65" }).first()).toContainText("₹240");
 
-    // ---- checkout with "Pay online": Razorpay opens on the order page for the SERVER's amount.
-    // (160 + 60) + 2 × 110 = 440 + 5% = 462
-    plan = { finish: "pay" };
+    // ---- checkout: the bank's QR on the order page for the SERVER's amount. (160 + 60) + 2 × 110 = 440 + 5% = 462
     const orderId = await orderFromTable(g, link, [
       { item: "Classic Margherita Pizza", size: "Medium", addOn: "Make It a Cheese Melt" },
       { item: "Classic Fries", size: "Large", times: 2 },
-    ], 462, "ONLINE");
-    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible();
+    ], 462);
+    const qr = await shownQr(orderId);
+    expect(bank.txn(qr.reference)).toMatchObject({ amountPaise: 46200, currency: "INR", status: "PENDING" });
+    // Not paid yet: nothing in the kitchen, the page is waiting for the bank.
     let o = await get<OrderDTO>(api, `/api/orders/${orderId}`);
-    expect(o).toMatchObject({ channel: "QR", total: "462" });
+    expect(o).toMatchObject({ channel: "QR", total: "462", status: "OPEN" });
+    expect(o.kots).toHaveLength(0);
+    await expect(g.getByTestId("upi-waiting")).toContainText("Waiting for the bank to confirm");
+
+    // ---- the payer's UPI app pays; the bank sends its signed callback; the page learns it from RESTORA.
+    const cb = await bank.pay(qr.reference);
+    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible({ timeout: 30_000 });
+    o = await get<OrderDTO>(api, `/api/orders/${orderId}`);
     expect(o.items.map((i) => [i.name, Number(i.qty)])).toEqual([["Classic Margherita Pizza (Medium)", 1], ["Classic Fries (Large)", 2]]);
-    expect(opened.at(-1)).toMatchObject({ key: INVESTOR_RZP.keyId, amount: 46200 });
-    expect(emu.orders.get(opened.at(-1)!.orderId)?.amount).toBe(46200);
-    await Promise.all(webhooks);
-    // A redelivered webhook is a duplicate.
-    const pay = [...emu.payments.values()].find((p) => p.order_id === opened.at(-1)!.orderId && p.status === "captured")!;
-    expect((await emu.deliver("payment.captured", pay.id)).body).toMatchObject({ status: "DUPLICATE" });
+    // A redelivered callback is a duplicate.
+    expect(await (await bank.deliver(cb)).json()).toMatchObject({ status: "DUPLICATE" });
 
     // ---- manager sees the same order; the kitchen gets it as one KOT (prepaid → sent automatically)
     await manager.page.goto(`/pos/bill/${orderId}`);
@@ -239,28 +215,43 @@ test.describe("investor acceptance — Coders' Cafe, Table 07", () => {
     for (const d of [owner, manager, chef, guest]) await d.context.close();
   });
 
-  test("INV-002 cash: customer orders at T07, the kitchen gets it at once and cooks, manager takes cash", async ({ browser }) => {
+  test("INV-002 counter cash: the guest's QR cannot pay at the counter; the manager rings the order up at the POS, the kitchen cooks, cash is taken once", async ({ browser }) => {
     const owner = await staff(browser, "owner");
     const manager = await staff(browser, "manager");
     const chef = await staff(browser, "chef");
     const api = owner.page.request;
     const outletId = (await get<Array<{ id: string; code: string }>>(api, "/api/master/outlets")).find((o) => o.code === "CC01")!.id;
+
+    // The guest's checkout has no cash option (a QR order is paid online before it reaches the kitchen).
     const link = await scanTable07(owner.page);
     const guest = await customerPhone(browser);
     const g = guest.page;
+    await g.goto(link);
+    await g.getByRole("button", { name: "Add Loaded Veg Nachos" }).click();
+    await g.getByRole("link", { name: /^View cart/ }).click();
+    await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
+    await expect(g.getByText("Table T07").first()).toBeVisible();
+    expect(await g.getByRole("radio", { name: /^Cash/ }).count()).toBe(0);
+    await guest.context.close();
 
+    // The manager takes the same table's order at the counter POS instead: a staff order, cash at the till.
     // 150 + 185 = 335 + 5% = 351.75
-    const orderId = await orderFromTable(g, link, [{ item: "Loaded Veg Nachos" }, { item: "Veg Arrabita Penne" }], 351.75);
-    await expect(g.getByTestId("pay-at-counter")).toContainText(`#${ref(orderId)}`);
-
-    // No acceptance step: the KOT exists from placement, so the chef cooks straight away.
-    await kitchenCompletes(chef.page, orderId, ["Loaded Veg Nachos", "Veg Arrabita Penne"]);
-
-    // Manager finds the unpaid QR order at the POS and takes the cash.
     const m = manager.page;
     await m.goto("/pos");
-    await m.getByRole("button", { name: /^Open orders/ }).click();
-    await m.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${ref(orderId)}.*Table T07`) }).click();
+    await expect(m.getByRole("button", { name: /^Loaded Veg Nachos,/ })).toBeVisible();
+    await m.getByRole("button", { name: /Choose table|^Table / }).first().click();
+    const tables = m.getByRole("dialog", { name: "Choose table" });
+    await tables.getByRole("button", { name: /^Table T07,/ }).click();
+    await expect(tables).toBeHidden();
+    await m.getByRole("button", { name: /^Loaded Veg Nachos,/ }).click();
+    await m.getByRole("button", { name: /^Veg Arrabita Penne,/ }).click();
+    const created = m.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/orders");
+    await m.getByRole("button", { name: "Send to kitchen" }).click();
+    const orderId = ((await (await created).json()) as { data: { id: string } }).data.id;
+
+    // A staff order goes to the kitchen at once; the chef cooks it.
+    await kitchenCompletes(chef.page, orderId, ["Loaded Veg Nachos", "Veg Arrabita Penne"], /^KOT \d+, Table T07$/); // a staff dine-in ticket: no "· QR"
+
     await m.getByRole("button", { name: "Pay", exact: true }).click();
     const dlg = m.getByRole("dialog", { name: "Take payment" });
     await expect(dlg.getByRole("radio", { name: "Cash" })).toHaveAttribute("aria-checked", "true");
@@ -270,15 +261,14 @@ test.describe("investor acceptance — Coders' Cafe, Table 07", () => {
     await expect(dlg.getByText("Paid in full")).toBeVisible();
     await dlg.getByRole("button", { name: "Done" }).click();
 
-    await expect(g.getByTestId("bill-payment-status")).toHaveText("Paid", { timeout: 20_000 });
     await exactlyOnce(api, outletId, orderId, 351.75, "CASH");
     // A second charge attempt on the settled order is refused by the server.
     const again = await m.request.post("/api/payments", { data: { orderId, method: "CASH", amount: 351.75 }, headers: { origin: BASE } });
     expect(again.status()).toBe(422);
-    for (const d of [owner, manager, chef, guest]) await d.context.close();
+    for (const d of [owner, manager, chef]) await d.context.close();
   });
 
-  test("INV-003 Razorpay failure: declined and window closed → nothing paid or cooked; a new attempt succeeds once", async ({ browser }) => {
+  test("INV-003 the bank declines: nothing paid or cooked; a new QR is paid once", async ({ browser }) => {
     const owner = await staff(browser, "owner");
     const api = owner.page.request;
     const outletId = (await get<Array<{ id: string; code: string }>>(api, "/api/master/outlets")).find((o) => o.code === "CC01")!.id;
@@ -286,24 +276,65 @@ test.describe("investor acceptance — Coders' Cafe, Table 07", () => {
     const guest = await customerPhone(browser);
     const g = guest.page;
 
-    // 210 + 5% = 220.50; "Pay online" at checkout opens Razorpay: the bank declines, the guest closes the window.
-    plan = { declineFirst: true, finish: "close" };
-    const orderId = await orderFromTable(g, link, [{ item: "Butter Garlic Wings (6 Pc)" }], 220.5, "ONLINE");
-    // The bank's reason stays visible after the guest closes the Razorpay window.
-    await expect(g.getByRole("alert").filter({ hasText: /declined by the bank.*You can try again\./ })).toBeVisible();
-    await Promise.all(webhooks);
+    // 210 + 5% = 220.50; the payer's bank declines the QR payment.
+    const orderId = await orderFromTable(g, link, [{ item: "Butter Garlic Wings (6 Pc)" }], 220.5);
+    const first = await shownQr(orderId);
+    await bank.pay(first.reference, "FAILED");
+    await expect(g.getByRole("alert").filter({ hasText: /declined.*You can try again|The payment was declined/ })).toBeVisible({ timeout: 30_000 });
     let o = await get<OrderDTO>(api, `/api/orders/${orderId}`);
     expect(o.status).toBe("OPEN");
     expect(o.kots).toHaveLength(0);
     expect(o.payments!.filter((p) => p.status === "SUCCESS")).toHaveLength(0);
 
-    // The guest tries again: a new attempt is captured.
-    plan = { finish: "pay" };
+    // The guest tries again: a NEW QR (a new bank transaction), paid this time.
     await g.getByRole("button", { name: /^(Pay online|Resume payment)/ }).click();
-    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible();
-    await Promise.all(webhooks);
+    await expect(g.getByTestId("upi-qr")).toBeVisible();
+    const second = await shownQr(orderId);
+    expect(second.reference).not.toBe(first.reference);
+    await bank.pay(second.reference);
+    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible({ timeout: 30_000 });
     o = await exactlyOnce(api, outletId, orderId, 220.5, "ONLINE");
     expect(o.payments!.map((p) => p.status).sort()).toEqual(["FAILED", "SUCCESS"]);
     for (const d of [owner, guest]) await d.context.close();
+  });
+
+  test("INV-004 recipes: every drafted dish is linked to its menu item, clearly marked as estimated, and cannot be approved as it is", async ({ browser }) => {
+    const owner = await staff(browser, "owner");
+    const o = owner.page;
+    const organizationId = (await db.organization.findFirstOrThrow({ where: { name: "Coders' Cafe" } })).id;
+    const drafts = await db.recipe.count({ where: { organizationId } });
+    expect(drafts).toBe(61); // prisma/coders-cafe/recipes.ts: every board item except three combos whose contents are unreadable
+    expect(await db.recipeVersion.count({ where: { organizationId, NOT: { status: "DRAFT", estimated: true } } })).toBe(0);
+
+    await o.goto("/recipes");
+    await o.getByPlaceholder("Search recipe name…").fill("Margherita");
+    const row = o.getByRole("row", { name: /Classic Margherita Pizza/ });
+    await expect(row).toContainText("Estimated");
+    await expect(row).toContainText("Draft");
+    await row.click();
+    await expect(o).toHaveURL(/\/recipes\/[^/]+$/);
+    await expect(o.getByRole("heading", { level: 1, name: "Classic Margherita Pizza" })).toBeVisible();
+    await expect(o.getByRole("link", { name: "Classic Margherita Pizza" })).toBeVisible(); // linked to the menu item
+    await expect(o.getByText(`(${inr(99)})`)).toBeVisible(); // the board's price, unchanged
+    await expect(o.getByTestId("recipe-estimated")).toContainText("never used for stock consumption, purchasing or food cost");
+    const lines = o.getByRole("table", { name: "Recipe lines" });
+    await expect(lines).toContainText("Thin crust pizza base (regular)");
+    await expect(lines).toContainText("Mozzarella cheese");
+    await expect(o.getByText(/ESTIMATED DRAFT/).first()).toBeVisible();
+    await expect(o.getByText(/Indicative cost at .* \(estimated quantities\)/)).toBeVisible();
+    // No ingredient costs were ever entered: the card says so instead of showing a ₹0.00 "cost".
+    await expect(o.getByText("Cost unavailable", { exact: true })).toBeVisible();
+    await expect(o.getByTestId("recipe-cost-unpriced")).toContainText("Cost unavailable: ingredient costs not entered");
+    await expect(o.getByRole("table", { name: "Cost breakdown" }).getByText("₹0.00")).toHaveCount(0);
+
+    // Approving as it is: refused by the server, explained in the dialog, nothing changes.
+    await o.getByRole("button", { name: "Approve", exact: true }).click();
+    const dlg = o.getByRole("dialog", { name: "Approve version 1?" });
+    await dlg.getByRole("button", { name: "Confirm" }).click();
+    await expect(dlg.getByText(/estimated quantities that the kitchen has not confirmed/)).toBeVisible();
+    await dlg.getByRole("button", { name: "Cancel" }).click();
+    const v = await db.recipeVersion.findFirstOrThrow({ where: { organizationId, recipe: { name: "Classic Margherita Pizza" } } });
+    expect(v).toMatchObject({ status: "DRAFT", estimated: true, approvedAt: null });
+    await owner.context.close();
   });
 });

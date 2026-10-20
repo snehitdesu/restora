@@ -8,10 +8,10 @@
  *    overwriting a known customer), payment choice for the staff, every line
  *    checked BEFORE anything is created, opening hours, duplicate submits;
  *  - multiple guests at one table, wrong table / wrong restaurant;
- *  - the customer tracker driven by the real KOT / KDS transitions, and the
- *    cash path (straight to the kitchen at placement, unpaid until the counter)
- *    vs. a verified online prepayment (KOT only after the gateway confirms);
- *  - a failed kitchen dispatch leaves nothing behind; unpaid orders per table are capped.
+ *  - the customer tracker driven by the real KOT / KDS transitions; pay at the
+ *    counter is refused, and the KOT exists only after the gateway confirms the
+ *    online payment;
+ *  - a failed kitchen dispatch settles nothing; unsettled orders per table are capped.
  */
 import { describe, it, expect, beforeAll } from "vitest";
 import { ZodError } from "zod";
@@ -22,7 +22,7 @@ import { createMenuItem, addVariant, createModifierGroup, addModifierOption, att
 import { updateKOTStatus } from "@/server/services/kot";
 import { createCustomer } from "@/server/services/crm";
 import { rotateTableQr } from "@/server/services/masterData";
-import { guestMenu, quoteGuestCart, placeGuestOrder, getGuestOrder, startGuestPayment, confirmGuestPayment, orderingStatus, normalizeGuestPhone, MAX_UNPAID_GUEST_ORDERS, maxUnpaidGuestOrders, GuestPriceChangedError } from "@/server/services/guestOrdering";
+import { guestMenu, quoteGuestCart, placeGuestOrder, getGuestOrder, startGuestPayment, confirmGuestPayment, orderingStatus, normalizeGuestPhone, MAX_UNPAID_GUEST_ORDERS, MAX_WAITING_GUEST_ORDERS, maxUnpaidGuestOrders, GuestPriceChangedError, PAY_ONLINE_ONLY } from "@/server/services/guestOrdering";
 import { GUEST_AWAITING_PAYMENT_LABEL } from "@/domain/orderProgress";
 import { guestTracker } from "@/domain/orderProgress";
 import { isOpenAt, formatHours, minutesOf } from "@/domain/openingHours";
@@ -110,24 +110,24 @@ describe("cart quote", () => {
 });
 
 describe("placing a storefront order", () => {
-  it("cash: goes straight to the kitchen (SENT + one KOT) and stays unpaid; name + phone link the CRM customer (existing names never overwritten)", async () => {
+  it("pay at the counter is refused; an online order waits for its payment (OPEN, no KOT); name + phone link the CRM customer (existing names never overwritten)", async () => {
     const existing = await createCustomer(sys, { name: "Known Regular", phone: "9876500001" });
-    const placed = await placeGuestOrder(token, { items: [{ menuItemId: fries, qty: 1 }], customer: { name: "Someone Else", phone: "+91 98765-00001" }, paymentMethod: "CASH" }, key());
+    const ordersBefore = await prisma.order.count({ where: { organizationId: orgId } });
+    await expect(placeGuestOrder(token, { items: [{ menuItemId: fries, qty: 1 }], customer: { name: "Someone Else", phone: "+91 98765-00001" }, paymentMethod: "CASH" }, key())).rejects.toThrow(PAY_ONLINE_ONLY);
+    expect(await prisma.order.count({ where: { organizationId: orgId } })).toBe(ordersBefore);
+    const placed = await placeGuestOrder(token, { items: [{ menuItemId: fries, qty: 1 }], customer: { name: "Someone Else", phone: "+91 98765-00001" }, paymentMethod: "ONLINE" }, key());
     const order = await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId }, include: { kots: { include: { items: true } }, customer: true, payments: true } });
-    expect(order).toMatchObject({ status: "SENT", source: "QR", channel: "QR", customerId: existing.id, paidAt: null });
+    expect(order).toMatchObject({ status: "OPEN", source: "QR", channel: "QR", customerId: existing.id, paidAt: null });
     expect(order.customer!.name).toBe("Known Regular");
-    // Dispatched by the existing submitOrder routing: one KOT for the station, with the line.
-    expect(order.kots).toHaveLength(1);
-    expect(order.kots[0]).toMatchObject({ status: "NEW", outletId, organizationId: orgId });
-    expect(order.kots[0].items.map((i) => [i.name, Number(i.qty)])).toEqual([[`Fries ${RUN}`, 1]]);
-    // Cash is collected at the counter: nothing is recorded as paid.
+    // Not in the kitchen before the online payment is verified.
+    expect(order.kots).toHaveLength(0);
     expect(order.payments).toHaveLength(0);
     const view = await getGuestOrder(placed.orderId, placed.accessKey);
-    expect(view).toMatchObject({ status: "SENT", fulfilment: "SENT_TO_KITCHEN", tracker: { step: 0, confirmed: true }, bill: { paymentStatus: "UNPAID" } });
+    expect(view).toMatchObject({ status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: GUEST_AWAITING_PAYMENT_LABEL, tracker: { step: 0, confirmed: false }, bill: { paymentStatus: "UNPAID" } });
     const note = await prisma.notification.findFirst({ where: { organizationId: orgId, body: { contains: placed.ref } } });
-    expect(note!.body).toMatch(/sent to the kitchen · Someone Else · pays at the counter$/);
+    expect(note!.body).toMatch(/waiting for the guest's online payment · Someone Else$/);
     const audit = await prisma.auditLog.findFirst({ where: { entityType: "Order", entityId: placed.orderId, action: "CREATE", after: { contains: "guest-qr" } } });
-    expect(audit!.after).toMatch(/"paymentMethod":"CASH"/);
+    expect(audit!.after).toMatch(/"paymentMethod":"ONLINE"/);
 
     // A new phone creates the customer; a name without a phone creates nothing in the CRM.
     const fresh = await placeGuestOrder(token2, { items: [{ menuItemId: fries, qty: 1 }], customer: { name: "Ananya", phone: "9123456780" } }, key());
@@ -159,25 +159,22 @@ describe("placing a storefront order", () => {
 
   it("duplicate submit (double tap / refresh) with the same key = one order, one notification", async () => {
     const k = key();
-    const body = { items: [{ menuItemId: fries, qty: 2 }], customer: { name: "Twice", phone: "9000000088" }, paymentMethod: "CASH" };
+    const body = { items: [{ menuItemId: fries, qty: 2 }], customer: { name: "Twice", phone: "9000000088" }, paymentMethod: "ONLINE" };
     const [a, b] = await Promise.all([placeGuestOrder(token, body, k), placeGuestOrder(token, body, k)]);
     const c = await placeGuestOrder(token, body, k);
     expect(new Set([a.orderId, b.orderId, c.orderId]).size).toBe(1);
     expect(await prisma.order.count({ where: { organizationId: orgId, idempotencyKey: { endsWith: k } } })).toBe(1);
     expect(await prisma.notification.count({ where: { organizationId: orgId, body: { contains: a.ref } } })).toBe(1);
-    // ...and one kitchen ticket, no payment: a replay never dispatches twice.
-    expect(await prisma.kot.count({ where: { orderId: a.orderId } })).toBe(1);
-    expect(await prisma.kotItem.count({ where: { kot: { orderId: a.orderId } } })).toBe(1);
+    // ...nothing in the kitchen and no payment yet: a replay never dispatches.
+    expect(await prisma.kot.count({ where: { orderId: a.orderId } })).toBe(0);
     expect(await prisma.payment.count({ where: { orderId: a.orderId } })).toBe(0);
     await prisma.order.update({ where: { id: a.orderId }, data: { status: "CANCELLED" } });
   });
 
-  it("a cash order whose kitchen dispatch fails leaves nothing behind (no order, no KOT, no notification); the retry dispatches once", async () => {
-    const k = key();
-    const body = { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH" };
+  it("a verified payment whose kitchen dispatch fails settles nothing (payment PENDING, no KOT, no invoice); the retry dispatches once", async () => {
+    const g = await placeGuestOrder(token, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key());
+    const pay = await startGuestPayment(g.orderId, g.accessKey, key());
     const pg = /^postgres(ql)?:/.test(process.env.DATABASE_URL ?? "");
-    const orders = await prisma.order.count({ where: { organizationId: orgId } });
-    const notes = await prisma.notification.count({ where: { organizationId: orgId } });
     // A real database failure while the KOT is written (inside the order's transaction).
     if (pg) {
       await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION sf_fail_kot() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'kitchen dispatch failed'; END $$ LANGUAGE plpgsql`);
@@ -186,30 +183,36 @@ describe("placing a storefront order", () => {
       await prisma.$executeRawUnsafe(`CREATE TRIGGER sf_fail_kot BEFORE INSERT ON "Kot" BEGIN SELECT RAISE(ABORT, 'kitchen dispatch failed'); END`);
     }
     try {
-      await expect(placeGuestOrder(token, body, k)).rejects.toThrow(/kitchen dispatch failed|kot\.create\(\)/);
+      await expect(confirmGuestPayment(g.orderId, g.accessKey, { paymentId: pay.paymentId })).rejects.toThrow(/kitchen dispatch failed|kot\.create\(\)/);
     } finally {
       await prisma.$executeRawUnsafe(pg ? `DROP TRIGGER IF EXISTS sf_fail_kot ON "Kot"` : `DROP TRIGGER IF EXISTS sf_fail_kot`);
       if (pg) await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS sf_fail_kot()`);
     }
-    expect(await prisma.order.count({ where: { organizationId: orgId } })).toBe(orders);
-    expect(await prisma.notification.count({ where: { organizationId: orgId } })).toBe(notes);
-    // The guest's retry (same Idempotency-Key, kept by the browser) now goes through, once.
-    const placed = await placeGuestOrder(token, body, k);
-    expect(await prisma.kot.count({ where: { orderId: placed.orderId } })).toBe(1);
-    expect((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).status).toBe("SENT");
-    await prisma.order.update({ where: { id: placed.orderId }, data: { status: "CANCELLED" } });
+    // The whole settlement rolled back with the failed ticket: the payment is still PENDING, nothing is paid or invoiced.
+    expect((await prisma.payment.findUniqueOrThrow({ where: { id: pay.paymentId } })).status).toBe("PENDING");
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: g.orderId } })).status).toBe("OPEN");
+    expect(await prisma.kot.count({ where: { orderId: g.orderId } })).toBe(0);
+    expect(await prisma.taxInvoice.count({ where: { sourceKey: `inv:${g.orderId}` } })).toBe(0);
+    // The guest's next status check goes through, once.
+    expect((await confirmGuestPayment(g.orderId, g.accessKey, { paymentId: pay.paymentId })).status).toBe("PAID");
+    expect(await prisma.kot.count({ where: { orderId: g.orderId } })).toBe(1);
+    expect(await prisma.taxInvoice.count({ where: { sourceKey: `inv:${g.orderId}` } })).toBe(1);
   });
 
-  it(`a table can have at most ${MAX_UNPAID_GUEST_ORDERS} unpaid cash orders in the kitchen (a QR is a public link)`, async () => {
+  it(`a table can have at most ${MAX_UNPAID_GUEST_ORDERS} unsettled guest orders, counting unpaid ones sent to the kitchen before online-only checkout`, async () => {
     const tok = await newTable(orgId, outletId, `U${RUN}`.slice(0, 10));
     const ids: string[] = [];
-    for (let i = 0; i < MAX_UNPAID_GUEST_ORDERS; i++) ids.push((await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH" }, key())).orderId);
-    const kots = await prisma.kot.count({ where: { organizationId: orgId } });
-    await expect(placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH" }, key())).rejects.toThrow(/unpaid orders/);
-    expect(await prisma.kot.count({ where: { organizationId: orgId } })).toBe(kots); // nothing reached the kitchen
+    // Unpaid orders already in the kitchen from the old pay-at-the-counter flow (SENT, no payment).
+    for (let round = 0; round < MAX_UNPAID_GUEST_ORDERS / MAX_WAITING_GUEST_ORDERS; round++) {
+      const batch: string[] = [];
+      for (let i = 0; i < MAX_WAITING_GUEST_ORDERS; i++) batch.push((await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key())).orderId);
+      await prisma.order.updateMany({ where: { id: { in: batch } }, data: { status: "SENT" } });
+      ids.push(...batch);
+    }
+    await expect(placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key())).rejects.toThrow(/unpaid orders/);
     // A settled order (here: cancelled by staff) frees the table again.
     await prisma.order.update({ where: { id: ids[0] }, data: { status: "CANCELLED" } });
-    ids.push((await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH" }, key())).orderId);
+    ids.push((await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key())).orderId);
     await prisma.order.updateMany({ where: { id: { in: ids } }, data: { status: "CANCELLED" } });
   });
 
@@ -244,9 +247,12 @@ describe("placing a storefront order", () => {
 });
 
 describe("customer tracker from the real KOT / KDS flow", () => {
-  it("cash: sent to the kitchen at placement → kitchen accepted → preparing → ready → served (read from the persisted KOT)", async () => {
-    const g = await placeGuestOrder(token, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH" }, key());
+  it("paid online: sent to the kitchen → kitchen accepted → preparing → ready → served (read from the persisted KOT)", async () => {
+    const g = await placeGuestOrder(token, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key());
     const step = async () => (await getGuestOrder(g.orderId, g.accessKey)).tracker;
+    expect(await step()).toEqual({ step: 0, confirmed: false }); // waiting for its payment
+    const pay = await startGuestPayment(g.orderId, g.accessKey, key());
+    await confirmGuestPayment(g.orderId, g.accessKey, { paymentId: pay.paymentId });
     expect(await step()).toEqual({ step: 0, confirmed: true });
     const kot = await prisma.kot.findFirstOrThrow({ where: { orderId: g.orderId } });
     await updateKOTStatus(kitchen, kot.id, "ACCEPTED");
@@ -334,7 +340,7 @@ describe("checkout total guard, payment-wait label and the unpaid cap setting", 
   it("places the order when the shown total is still the server's total", async () => {
     const tok = await newTable(orgId, outletId, `G${RUN}`.slice(0, 10));
     const q = await quoteGuestCart(tok, { items: [{ menuItemId: fries, qty: 2 }] });
-    const placed = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 2 }], paymentMethod: "CASH", expectedTotal: q.total }, key());
+    const placed = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 2 }], paymentMethod: "ONLINE", expectedTotal: q.total }, key());
     expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).total).toFixed(2)).toBe(q.total);
     await prisma.order.update({ where: { id: placed.orderId }, data: { status: "CANCELLED" } });
   });
@@ -346,14 +352,14 @@ describe("checkout total guard, payment-wait label and the unpaid cap setting", 
     try {
       const orders = await prisma.order.count({ where: { organizationId: orgId } });
       const kots = await prisma.kot.count({ where: { organizationId: orgId } });
-      const err = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH", expectedTotal: q.total }, key()).catch((e) => e);
+      const err = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE", expectedTotal: q.total }, key()).catch((e) => e);
       expect(err).toBeInstanceOf(GuestPriceChangedError);
       expect(err.status).toBe(409);
       expect(err.details).toEqual({ total: "94.50" });
       expect(await prisma.order.count({ where: { organizationId: orgId } })).toBe(orders);
       expect(await prisma.kot.count({ where: { organizationId: orgId } })).toBe(kots);
       // Re-quoted, the guest confirms the new total and the order goes through.
-      const placed = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH", expectedTotal: "94.50" }, key());
+      const placed = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE", expectedTotal: "94.50" }, key());
       await prisma.order.update({ where: { id: placed.orderId }, data: { status: "CANCELLED" } });
     } finally {
       await updateMenuItem(sys, fries, { price: 85 });
@@ -362,7 +368,7 @@ describe("checkout total guard, payment-wait label and the unpaid cap setting", 
 
   it("the shown total never prices anything: a lower one is refused, not charged", async () => {
     const tok = await newTable(orgId, outletId, `I${RUN}`.slice(0, 10));
-    await expect(placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH", expectedTotal: "1.00" }, key())).rejects.toBeInstanceOf(GuestPriceChangedError);
+    await expect(placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE", expectedTotal: "1.00" }, key())).rejects.toBeInstanceOf(GuestPriceChangedError);
     for (const bad of ["-1", "abc", "1.234", "1e3", " ", "99999999999.00"]) {
       await expect(placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], expectedTotal: bad }, key())).rejects.toBeInstanceOf(ZodError);
     }
@@ -372,29 +378,29 @@ describe("checkout total guard, payment-wait label and the unpaid cap setting", 
   it("a replay of an order already placed is returned as it is, whatever total it carries", async () => {
     const tok = await newTable(orgId, outletId, `J${RUN}`.slice(0, 10));
     const k = key();
-    const first = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH", expectedTotal: "89.25" }, k);
+    const first = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE", expectedTotal: "89.25" }, k);
     await updateMenuItem(sys, fries, { price: 90 });
     try {
-      const again = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH", expectedTotal: "89.25" }, k);
+      const again = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE", expectedTotal: "89.25" }, k);
       expect(again).toMatchObject({ orderId: first.orderId, replayed: true });
-      expect(await prisma.kot.count({ where: { orderId: first.orderId } })).toBe(1);
+      expect(await prisma.order.count({ where: { organizationId: orgId, idempotencyKey: { endsWith: k } } })).toBe(1);
     } finally {
       await updateMenuItem(sys, fries, { price: 85 });
       await prisma.order.update({ where: { id: first.orderId }, data: { status: "CANCELLED" } });
     }
   });
 
-  it("an online order with its payment open says it waits for that payment, not for the restaurant", async () => {
+  it("an online order says it waits for its payment, not for the restaurant — before, during and after a declined attempt", async () => {
     const tok = await newTable(orgId, outletId, `K${RUN}`.slice(0, 10));
     const g = await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key());
-    expect((await getGuestOrder(g.orderId, g.accessKey)).fulfilmentLabel).toBe("Waiting for the restaurant to accept");
+    expect((await getGuestOrder(g.orderId, g.accessKey)).fulfilmentLabel).toBe(GUEST_AWAITING_PAYMENT_LABEL);
     const started = await startGuestPayment(g.orderId, g.accessKey, key());
     const waiting = await getGuestOrder(g.orderId, g.accessKey);
     expect(waiting.fulfilmentLabel).toBe(GUEST_AWAITING_PAYMENT_LABEL);
     expect(waiting.pendingPaymentId).toBe(started.paymentId);
-    // Declined: no payment is open any more; staff can still accept it at the POS.
+    // Declined: no payment is open any more, and staff cannot accept it at the POS either — it still waits for a payment.
     await confirmGuestPayment(g.orderId, g.accessKey, { paymentId: started.paymentId, gateway: { mockOutcome: "decline" } });
-    expect((await getGuestOrder(g.orderId, g.accessKey)).fulfilmentLabel).toBe("Waiting for the restaurant to accept");
+    expect((await getGuestOrder(g.orderId, g.accessKey)).fulfilmentLabel).toBe(GUEST_AWAITING_PAYMENT_LABEL);
     const again = await startGuestPayment(g.orderId, g.accessKey, key());
     const paid = await confirmGuestPayment(g.orderId, g.accessKey, { paymentId: again.paymentId });
     expect(paid.fulfilmentLabel).toBe("Sent to the kitchen");
@@ -420,8 +426,8 @@ describe("checkout total guard, payment-wait label and the unpaid cap setting", 
     process.env.GUEST_MAX_UNPAID_ORDERS_PER_TABLE = "2";
     const ids: string[] = [];
     try {
-      for (let i = 0; i < 2; i++) ids.push((await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH" }, key())).orderId);
-      await expect(placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "CASH" }, key())).rejects.toThrow(/already has 2 unpaid orders/);
+      for (let i = 0; i < 2; i++) ids.push((await placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key())).orderId);
+      await expect(placeGuestOrder(tok, { items: [{ menuItemId: fries, qty: 1 }], paymentMethod: "ONLINE" }, key())).rejects.toThrow(/already has 2 unpaid orders/);
     } finally {
       delete process.env.GUEST_MAX_UNPAID_ORDERS_PER_TABLE;
       await prisma.order.updateMany({ where: { id: { in: ids } }, data: { status: "CANCELLED" } });

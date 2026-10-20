@@ -41,7 +41,11 @@ export type MenuItem = {
   outletOverrides?: Array<{ price: Num | null; active: boolean; soldOut: boolean }>;
   effectivePrice?: number; offered?: boolean; effectiveSoldOut?: boolean;
 };
-type Margin = { price: number; cost: number; overheadPct?: number; overhead?: number; plateCost?: number; margin: number; foodCostPct: number; versionId: string };
+/** Cost figures are null (complete: false) when an ingredient has no cost at the outlet. */
+type Margin = {
+  price: number; cost: number | null; overheadPct?: number; overhead?: number | null; plateCost?: number | null; margin: number | null; foodCostPct: number | null; versionId: string;
+  complete?: boolean; lines?: Array<{ name: string | null; materialId: string; priced: boolean }>;
+};
 
 /** "Required · choose 1", "Optional · up to 3"… from a group's min/max. */
 export function ruleText(min: number, max: number): string {
@@ -261,13 +265,21 @@ function MarginCard({ item, outletId }: { item: MenuItem; outletId: string }) {
     <Card title="Plate cost (approved recipe in effect)" className="mb-4">
       {q.loading && !q.data ? <LoadingState /> : noRecipe ? (
         <EmptyState title="No approved recipe" hint="Sales of this item are recorded as unmapped for consumption until a recipe version is approved." action={<Link href="/recipes" className="text-sm text-brand-600 hover:underline">Go to recipes →</Link>} />
-      ) : q.error ? <ErrorState error={q.error} onRetry={q.reload} compact /> : q.data ? (
+      ) : q.error ? <ErrorState error={q.error} onRetry={q.reload} compact /> : q.data && (q.data.complete === false || q.data.cost === null) ? (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Stat label="Menu price" value={formatMoney(q.data.price)} />
-          <Stat label="Plate cost" value={formatMoney(q.data.plateCost ?? q.data.cost)}
-            hint={q.data.overhead ? `Ingredients ${formatMoney(q.data.cost)} + ${q.data.overheadPct}% overhead` : "Ingredients at weighted average cost at this outlet"} />
-          <Stat label="Margin" value={formatMoney(q.data.margin)} tone={q.data.margin < 0 ? "bad" : undefined} />
-          <Stat label="Food cost" value={formatPct(q.data.foodCostPct)} />
+          <Stat label="Plate cost" value="Cost unavailable" tone="bad"
+            hint={`Ingredient costs not entered at this outlet for ${(q.data.lines ?? []).filter((l) => !l.priced).map((l) => l.name ?? l.materialId).join(", ") || "some ingredients"}.`} />
+          <Stat label="Margin" value="Unknown" hint="Needs the plate cost" />
+          <Stat label="Food cost" value="Unknown" hint="Needs the plate cost" />
+        </div>
+      ) : q.data ? (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat label="Menu price" value={formatMoney(q.data.price)} />
+          <Stat label="Plate cost" value={formatMoney(q.data.plateCost ?? q.data.cost ?? 0)}
+            hint={q.data.overhead ? `Ingredients ${formatMoney(q.data.cost ?? 0)} + ${q.data.overheadPct}% overhead` : "Ingredients at weighted average cost at this outlet"} />
+          <Stat label="Margin" value={formatMoney(q.data.margin ?? 0)} tone={(q.data.margin ?? 0) < 0 ? "bad" : undefined} />
+          <Stat label="Food cost" value={formatPct(q.data.foodCostPct ?? 0)} />
         </div>
       ) : null}
     </Card>

@@ -40,7 +40,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const TOKEN = "tok-123456";
 const menuData = (): GuestMenuData => ({
   restaurant: { name: "Spice Route", outletName: "Central", address: null, phone: null, currency: "INR", hours: null },
-  table: { code: "T4" }, ordering: { open: true, message: null }, payment: { online: false, testMode: false },
+  table: { code: "T4" }, ordering: { open: true, message: null }, payment: { online: true, testMode: true },
   menu: [{ id: "i-dosa", name: "Masala Dosa", description: "Crisp", price: 120, effectivePrice: 120, taxPct: 5, station: "KITCHEN", isVeg: true, active: true, offered: true, soldOut: false, effectiveSoldOut: false, categoryId: "c1", category: { id: "c1", name: "Tiffin", sortOrder: 1 }, variants: [], modifierGroups: [] }],
 });
 const inStore = (ui: ReactNode) => render(<StorefrontProvider token={TOKEN} initial={menuData()}>{ui}</StorefrontProvider>);
@@ -117,7 +117,7 @@ describe("checkout: referral and offers", () => {
     const navigate = vi.fn();
     handler = (c) => (c.url.endsWith("/quote") ? { data: quote(c) } : c.method === "POST" ? { data: placed({ coupon: { applied: true }, referral: { attached: true } }) } : { data: menuData() });
     inStore(<GuestCheckoutScreen navigate={navigate} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled());
     const friend = screen.getByLabelText(/Friend's referral code/);
     expect(friend).toHaveValue("RF7K2M9Q");
     expect(friend).toBeDisabled(); // needs a phone number first
@@ -130,8 +130,8 @@ describe("checkout: referral and offers", () => {
     await user.click(offers);
     // A first-order / per-guest coupon is checked against the guest's own record, so the phone re-prices the cart.
     await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/quote")).at(-1)!.body).toMatchObject({ couponCode: "WELCOME10", phone: "9876543210" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
     await waitFor(() => expect(navigate).toHaveBeenCalled());
     const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/orders"))!;
     expect(post.body).toMatchObject({ customer: { phone: "9876543210" }, couponCode: "WELCOME10", referralCode: "RF7K2M9Q", marketingOptIn: true });
@@ -154,8 +154,8 @@ describe("checkout: referral and offers", () => {
     const navigate = vi.fn();
     handler = (c) => (c.url.endsWith("/quote") ? { data: quote(c) } : c.method === "POST" ? { data: placed({ coupon: { applied: false, message: "This code has been fully used." } }) } : { data: menuData() });
     inStore(<GuestCheckoutScreen navigate={navigate} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
     await waitFor(() => expect(navigate).toHaveBeenCalled());
     const post = calls.find((c) => c.method === "POST" && c.url.endsWith("/orders"))!;
     expect(post.body).not.toHaveProperty("referralCode");

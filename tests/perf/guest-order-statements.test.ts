@@ -27,12 +27,12 @@ async function measured(lines: number, key: string) {
   let ops = 0;
   const db = prisma.$extends({ query: { $allModels: { async $allOperations({ args, query }) { ops++; return query(args); } } } });
   const items = dishes.slice(0, lines).map((menuItemId) => ({ menuItemId, qty: 1 }));
-  const placed = await placeGuestOrder(tableToken, { items, paymentMethod: "CASH" }, key, {}, db as never);
+  const placed = await placeGuestOrder(tableToken, { items, paymentMethod: "ONLINE" }, key, {}, db as never);
   return { ops, placed };
 }
 
 describe("a guest QR order's database round trips", () => {
-  it("stays within budget for 1 and 3 lines, and the order is still complete (one order, one KOT, right total)", async () => {
+  it("stays within budget for 1 and 3 lines, and the order is still complete (one order, right total, waiting for its online payment: no KOT yet)", async () => {
     const one = await measured(1, `gb-${RUN}-one-key`);
     const three = await measured(3, `gb-${RUN}-three-key`);
     expect(one.ops).toBeLessThanOrEqual(30);
@@ -40,8 +40,8 @@ describe("a guest QR order's database round trips", () => {
     for (const [p, lines] of [[one.placed, 1], [three.placed, 3]] as const) {
       const o = await prisma.order.findUniqueOrThrow({ where: { id: p.orderId }, include: { items: true, kots: true } });
       expect(o.items).toHaveLength(lines);
-      expect(o.kots).toHaveLength(1);
-      expect(o.status).toBe("SENT");
+      expect(o.kots).toHaveLength(0);
+      expect(o.status).toBe("OPEN");
       const expected = o.items.reduce((a, i) => a + Number(i.lineTotal) * (1 + Number(i.taxPct) / 100), 0);
       expect(Number(o.total)).toBeCloseTo(expected, 2);
     }

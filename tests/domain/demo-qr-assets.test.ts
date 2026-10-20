@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { cafeTableToken } from "../../prisma/coders-cafe/seed";
+import { legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
 import { DEMO_ORIGINS, DEMO_WARNING, buildDemoPayloads, resolveOutDir, sheetHtml, tableCardHtml } from "../../scripts/qr/demo-assets";
 import { checkPayload } from "../../scripts/qr/verify-demo-assets";
 import { guestTableUrl } from "@/lib/qr/tableQrUrl";
@@ -10,10 +10,10 @@ import { guestTableUrl } from "@/lib/qr/tableQrUrl";
 const origin = DEMO_ORIGINS[0];
 
 describe("demo table QR payloads", () => {
-  it("maps T01–T10 to /t/<cafeTableToken> on the allowed origin, all distinct", () => {
+  it("maps T01–T10 to /t/<legacyCafeTableToken> on the allowed origin, all distinct", () => {
     const p = buildDemoPayloads(origin);
     expect(p.map((x) => x.code)).toEqual(["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10"]);
-    for (const x of p) expect(x.url).toBe(guestTableUrl(origin, cafeTableToken(x.code)));
+    for (const x of p) expect(x.url).toBe(guestTableUrl(origin, legacyCafeTableToken(x.code)));
     expect(new Set(p.map((x) => x.url)).size).toBe(10);
   });
 
@@ -43,10 +43,10 @@ describe("demo table QR payloads", () => {
   });
 
   it("checkPayload rejects a wrong table's payload, other origins and junk", () => {
-    const t1 = guestTableUrl(origin, cafeTableToken("T01"));
+    const t1 = guestTableUrl(origin, legacyCafeTableToken("T01"));
     expect(Object.values(checkPayload("T01", t1, origin)).every(Boolean)).toBe(true);
     expect(checkPayload("T02", t1, origin).matchesSeedToken).toBe(false);
-    expect(checkPayload("T01", guestTableUrl("https://other.example.com", cafeTableToken("T01")), origin).origin).toBe(false);
+    expect(checkPayload("T01", guestTableUrl("https://other.example.com", legacyCafeTableToken("T01")), origin).origin).toBe(false);
     expect(checkPayload("T01", null, origin).route).toBe(false);
   });
 });

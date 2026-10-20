@@ -21,7 +21,7 @@ import { type AccessContext, ConflictError, NotFoundError, ValidationError } fro
 import { assertCan } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
 import { decryptSecret, encryptSecret } from "@/server/integrations/secrets";
-import { getPaymentProvider } from "@/integrations/payment";
+import { getCheckoutProvider, getPaymentProvider, SBI_UPI_UNAVAILABLE } from "@/integrations/payment";
 import { getAggregatorProvider } from "@/integrations/aggregator";
 import { getPOSProvider } from "@/integrations/pos";
 import { twilioCredentialsSchema, TwilioMessagingProvider, resendCredentialsSchema, ResendEmailProvider, MockMessagingProvider, type MessageChannel, type MessagingProvider } from "@/integrations/messaging";
@@ -112,9 +112,12 @@ export function deploymentProviders() {
   const name = (process.env.PAYMENT_PROVIDER ?? "mock").toLowerCase();
   let payment: { provider: string; mode: IntegrationMode | "UNAVAILABLE"; configured: boolean; note?: string };
   try {
-    const p = getPaymentProvider(name);
-    const configured = p.name === "mock" ? true : Boolean((p as { configured?: boolean }).configured);
-    payment = { provider: p.name, mode: p.mode, configured, note: p.name === "mock" ? "Test gateway — no money moves" : configured ? undefined : "RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set" };
+    // The provider NEW guest checkouts use: Razorpay is refused here (legacy only), so it shows as unavailable.
+    const p = getCheckoutProvider();
+    const implemented = (p as { implemented?: boolean }).implemented !== false;
+    const configured = p.name === "mock" ? true : implemented && (p as { configured?: boolean }).configured !== false;
+    const note = p.name === "mock" ? "Test gateway — no money moves" : !implemented ? SBI_UPI_UNAVAILABLE : p.name === "upi_emulator" ? (configured ? "Local test bank emulator — no money moves" : "UPI_EMULATOR_BASE / UPI_EMULATOR_API_KEY / UPI_EMULATOR_MERCHANT_ID not set") : undefined;
+    payment = { provider: p.name, mode: p.mode, configured, note };
   } catch (e) {
     payment = { provider: name, mode: "UNAVAILABLE", configured: false, note: safeMessage(e) };
   }

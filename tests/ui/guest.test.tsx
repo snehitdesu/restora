@@ -2,9 +2,9 @@
 /**
  * Guest QR storefront in a DOM: menu (quick add, sizes / add-ons sheet, sticky
  * cart) -> cart (server quote: current prices, unavailable items, clear) ->
- * checkout (optional name / phone, cash or online, one idempotent request, no
+ * checkout (optional name / phone, online payment only, one idempotent request, no
  * prices sent) -> order page (key from the URL fragment, header auth, live
- * tracker, test-gateway approve / decline and Razorpay -> server confirmation);
+ * tracker, test-gateway approve / decline and the UPI QR -> server confirmation);
  * bill rendering; the guest browser-state helpers.
  */
 import "@testing-library/jest-dom/vitest";
@@ -255,17 +255,17 @@ describe("guest storefront — checkout", () => {
     inStore(<GuestCheckoutScreen navigate={navigate} />);
     expect(await screen.findByText("Table T4")).toBeInTheDocument();
     await screen.findByText("Prices and GST confirmed by the café just now.").catch(() => undefined);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled());
     expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
     await user.type(screen.getByLabelText(/Your name/), "Ananya");
     await user.type(screen.getByLabelText(/Phone/), "+91 98765-43210");
-    // Cash (the default) promises what the server does: straight to the kitchen, paid at the counter.
-    expect(screen.getByRole("radio", { name: /^Cash/ })).toBeChecked();
-    expect(screen.getByText("Your order goes to the kitchen as soon as you place it. Pay at the counter whenever you're ready.")).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /Simulated online payment/ })).toBeInTheDocument();
-    expect(screen.getByText("Simulated payment — no real money is charged.")).toBeInTheDocument();
+    // Online is the only way a QR order is paid (the server refuses pay-at-the-counter): no cash choice is offered.
+    expect(screen.queryByRole("radio", { name: /^Cash/ })).toBeNull();
+    expect(screen.queryByText(/Pay at the counter/)).toBeNull();
+    expect(screen.getByRole("radio", { name: /Simulated online payment/ })).toBeChecked();
+    expect(screen.getByText(/The café sends the order to the kitchen only after that payment is accepted\./)).toBeInTheDocument();
+    expect(screen.getAllByText(/Simulated payment — no real money is charged\./).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Razorpay/)).toBeNull();
-    await user.click(screen.getByRole("radio", { name: /Simulated online payment/ }));
     const place = screen.getByRole("button", { name: /Place order & pay ₹252\.00/ });
     await user.dblClick(place);
 
@@ -297,7 +297,7 @@ describe("guest storefront — checkout", () => {
     expect(quotes()).toBe(1);
     // The /t/[token] layout (and its provider) stays mounted; only the page changes.
     rerender(page(<GuestCheckoutScreen navigate={vi.fn()} />));
-    expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled(); // at once: no second request
+    expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled(); // at once: no second request
     expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
     rerender(page(<GuestCartScreen />));
     expect(quotes()).toBe(1);
@@ -316,16 +316,16 @@ describe("guest storefront — checkout", () => {
       return { data: menuData() };
     };
     inStore(<GuestCheckoutScreen navigate={() => undefined} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled()); // after the server quote
-    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled()); // after the server quote
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
     await waitFor(() => expect(calls.some((c) => c.method === "GET" && c.url === `/api/qr/t/${TOKEN}`)).toBe(true));
     await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/quote")).length).toBeGreaterThanOrEqual(2));
-    await user.click(await screen.findByRole("button", { name: "Place order" }));
+    await user.click(await screen.findByRole("button", { name: /^Place order/ }));
     await waitFor(() => expect(calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders"))).toHaveLength(2));
     const keys = calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders")).map((c) => c.headers["Idempotency-Key"]);
     expect(keys[0]).toBe(keys[1]);
-    expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("CASH");
+    expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("ONLINE");
   });
 
   describe("slow, lost and refused answers (2026-10-19: a 22.9 s placement was reported as a failure)", () => {
@@ -350,7 +350,7 @@ describe("guest storefront — checkout", () => {
     }
     async function ready(navigate: (url: string) => void, timing?: typeof fast) {
       inStore(<GuestCheckoutScreen navigate={navigate} timing={timing} />);
-      await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled());
+      await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled());
     }
 
     it("a successful answer after 22.9 s (past the old 20 s limit) places the order once — a 'still placing' notice, never an error", async () => {
@@ -360,7 +360,7 @@ describe("guest storefront — checkout", () => {
       await ready(navigate); // the real limits
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       try {
-        fireEvent.click(screen.getByRole("button", { name: "Place order" }));
+        fireEvent.click(screen.getByRole("button", { name: /^Place order/ }));
         await act(() => vi.advanceTimersByTimeAsync(8_500));
         expect(screen.getByRole("status")).toHaveTextContent("Still placing your order — the connection to the café is slow.");
         await act(() => vi.advanceTimersByTimeAsync(12_000)); // 20.5 s: where the old client gave up
@@ -370,7 +370,7 @@ describe("guest storefront — checkout", () => {
       } finally {
         vi.useRealTimers();
       }
-      expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1`);
+      expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1&pay=1`);
       expect(orderPosts()).toHaveLength(1);
       expect(orders.size).toBe(1);
       expect(screen.queryByRole("alert")).toBeNull();
@@ -382,8 +382,8 @@ describe("guest storefront — checkout", () => {
       const navigate = vi.fn();
       const orders = keyedServer((n) => (n === 0 ? { hang: true } : null));
       await ready(navigate, fast);
-      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
-      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1`));
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1&pay=1`));
       const posts = orderPosts();
       expect(posts).toHaveLength(2);
       expect(posts[1].headers["Idempotency-Key"]).toBe(posts[0].headers["Idempotency-Key"]);
@@ -399,7 +399,7 @@ describe("guest storefront — checkout", () => {
       const navigate = vi.fn();
       const orders = keyedServer(() => ({ delayMs: 80 }));
       await ready(navigate, { ...fast, attemptTimeoutMs: 5_000 });
-      const button = screen.getByRole("button", { name: "Place order" });
+      const button = screen.getByRole("button", { name: /^Place order/ });
       fireEvent.click(button);
       fireEvent.click(button);
       await userEvent.setup().dblClick(button);
@@ -413,10 +413,10 @@ describe("guest storefront — checkout", () => {
       const navigate = vi.fn();
       const orders = keyedServer((n) => (n < 4 ? { hang: true } : null)); // the first attempt and all three replays go unanswered
       await ready(navigate, fast);
-      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
-      expect(await screen.findByTestId("order-unconfirmed")).toHaveTextContent("We couldn't confirm your order yet. It may already be with the kitchen");
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
+      expect(await screen.findByTestId("order-unconfirmed")).toHaveTextContent("We couldn't confirm your order yet. It may already have been placed");
       expect(screen.queryByRole("alert")).toBeNull(); // not an error
-      expect(screen.queryByRole("button", { name: "Place order" })).toBeNull(); // no way to place it a second time
+      expect(screen.queryByRole("button", { name: /^Place order/ })).toBeNull(); // no way to place it a second time
       expect(orderPosts()).toHaveLength(4);
       expect(navigate).not.toHaveBeenCalled();
 
@@ -424,7 +424,7 @@ describe("guest storefront — checkout", () => {
       cleanup();
       inStore(<GuestCheckoutScreen navigate={navigate} timing={fast} />);
       await userEvent.setup().click(await screen.findByRole("button", { name: "Check order status" }));
-      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1`));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1&pay=1`));
       const posts = orderPosts();
       expect(posts).toHaveLength(5);
       expect(new Set(posts.map((p) => p.headers["Idempotency-Key"])).size).toBe(1);
@@ -438,7 +438,7 @@ describe("guest storefront — checkout", () => {
       const soldOut = { status: 422, error: { code: "ValidationError", message: "Item 1: Masala Dosa is sold out at this outlet. Please update your cart." } };
       let orders = keyedServer(() => soldOut);
       await ready(() => undefined, fast);
-      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
       expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
       expect(orderPosts()).toHaveLength(1);
       expect(orders.size).toBe(0);
@@ -449,12 +449,12 @@ describe("guest storefront — checkout", () => {
       calls = [];
       orders = keyedServer((n) => (n === 0 ? { status: 502, error: { code: "HTTP502", message: "Bad gateway" } } : soldOut));
       await ready(() => undefined, fast);
-      await userEvent.setup().click(screen.getByRole("button", { name: "Place order" }));
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
       expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
       expect(orderPosts()).toHaveLength(2);
       expect(orders.size).toBe(0);
       expect(screen.queryByTestId("order-unconfirmed")).toBeNull();
-      expect(await screen.findByRole("button", { name: "Place order" })).toBeInTheDocument();
+      expect(await screen.findByRole("button", { name: /^Place order/ })).toBeInTheDocument();
     });
   });
 
@@ -476,22 +476,35 @@ describe("guest storefront — checkout", () => {
     inStore(<GuestCheckoutScreen navigate={navigate} />);
     await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹126.00"));
     price = "130.00"; // the café changes the price while the guest is on this page
-    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Prices changed since you opened checkout. Check the new total, then place your order again. New total: ₹136.50.");
     expect(navigate).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹136.50"));
-    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
     await waitFor(() => expect(navigate).toHaveBeenCalled());
     expect(posted).toBe(2);
   });
 
-  it("names Razorpay only for test mode, and says no real money is charged", async () => {
+  it("the bank's test environment says no real money is charged, and names no payment gateway", async () => {
     seedCart([line({})]);
     handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: { ...menuData(), payment: { online: true, testMode: false, mode: "SANDBOX" } } });
     inStore(<GuestCheckoutScreen navigate={() => undefined} />, { ...menuData(), payment: { online: true, testMode: false, mode: "SANDBOX" } });
-    expect(await screen.findByRole("radio", { name: /Pay online/ })).toBeInTheDocument();
-    expect(screen.getByText("Razorpay test mode — no real money is charged.")).toBeInTheDocument();
+    expect(await screen.findByRole("radio", { name: /Pay by UPI \(test\)/ })).toBeInTheDocument();
+    expect(screen.getByText("Bank test environment — no real money is charged.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/razorpay/i);
     expect(screen.queryByText("Simulated online payment")).toBeNull();
+  });
+
+  it("without online payment there is no way to order from the table (no cash fallback); nothing is sent", async () => {
+    seedCart([line({})]);
+    const offline = { ...menuData(), payment: { online: false, testMode: false, mode: null } };
+    handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: offline });
+    inStore(<GuestCheckoutScreen navigate={() => undefined} />, offline);
+    expect(await screen.findByText(/Online payment isn't available right now, so orders can't be placed from the table/)).toBeInTheDocument();
+    await screen.findByText("₹126.00", { selector: "[data-testid=checkout-total]" });
+    expect(screen.queryByRole("radio", { name: /^Cash/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Place order/ })).toBeDisabled();
+    expect(calls.some((c) => c.url.endsWith("/orders"))).toBe(false);
   });
 
   it("validates the optional phone before sending anything", async () => {
@@ -503,7 +516,7 @@ describe("guest storefront — checkout", () => {
     await user.type(screen.getByLabelText(/Phone/), "12ab");
     await user.tab();
     expect(screen.getByText("Enter a valid mobile number, or leave it empty.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Place order" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Place order/ })).toBeDisabled();
     expect(calls.some((c) => c.url.endsWith("/orders"))).toBe(false);
     expect(normalizePhone("098765 43210")).toBe("9876543210");
     expect(phoneValid("")).toBe(true);
@@ -559,69 +572,100 @@ describe("guest order page", () => {
     expect(starts[0].headers["Idempotency-Key"]).not.toBe(starts[1].headers["Idempotency-Key"]); // a new attempt after a decline
   });
 
-  describe("Razorpay Checkout", () => {
-    type Opts = { key: string; order_id: string; amount: number; currency: string; handler: (r: Record<string, string>) => void; modal: { ondismiss: () => void } };
-    let opened: Opts[] = [];
-    let behaviour: (o: Opts, failed: (r: unknown) => void) => void;
-    beforeEach(() => {
-      opened = [];
-      window.Razorpay = class {
-        private failed: (r: unknown) => void = () => undefined;
-        constructor(private o: Opts) { opened.push(o); }
-        on(_e: string, cb: (r: unknown) => void) { this.failed = cb; }
-        open() { setTimeout(() => behaviour(this.o, this.failed), 0); }
-      } as never;
-    });
-    afterEach(() => { delete window.Razorpay; });
+  describe("bank UPI QR checkout", () => {
+    const upiView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for your online payment", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, heldForReview: false, expired: false, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
+    const QR = "upi://pay?pa=restora-emulator@invalid&tr=RSTpayU&am=462.00&cu=INR";
+    const started = (expiresAt = new Date(Date.now() + 5 * 60_000).toISOString()) => ({ paymentId: "payU", amount: "462.00", provider: "sbi_upi", mode: "SANDBOX", testMode: false, checkout: { provider: "sbi_upi", mode: "SANDBOX", kind: "upi_qr", qr: QR, intentUri: QR, reference: "RSTpayU", amount: 46200, currency: "INR", expiresAt } });
+    const paidView = () => upiView({ status: "PAID", canPay: false, bill: bill({ kind: "RECEIPT", paymentStatus: "PAID", paid: "462.00", balanceDue: "0.00", total: "462.00" }) });
+    afterEach(() => vi.useRealTimers());
 
-    const rzpView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
-    const started = { paymentId: "payR", amount: "462.00", provider: "razorpay", mode: "SANDBOX", testMode: false, checkout: { provider: "razorpay", mode: "SANDBOX", keyId: "rzp_test_PUBLIC", orderId: "order_R1", amount: 46200, currency: "INR" } };
-
-    it("opens Checkout with the server's key, gateway order and amount; the signed response is verified by the server", async () => {
+    it("shows the server's QR and amount, asks the server while it is open, and shows success only when the server confirms", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
       const user = userEvent.setup();
       window.history.replaceState(null, "", "/o/cmord9#k=key-9");
-      const success = { razorpay_payment_id: "pay_1", razorpay_order_id: "order_R1", razorpay_signature: "sig" };
-      behaviour = (o) => o.handler(success);
+      let checks = 0;
       handler = (c) => {
-        if (c.url.endsWith("/payments/confirm")) return { data: { ...rzpView({ status: "PAID", canPay: false, bill: bill({ kind: "RECEIPT", paymentStatus: "PAID", paid: "462.00", balanceDue: "0.00", total: "462.00" }) }), paymentStatus: "SUCCESS", pending: false } };
-        if (c.url.endsWith("/payments")) return { data: started };
-        return { data: rzpView() };
+        if (c.url.endsWith("/payments/confirm")) {
+          checks++;
+          return checks < 3 ? { data: { ...upiView({ pendingPaymentId: "payU" }), paymentStatus: "PENDING", pending: true } } : { data: { ...paidView(), paymentStatus: "SUCCESS", pending: false } };
+        }
+        if (c.url.endsWith("/payments")) return { data: started() };
+        return { data: upiView() };
       };
       render(<GuestOrderScreen orderId="cmord9" />);
-      expect(await screen.findByTestId("gateway-mode")).toHaveTextContent("Razorpay test mode");
-      expect(screen.getByTestId("pay-at-counter")).toHaveTextContent("Pay at the counter");
+      expect(await screen.findByTestId("gateway-mode")).toHaveTextContent("Bank test environment — no real money is charged.");
+      expect(screen.getByTestId("gateway-mode")).not.toHaveTextContent(/razorpay/i);
+      expect(screen.queryByTestId("pay-at-counter")).toBeNull();
       await user.click(screen.getByRole("button", { name: /Pay online .*462\.00/ }));
+      const qr = await screen.findByTestId("upi-qr");
+      expect(within(qr).getByRole("img", { name: /UPI QR code for ₹462\.00/ })).toBeInTheDocument();
+      expect(within(qr).getByTestId("upi-amount")).toHaveTextContent("₹462.00");
+      expect(within(qr).getByTestId("upi-waiting")).toHaveTextContent(/Waiting for the bank to confirm · QR valid for [45]:\d\d/);
+      // Two checks: the bank has not confirmed. The QR stays; nothing says "paid".
+      for (let i = 0; i < 2; i++) await act(async () => { vi.advanceTimersByTime(4000); });
+      await waitFor(() => expect(checks).toBe(2));
+      expect(screen.getByTestId("upi-qr")).toBeInTheDocument();
+      expect(screen.queryByText("Payment successful. Thank you!")).toBeNull();
+      // Third check: the server answers with the committed, verified payment.
+      await act(async () => { vi.advanceTimersByTime(4000); });
       expect(await screen.findByText("Payment successful. Thank you!")).toBeInTheDocument();
-      expect(opened).toEqual([expect.objectContaining({ key: "rzp_test_PUBLIC", order_id: "order_R1", amount: 46200, currency: "INR" })]);
-      const confirms = calls.filter((c) => c.url.endsWith("/payments/confirm")).map((c) => c.body);
-      expect(confirms).toEqual([{ paymentId: "payR", gateway: success }]);
+      expect(screen.queryByTestId("upi-qr")).toBeNull();
+      // Every check sent only the payment id: never a client "paid" claim.
+      expect(calls.filter((c) => c.url.endsWith("/payments/confirm")).map((c) => c.body)).toEqual([{ paymentId: "payU" }, { paymentId: "payU" }, { paymentId: "payU" }]);
     });
 
-    it("a closed window is a status check, not a failure; a declined attempt is reported while the window stays open", async () => {
+    it("an expired QR asks the server once more, then offers a new QR", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
       const user = userEvent.setup();
       window.history.replaceState(null, "", "/o/cmord9#k=key-9");
-      behaviour = (o, failed) => {
-        failed({ error: { description: "Card declined by the bank." } });
-        o.modal.ondismiss();
-      };
       handler = (c) => {
-        if (c.url.endsWith("/payments/confirm")) return { data: { ...rzpView({ pendingPaymentId: "payR" }), paymentStatus: "PENDING", pending: true } };
-        if (c.url.endsWith("/payments")) return { data: started };
-        return { data: rzpView() };
+        if (c.url.endsWith("/payments/confirm")) return { data: { ...upiView({ pendingPaymentId: "payU" }), paymentStatus: "PENDING", pending: true } };
+        if (c.url.endsWith("/payments")) return { data: started(new Date(Date.now() - 1000).toISOString()) };
+        return { data: upiView() };
       };
       render(<GuestOrderScreen orderId="cmord9" />);
       await user.click(await screen.findByRole("button", { name: /Pay online/ }));
-      // The bank's reason stays on screen after the window closes (the server still decides the state).
-      expect(await screen.findByRole("alert")).toHaveTextContent("Card declined by the bank. You can try again.");
-      expect(calls.filter((c) => c.url.endsWith("/payments/confirm")).map((c) => c.body)).toEqual([{ paymentId: "payR" }]);
-      // Resuming asks the server first (the UPI app may have completed it), then reopens the SAME checkout.
-      behaviour = (o) => o.modal.ondismiss();
-      await user.click(await screen.findByRole("button", { name: /Resume payment/ }));
-      await waitFor(() => expect(opened).toHaveLength(2));
-      // Closed again without a decline: "not completed", not "declined".
-      await waitFor(() => expect(screen.getAllByRole("status").some((el) => /^Payment not completed\. If money left your account/.test(el.textContent ?? ""))).toBe(true));
-      const after = calls.filter((c) => c.method === "POST").map((c) => c.url.replace("/api/qr/orders/cmord9", ""));
-      expect(after).toEqual(["/payments", "/payments/confirm", "/payments/confirm", "/payments", "/payments/confirm"]);
+      expect(await screen.findByTestId("upi-expired")).toHaveTextContent("This QR has expired");
+      expect(screen.queryByRole("img", { name: /UPI QR code/ })).toBeNull();
+      for (let i = 0; i < 3; i++) await act(async () => { vi.advanceTimersByTime(4000); });
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments/confirm"))).toHaveLength(1)); // one final check, not a loop
+      expect(screen.getByRole("button", { name: "Get a new QR" })).toBeEnabled();
+    });
+
+    it("offers 'Open a UPI app' only on a phone, with the bank's intent link; never for the emulator's test QR", async () => {
+      const ua = vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Linux; Android 14) Mobile");
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord9#k=key-9");
+      handler = (c) => (c.url.endsWith("/payments") ? { data: started() } : c.url.endsWith("/payments/confirm") ? { data: { ...upiView(), paymentStatus: "PENDING" } } : { data: upiView() });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      await user.click(await screen.findByRole("button", { name: /Pay online/ }));
+      expect(await screen.findByTestId("upi-intent")).toHaveAttribute("href", QR);
+      cleanup();
+      handler = (c) => (c.url.endsWith("/payments") ? { data: { ...started(), mode: "MOCK", checkout: { ...started().checkout, mode: "MOCK" } } } : { data: upiView({ payment: { online: true, testMode: false, mode: "MOCK" } }) });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      await user.click(await screen.findByRole("button", { name: /Pay online/ }));
+      expect(await screen.findByTestId("upi-qr")).toHaveTextContent("Emulator test QR — no real money; no UPI app can pay it.");
+      expect(screen.queryByTestId("upi-intent")).toBeNull();
+      ua.mockRestore();
+    });
+
+    it("a payment confirmed after the fulfilment window: 'payment received, see the staff' — never 'preparing', no second payment", async () => {
+      window.history.replaceState(null, "", "/o/cmord9#k=key-9");
+      handler = () => ({ data: upiView({ heldForReview: true, canPay: false, fulfilmentLabel: "Payment received late — the café is checking your order", bill: bill({ total: "462.00", balanceDue: "0.00", paid: "462.00", paymentStatus: "PAID" }) }) });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("Payment received — please see the staff");
+      expect(screen.getByTestId("held-for-review")).toHaveTextContent("The café will either send it to the kitchen or refund you");
+      expect(screen.getByTestId("order-stage")).toHaveTextContent("Payment received late");
+      expect(screen.queryByRole("button", { name: /^Pay/ })).toBeNull();
+    });
+
+    it("an unpaid order past the fulfilment window cannot be paid now", async () => {
+      window.history.replaceState(null, "", "/o/cmord9#k=key-9");
+      handler = () => ({ data: upiView({ expired: true, canPay: false }) });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      expect(await screen.findByTestId("order-expired")).toHaveTextContent("can't be paid now");
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Order not sent");
+      expect(screen.queryByRole("button", { name: /^Pay/ })).toBeNull();
     });
   });
 
@@ -724,6 +768,14 @@ describe("guest order page", () => {
     it("offers no split once nothing is due, or when online payment is off", async () => {
       window.history.replaceState(null, "", "/o/cmord7#k=key-7");
       handler = () => ({ data: v({ canPay: false }) });
+      const { unmount } = render(<GuestOrderScreen orderId="cmord7" />);
+      // Still OPEN (waiting for its online payment): the counter cannot settle it, so it is not offered.
+      expect(await screen.findByTestId("pay-unavailable")).toHaveTextContent("hasn't been sent to the kitchen");
+      expect(screen.queryByTestId("pay-at-counter")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Split the bill" })).toBeNull();
+      unmount();
+      // Already in the kitchen (an order from before online-only checkout): the counter takes the balance.
+      handler = () => ({ data: v({ canPay: false, status: "SENT", fulfilment: "PREPARING" }) });
       render(<GuestOrderScreen orderId="cmord7" />);
       expect(await screen.findByTestId("pay-at-counter")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "Split the bill" })).toBeNull();

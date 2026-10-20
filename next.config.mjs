@@ -2,8 +2,6 @@ import { securityHeaders as buildSecurityHeaders, QR_SCANNER_PATH, SCANNER_PERMI
 
 // Development keeps 'unsafe-eval' + ws: (HMR) in the CSP; production adds HSTS.
 const securityHeaders = buildSecurityHeaders({ dev: process.env.NODE_ENV !== "production" });
-// Guest order pages (/o/<orderId>) run Razorpay Checkout: its hosts are allowed there and nowhere else.
-const checkoutHeaders = buildSecurityHeaders({ dev: process.env.NODE_ENV !== "production", paymentCheckout: true });
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -27,8 +25,8 @@ const nextConfig = {
   async headers() {
     return [
       { source: "/:path*", headers: securityHeaders },
-      // Later rules override the same header keys for matching paths.
-      { source: "/o/:path*", headers: checkoutHeaders },
+      // Later rules override the same header keys for matching paths. Guest order pages (/o/*) keep the
+      // strict policy: the bank's UPI QR is rendered by RESTORA, no payment gateway script or frame is loaded.
       // The staff QR scanner may use the camera (same origin); everywhere else keeps camera=().
       { source: QR_SCANNER_PATH, headers: [{ key: "Permissions-Policy", value: SCANNER_PERMISSIONS_POLICY }] },
       // API responses carry tenant data: never cache them in shared caches.

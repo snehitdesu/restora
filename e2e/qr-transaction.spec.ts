@@ -1,7 +1,7 @@
 /**
  * Phase 2 core transaction in real browsers, three parties at once:
  *   GUEST (phone, no account)  : table QR -> menu -> cart + modifiers -> order -> pay -> receipt
- *   POS   (cashier session)    : the QR order (sent to the kitchen at placement) -> bill / receipt
+ *   POS   (cashier session)    : the paid QR order (sent to the kitchen by the verified payment) -> bill / receipt
  *   KITCHEN (kitchen session)  : KOT -> Accept -> Start -> Ready -> Served
  * then stock consumption and sales data. Every step is checked against the
  * server (API / database state), not only the screen.
@@ -48,7 +48,7 @@ async function checkout(page: Page, opts: { total?: string; online?: boolean } =
 }
 
 test.describe("QR guest transaction", () => {
-  test("QR-001 guest order -> POS accept -> KOT/KDS -> guest pays online -> receipt -> stock -> sales", async ({ page, browser }) => {
+  test("QR-001 guest order -> guest pays online -> KOT/KDS -> POS receipt -> stock -> sales", async ({ page, browser }) => {
     const outlet = await outletByCode(page.request, CENTRAL);
     const { token } = await qrToken(outlet.id, "F5");
     const manager = await apiAs("manager");
@@ -74,21 +74,35 @@ test.describe("QR guest transaction", () => {
     expect((await placed).status()).toBe(200);
     await g.waitForURL(/\/o\/[^/#]+#k=/);
     const orderId = orderIdFrom(g);
-    // Cash at the counter was chosen (the default): the order goes straight to the kitchen.
-    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
 
-    // Server state: SENT QR order at F5, priced by the server, one KOT, nothing paid.
+    // Server state: OPEN QR order at F5, priced by the server, nothing in the kitchen and nothing paid yet.
     let o = await order(page.request, orderId);
-    expect(o).toMatchObject({ status: "SENT", channel: "QR", total: "924" });
+    expect(o).toMatchObject({ status: "OPEN", channel: "QR", total: "924" });
     expect(o.items.find((i) => i.name === "Chicken Biryani")!.modifiers.map((m) => m.name)).toEqual(["Spice Level: Spicy"]);
-    expect(o.kots).toHaveLength(1);
-    expect(o.payments ?? []).toHaveLength(0);
+    expect(o.kots ?? []).toHaveLength(0);
 
-    // ---- POS: the cashier sees it among the outlet's open (unpaid) orders, as a QR order.
+    // ---- GUEST pays online (the gateway opens on the order page): a decline first — still not in the kitchen — then a successful retry.
+    const gw = g.getByRole("region", { name: "Test payment gateway" });
+    await expect(gw).toContainText(money(924));
+    await gw.getByRole("button", { name: "Decline" }).click();
+    await expect(g.getByRole("alert").filter({ hasText: "declined" })).toBeVisible();
+    expect((await order(page.request, orderId)).kots ?? []).toHaveLength(0);
+    await g.getByRole("button", { name: /^Pay .*924\.00/ }).click();
+    await g.getByRole("region", { name: "Test payment gateway" }).getByRole("button", { name: "Approve payment" }).click();
+    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible();
+    await expect(g.getByTestId("bill-payment-status")).toHaveText("Paid");
+    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
+    o = await order(page.request, orderId);
+    expect(o.status).toBe("PAID");
+    expect(o.kots).toHaveLength(1); // released by the verified payment, exactly once
+    expect(o.payments!.map((p) => [p.method, p.status, Number(p.amount)]).sort()).toEqual([["ONLINE", "FAILED", 924], ["ONLINE", "SUCCESS", 924]]);
+
+    // ---- POS: the paid QR order is under Recent (no longer an open, unpaid order).
     await openPos(page);
     await page.getByRole("button", { name: /^Open orders/ }).click();
     const list = page.getByRole("dialog", { name: "Open orders" });
-    await expect(list.getByRole("button", { name: new RegExp(`#${orderId.slice(-6).toUpperCase()}.*Table F5.*QR`) })).toBeVisible();
+    await list.getByRole("tab", { name: "Recent" }).click();
+    await expect(list.getByRole("link", { name: `Bill for order ${orderId.slice(-6).toUpperCase()}` })).toBeVisible();
     await list.getByRole("button", { name: "Close dialog" }).click();
 
     // ---- KITCHEN: the KOT shows the table, items and modifier; Accept -> Start.
@@ -104,20 +118,6 @@ test.describe("QR guest transaction", () => {
     await expect(ticket.getByRole("button", { name: "Ready" })).toBeVisible();
     expect((await order(page.request, orderId)).kots![0].status).toBe("PREPARING");
     await expect(g.getByTestId("order-stage")).toHaveText("Being prepared", { timeout: 15_000 });
-
-    // ---- GUEST pays while the food cooks: a decline, then a successful retry.
-    await g.getByRole("button", { name: /^Pay .*924\.00/ }).click();
-    const gw = g.getByRole("region", { name: "Test payment gateway" });
-    await expect(gw).toContainText(money(924));
-    await gw.getByRole("button", { name: "Decline" }).click();
-    await expect(g.getByRole("alert").filter({ hasText: "declined" })).toBeVisible();
-    await g.getByRole("button", { name: /^Pay .*924\.00/ }).click();
-    await g.getByRole("region", { name: "Test payment gateway" }).getByRole("button", { name: "Approve payment" }).click();
-    await expect(g.getByText("Payment successful. Thank you!")).toBeVisible();
-    await expect(g.getByTestId("bill-payment-status")).toHaveText("Paid");
-    o = await order(page.request, orderId);
-    expect(o.status).toBe("PAID");
-    expect(o.payments!.map((p) => [p.method, p.status, Number(p.amount)]).sort()).toEqual([["ONLINE", "FAILED", 924], ["ONLINE", "SUCCESS", 924]]);
 
     // ---- KITCHEN finishes; the guest sees the order completed.
     await ticket.getByRole("button", { name: "Ready" }).click();
@@ -195,7 +195,10 @@ test.describe("QR guest transaction", () => {
     await a.waitForURL(/\/o\/[^/#]+#k=/);
     const orderId = orderIdFrom(a);
 
-    // ---- Phone A: split two ways; the share is the server's figure, the page sends only the number of people.
+    // ---- Phone A: the gateway opens for the whole bill; the guest closes it (reload) to split instead.
+    await expect(a.getByRole("region", { name: "Test payment gateway" })).toContainText(money(84));
+    await a.reload();
+    // Split two ways; the share is the server's figure, the page sends only the number of people.
     await a.getByRole("button", { name: "Split the bill" }).click();
     await expect(a.getByTestId("split-share")).toContainText("Your part: ₹42.00");
     await expectNoSeriousA11yViolations(a); // the split-bill screen on a phone
@@ -208,9 +211,10 @@ test.describe("QR guest transaction", () => {
     await gw.getByRole("button", { name: "Approve payment" }).click();
     await expect(a.getByText(/Your part is paid\. ₹42\.00 is still due on this bill\./)).toBeVisible();
     let o = await order(page.request, orderId);
-    // One part is not the whole bill. (Ordered "pay at the counter", so it went to the kitchen when it was placed.)
-    expect(o.status).toBe("SENT");
-    expect(o.payments!.map((x) => [x.method, x.status, Number(x.amount)])).toEqual([["ONLINE", "SUCCESS", 42]]);
+    // One part is not the whole bill: the order stays out of the kitchen until verified payments cover the total.
+    expect(o.status).toBe("OPEN");
+    expect(o.kots ?? []).toHaveLength(0);
+    expect(o.payments!.filter((x) => x.status === "SUCCESS").map((x) => [x.method, x.status, Number(x.amount)])).toEqual([["ONLINE", "SUCCESS", 42]]);
 
     // ---- Phone B opens the same order (the link a friend shares) and pays what is left.
     const guestB = await guestPhone(browser);
@@ -226,7 +230,10 @@ test.describe("QR guest transaction", () => {
     await expect(b.getByTestId("bill-payment-status")).toHaveText("Paid");
     o = await order(page.request, orderId);
     expect(o.status).toBe("PAID");
-    expect(o.payments!.map((x) => [x.method, x.status, Number(x.amount)]).sort()).toEqual([["ONLINE", "SUCCESS", 42], ["ONLINE", "SUCCESS", 42]]);
+    expect(o.kots).toHaveLength(1); // the second verified part released it, exactly once
+    expect(o.payments!.filter((x) => x.status === "SUCCESS").map((x) => [x.method, x.status, Number(x.amount)]).sort()).toEqual([["ONLINE", "SUCCESS", 42], ["ONLINE", "SUCCESS", 42]]);
+    // The whole-bill attempt Phone A closed was never paid: it is not counted.
+    expect(o.payments!.filter((x) => x.status === "SUCCESS" && Number(x.amount) === 84)).toHaveLength(0);
     await guestB.context.close();
 
     // ---- Phone A follows along and puts the same dishes back in a cart; nothing is ordered until it checks out.

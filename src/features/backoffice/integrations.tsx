@@ -34,7 +34,9 @@ export function ModeBadge({ mode }: { mode: Mode | string }) {
   return <Badge tone={MODE_TONE[mode as Mode] ?? "neutral"}>{mode}</Badge>;
 }
 
-const PROVIDERS: Record<string, string[]> = { PAYMENT: ["razorpay", "mock"], AGGREGATOR: ["zomato", "swiggy", "mock"], POS: ["petpooja", "mock"], MESSAGING: ["twilio", "mock"], ACCOUNTING: ["generic", "tally", "zoho", "tally_gateway", "zoho_books"], SHEETS: ["google_sheets", "mock"] };
+// PAYMENT: sbi_upi is the direct-bank UPI collection (adapter not implemented yet); razorpay is kept only to bind the
+// account of older (legacy) Razorpay payments for their webhooks and refunds; upi_emulator / mock are test adapters.
+const PROVIDERS: Record<string, string[]> = { PAYMENT: ["sbi_upi", "razorpay", "upi_emulator", "mock"], AGGREGATOR: ["zomato", "swiggy", "mock"], POS: ["petpooja", "mock"], MESSAGING: ["twilio", "mock"], ACCOUNTING: ["generic", "tally", "zoho", "tally_gateway", "zoho_books"], SHEETS: ["google_sheets", "mock"] };
 
 function ConnectionDialog({ open, onClose, onDone, initial }: { open: boolean; onClose: () => void; onDone: () => void; initial?: Connection }) {
   const { outlets } = useShell();

@@ -28,6 +28,13 @@
  *     retry (pos.checkIdempotency); here they are only counted and alerted.
  *  3. Hourly housekeeping — expired sessions and password links older than 7
  *     days are deleted; backup freshness (BACKUP_STATUS_FILE) is checked.
+ *  4. Pending online payments, LAST (it waits on banks): gateway payments still
+ *     PENDING a few minutes after checkout are re-asked at the bank
+ *     (services/paymentRecovery.ts) within a call and time budget, so a slow
+ *     bank never delays the work above or overruns a cron function. A capture
+ *     the guest's browser never reported is settled (and its QR order released
+ *     to the kitchen, or held if late) through payment.verifyPayment; anything
+ *     undecided, or a bank that does not answer, leaves the payment PENDING.
  *
  * A failing tick (e.g. database down) is logged + alerted and the next tick
  * tries again; the worker never crashes the process. Graceful shutdown stops
@@ -51,6 +58,7 @@ import { inc } from "@/server/observability/metrics";
 import { raiseAlert } from "@/server/observability/alerts";
 import { onShutdown } from "@/server/ops/lifecycle";
 import { runScheduledJobs } from "@/server/ops/scheduled";
+import { recheckPendingPayments, type RecheckResult } from "@/server/services/paymentRecovery";
 
 const envInt = (name: string, d: number, min = 1) => {
   const n = Number(process.env[name]);
@@ -64,7 +72,7 @@ const BATCH = 50;
 export const INTERRUPTED_MESSAGE = "Interrupted before the outcome was recorded (server restart?); check the provider before retrying";
 export const INTERRUPTED_PRINT = "Interrupted before printing (server restart?); print again from the print queue if still needed";
 
-export type TickResult = { retried: number; sent: number; givenUp: number; stuckDeliveries: number; stuckPrints: number; staleExports: number; stuckWebhooks: number; housekeeping?: { sessions: number; passwordTokens: number } };
+export type TickResult = { retried: number; sent: number; givenUp: number; stuckDeliveries: number; stuckPrints: number; staleExports: number; stuckWebhooks: number; housekeeping?: { sessions: number; passwordTokens: number }; paymentRecheck?: RecheckResult };
 
 /** 1. Re-send due deliveries. */
 export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Date()) {
@@ -180,7 +188,10 @@ export async function checkBackupFreshness(now = new Date()): Promise<"ok" | "st
 
 let lastHousekeeping = 0;
 /** One worker pass (exported for tests and for the ops script). */
-export async function runWorkerTick(db: PrismaClient = prisma, now = new Date(), opts: { housekeeping?: boolean } = {}): Promise<TickResult> {
+/** Default time a tick may spend asking banks about pending payments (the in-process tick runs every 30 s and never overlaps). */
+export const PAYMENT_RECHECK_BUDGET_MS = 20_000;
+
+export async function runWorkerTick(db: PrismaClient = prisma, now = new Date(), opts: { housekeeping?: boolean; paymentRecheck?: { deadlineAt?: number; maxCalls?: number } | false } = {}): Promise<TickResult> {
   const r = await retryDueDeliveries(db, now);
   const s = await recoverStuckWork(db, now);
   const result: TickResult = { ...r, ...s };
@@ -191,6 +202,14 @@ export async function runWorkerTick(db: PrismaClient = prisma, now = new Date(),
     lastHousekeeping = now.getTime();
     result.housekeeping = await housekeeping(db, now);
     await checkBackupFreshness(now);
+  }
+  if (opts.paymentRecheck !== false) {
+    try {
+      result.paymentRecheck = await recheckPendingPayments(db, now, { deadlineAt: opts.paymentRecheck?.deadlineAt ?? Date.now() + PAYMENT_RECHECK_BUDGET_MS, maxCalls: opts.paymentRecheck?.maxCalls });
+    } catch (e) {
+      inc("restora_job_failures_total", { type: "payment_recheck" });
+      log.error("pending payment recheck failed", { event: "payment_recheck_failed", error: e });
+    }
   }
   return result;
 }

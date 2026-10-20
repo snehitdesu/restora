@@ -15,7 +15,8 @@ export const runtime = "nodejs";
 
 const kinds: Record<string, WebhookKind> = { pos: "POS", payment: "PAYMENT", aggregator: "AGGREGATOR" };
 const paramsSchema = z.object({ kind: z.enum(["pos", "payment", "aggregator", "messaging"]), provider: z.string().regex(/^[a-z0-9_-]{1,40}$/i) });
-const SIGNATURE_HEADERS = ["x-signature", "x-webhook-signature", "x-razorpay-signature", "x-petpooja-signature", "x-twilio-signature"];
+// x-razorpay-signature: legacy Razorpay payments only. x-upi-emulator-signature: the test bank emulator (refused in production).
+const SIGNATURE_HEADERS = ["x-signature", "x-webhook-signature", "x-razorpay-signature", "x-upi-emulator-signature", "x-petpooja-signature", "x-twilio-signature"];
 const MAX_BODY = 1_000_000;
 
 /**

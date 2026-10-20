@@ -16,7 +16,6 @@ import { Alert, Spinner } from "@/features/guest/components/Bits";
 import { SfIcon } from "@/features/guest/components/SfIcon";
 import { guestOnlinePaymentCopy } from "@/features/guest/paymentCopy";
 
-type PayMethod = "CASH" | "ONLINE";
 type PlacedOrder = { orderId: string; ref: string; accessKey: string; coupon?: { applied: boolean; message?: string }; referral?: { attached: boolean; message?: string } };
 /** Test hook: shorter waits than a real phone on a slow network needs. */
 export type OrderSubmitTiming = { attemptTimeoutMs?: number; slowAfterMs?: number; delaysMs?: number[] };
@@ -40,8 +39,9 @@ function guardTotal(quote: { total: string; discount?: string; totalBeforeDiscou
 export const phoneValid = (raw: string) => !raw.trim() || /^\+?\d{10,15}$/.test(normalizePhone(raw));
 
 /**
- * Checkout: table, order summary (server-priced), optional name / phone, cash
- * or online. Placing the order is one idempotent request (a double tap or a
+ * Checkout: table, order summary (server-priced), optional name / phone, online
+ * payment (the only way a QR order is paid: it reaches the kitchen once the
+ * payment is verified, and the server refuses a pay-at-the-counter order). Placing the order is one idempotent request (a double tap or a
  * refresh replays the same order). A slow or lost answer is never shown as a
  * failure: the same request is replayed to learn what happened (orderSubmit.ts),
  * and if that stays unknown the guest gets "Check order status", not an error.
@@ -51,7 +51,6 @@ export const phoneValid = (raw: string) => !raw.trim() || /^\+?\d{10,15}$/.test(
 export function GuestCheckoutScreen({ navigate = (url: string) => window.location.assign(url), timing }: { navigate?: (url: string) => void; timing?: OrderSubmitTiming }) {
   const { token, cart, cartReady, data, base, estimate, dispatch, refreshMenu, couponCode, setCouponCode } = useStorefront();
   const online = data.payment.online;
-  const [method, setMethod] = useState<PayMethod>("CASH");
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [referral, setReferral] = useState("");
@@ -71,7 +70,6 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
   const phoneOk = phoneValid(phone);
   const closed = (quote?.ordering ?? data.ordering)?.open === false;
   const total = quote ? quote.total : estimate.total;
-  const payMethod: PayMethod = online ? method : "CASH";
   const onlineCopy = guestOnlinePaymentCopy(data.payment);
 
   async function place() {
@@ -85,13 +83,13 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     const coupon = quote?.coupon?.ok ? quote.coupon.code : undefined;
     const referralCode = withPhone && referral.length >= 4 ? referral : undefined;
     const marketingOptIn = withPhone && optIn ? true : undefined;
-    const fp = cartFingerprint(cart, JSON.stringify([customer ?? null, payMethod, coupon ?? null, referralCode ?? null, marketingOptIn ?? null]));
+    const fp = cartFingerprint(cart, JSON.stringify([customer ?? null, "ONLINE", coupon ?? null, referralCode ?? null, marketingOptIn ?? null]));
     // The key survives a refresh (sessionStorage): resubmitting the same order replays it.
     // The total the guest was shown, before any coupon (the coupon is applied once the order exists):
     // the server prices the order itself and refuses (409, nothing created) if its price differs.
     // JSON round trip: exactly what is sent, and what a later "Check order status" replays.
     const body = JSON.parse(JSON.stringify({
-      items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: payMethod,
+      items: toOrderItems(cart).map((i) => ({ ...i, notes: i.notes || undefined })), notes: cart.notes.trim() || undefined, ...(customer ? { customer } : {}), paymentMethod: "ONLINE",
       ...(quote ? guardTotal(quote) : {}),
       ...(coupon ? { couponCode: coupon } : {}), ...(referralCode ? { referralCode } : {}), ...(marketingOptIn ? { marketingOptIn } : {}),
     })) as Record<string, unknown>;
@@ -157,7 +155,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     saveCart(token, { ...cart, lines: [], notes: "" });
     dispatch({ type: "clear" });
     // A full page load: the order page is where the payment gateway's script is allowed (CSP).
-    navigate(`${orderUrl(placed.orderId, placed.accessKey)}&new=1${pending.body.paymentMethod === "ONLINE" ? "&pay=1" : ""}`);
+    navigate(`${orderUrl(placed.orderId, placed.accessKey)}&new=1&pay=1`);
   }
 
   if (cartReady && cart.lines.length === 0 && !placing && !unconfirmed) {
@@ -178,7 +176,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
     );
   }
 
-  const disabled = placing || !cartReady || loading || !quote || unavailable.length > 0 || closed || !phoneOk;
+  const disabled = placing || !cartReady || loading || !quote || unavailable.length > 0 || closed || !phoneOk || !online;
 
   return (
     <div>
@@ -270,19 +268,10 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
 
         <section className="sf-card" aria-labelledby="co-pay">
           <h2 id="co-pay" className="sf-card-title">Payment method</h2>
-          <div className="sf-pay-opts" role="radiogroup" aria-labelledby="co-pay" style={{ marginTop: 8 }}>
-            <label className="sf-pay-opt" data-checked={payMethod === "CASH"}>
-              <input className="sf-hit" type="radio" name="payment" value="CASH" checked={payMethod === "CASH"} onChange={() => setMethod("CASH")} />
-              <span className="sf-pay-ico"><SfIcon name="cash" /></span>
-              <span>
-                <b>Cash</b>
-                <small>Pay at the counter</small>
-              </span>
-              <span className="sf-option-mark" data-kind="radio"><SfIcon name="check" strokeWidth={3} /></span>
-            </label>
-            {online ? (
-              <label className="sf-pay-opt" data-checked={payMethod === "ONLINE"}>
-                <input className="sf-hit" type="radio" name="payment" value="ONLINE" checked={payMethod === "ONLINE"} onChange={() => setMethod("ONLINE")} />
+          {online ? (
+            <div className="sf-pay-opts" role="radiogroup" aria-labelledby="co-pay" style={{ marginTop: 8 }}>
+              <label className="sf-pay-opt" data-checked="true">
+                <input className="sf-hit" type="radio" name="payment" value="ONLINE" checked readOnly />
                 <span className="sf-pay-ico"><SfIcon name="card" /></span>
                 <span>
                   <b>{onlineCopy.title}</b>
@@ -290,16 +279,16 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
                 </span>
                 <span className="sf-option-mark" data-kind="radio"><SfIcon name="check" strokeWidth={3} /></span>
               </label>
-            ) : (
-              <p className="sf-hint">Online payment isn&apos;t available right now — please pay at the counter.</p>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              <Alert tone="warn" role="status">Online payment isn&apos;t available right now, so orders can&apos;t be placed from the table. Please order with the staff.</Alert>
+            </div>
+          )}
           <p className="sf-note">
-            {payMethod === "ONLINE"
-              ? data.payment.mode === "LIVE"
-                ? "Your order goes to the kitchen as soon as the payment is confirmed by the bank."
-                : `${onlineCopy.detail} The café sends the order to the kitchen only after that payment is accepted.`
-              : "Your order goes to the kitchen as soon as you place it. Pay at the counter whenever you're ready."}
+            {data.payment.mode === "LIVE"
+              ? "Your order goes to the kitchen as soon as the payment is confirmed by the bank."
+              : `${onlineCopy.detail} The café sends the order to the kitchen only after that payment is accepted.`}
           </p>
         </section>
 
@@ -326,7 +315,7 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
           {unconfirmed && !placing && (
             <div style={{ marginTop: 14 }} data-testid="order-unconfirmed">
               <Alert tone="warn">
-                We couldn&apos;t confirm your order yet. It may already be with the kitchen, so please don&apos;t order it again — check its status in a moment, or ask a member of staff.
+                We couldn&apos;t confirm your order yet. It may already have been placed, so please don&apos;t order it again — check its status in a moment, or ask a member of staff.
               </Alert>
             </div>
           )}
@@ -347,10 +336,8 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
                 <>
                   <Spinner /> {phase === "confirming" ? "Confirming your order…" : "Placing your order…"}
                 </>
-              ) : payMethod === "ONLINE" ? (
-                `Place order & pay ${formatMoney(total)}`
               ) : (
-                "Place order"
+                `Place order & pay ${formatMoney(total)}`
               )}
             </button>
           )}

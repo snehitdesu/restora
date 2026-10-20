@@ -43,7 +43,7 @@ async function order(g: Page, token: string, dish: string, method: "CASH" | "ONL
   await g.waitForURL(/\/cart$/);
   await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
   await g.waitForURL(/\/checkout$/);
-  await g.getByRole("radio", { name: method === "ONLINE" ? /Pay online|Simulated online payment/ : /^Cash/ }).check();
+  await g.getByRole("radio", { name: method === "ONLINE" ? /Pay online|Simulated online payment|Pay by UPI/ : /^Cash/ }).check();
   await g.getByRole("button", { name: /^Place order/ }).click();
   await g.waitForURL(/\/o\/[^/#]+#k=/);
   const url = new URL(g.url());
@@ -142,47 +142,32 @@ test.describe("customer website → order → payment → KOT → kitchen", () =
     await guest.context.close();
   });
 
-  test("CK-002 cash: straight to the kitchen at placement (one KOT, unpaid) → chef → served → cash taken once at the POS", async ({ page, browser }) => {
+  test("CK-002 no pay-at-the-counter for a guest QR order: no cash option, CASH refused by the server, nothing reaches the kitchen", async ({ page, browser }) => {
     const outlet = await outletByCode(page.request, CENTRAL);
-    const { tableId, token } = await qrTable(outlet.id, "F5");
+    const { token } = await qrTable(outlet.id, "F5");
     const guest = await guestPhone(browser);
     const g = guest.page;
-    const { orderId } = await order(g, token, "Masala Chai", "CASH");
-    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
-
-    // Dispatched in the order's own transaction (existing submitOrder routing): one KOT, nothing paid.
-    let o = await records(orderId);
-    expect(o).toMatchObject({ status: "SENT", source: "QR", tableId, outletId: outlet.id, paidAt: null });
-    expect(o.payments).toHaveLength(0);
-    expect(o.kots).toHaveLength(1);
-    expect(o.kots[0]).toMatchObject({ orderId, status: "NEW", outletId: o.outletId });
-    expect(o.kots[0].items.map((i) => [i.name, Number(i.qty)])).toEqual([["Masala Chai", 1]]);
-    // A refresh of the confirmation shows the persisted state and never dispatches again.
-    await g.reload();
-    await expect(g.getByTestId("order-stage")).toHaveText("Sent to the kitchen");
-    expect((await records(orderId)).kots).toHaveLength(1);
-
-    const kitchen = await sessionFor(browser, "kitchen");
-    await chefCooks(kitchen.page, o.kots[0].number, "F5", g);
-
-    // The POS lists it with the outlet's unpaid orders; cash at the counter, once.
-    await openPos(page);
-    await page.getByRole("button", { name: /^Open orders/ }).click();
-    await page.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${orderId.slice(-6).toUpperCase()}.*Table F5`) }).click();
-    await expect(g.getByTestId("bill-payment-status")).toHaveText("Unpaid");
-    await page.getByRole("button", { name: "Pay", exact: true }).click();
-    const pay = page.getByRole("dialog", { name: "Take payment" });
-    await pay.getByLabel("Cash received").fill(String(Number(o.total)));
-    await pay.getByRole("button", { name: /^Charge / }).click();
-    await expect(pay.getByText("Paid in full")).toBeVisible();
-    await pay.getByRole("button", { name: "Done" }).click();
-    await expect(g.getByTestId("bill-payment-status")).toHaveText("Paid", { timeout: 15_000 });
-    o = await records(orderId);
-    expect(o.status).toBe("PAID");
-    expect(o.payments.map((p) => [p.method, p.status])).toEqual([["CASH", "SUCCESS"]]);
-    expect(o.kots.map((k) => k.status)).toEqual(["SERVED"]);
-    test.info().annotations.push({ type: "records", description: `order ${o.id} ${o.status} | payment ${o.payments[0].id} CASH SUCCESS | KOT ${o.kots[0].id} #${o.kots[0].number} ${o.kots[0].status}` });
-    await kitchen.context.close();
+    await g.goto(`/t/${token}`);
+    await g.getByRole("button", { name: "Add Masala Chai" }).click();
+    await g.getByRole("link", { name: /^View cart/ }).click();
+    await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
+    await g.waitForURL(/\/checkout$/);
+    // Only online payment is offered: a QR order reaches the kitchen once its payment is verified.
+    await expect(g.getByRole("radio", { name: /Pay online|Simulated online payment|Pay by UPI/ })).toBeChecked();
+    expect(await g.getByRole("radio", { name: /^Cash/ }).count()).toBe(0);
+    // An older page (or a hand-made request) asking to pay at the counter is refused and creates nothing.
+    const db = await e2eDb();
+    try {
+      const table = await db.restaurantTable.findFirstOrThrow({ where: { qrToken: token } });
+      const chai = await db.menuItem.findFirstOrThrow({ where: { organizationId: table.organizationId, name: "Masala Chai" } });
+      const before = { orders: await db.order.count(), kots: await db.kot.count() };
+      const r = await g.request.post(`/api/qr/t/${token}/orders`, { data: { items: [{ menuItemId: chai.id, qty: 1 }], paymentMethod: "CASH" }, headers: { "idempotency-key": `ck2-cash-${Date.now()}`, origin: new URL(g.url()).origin } });
+      expect(r.status()).toBe(422);
+      expect(((await r.json()) as { error: { message: string } }).error.message).toMatch(/paid online before they go to the kitchen/);
+      expect({ orders: await db.order.count(), kots: await db.kot.count() }).toEqual(before);
+    } finally {
+      await db.$disconnect();
+    }
     await guest.context.close();
   });
 });

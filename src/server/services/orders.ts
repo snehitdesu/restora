@@ -26,6 +26,9 @@ import { writeAudit } from "@/server/audit/log";
 import { D, dMul, dDiv, money, moneyAmount } from "@/domain/money";
 import { priceMenuSelection } from "@/server/services/menu";
 import { createKOTsForOrder } from "@/server/services/kot";
+import { assertKitchenReleasableTx, isGuestQrOrder, isHeldForReviewTx } from "@/server/services/kitchenGate";
+// Function-level cycle with payment.ts (it imports releaseTableTx): both are used only at call time.
+import { settleOrderTx } from "@/server/services/payment";
 import { idempotentCreate, requestHashOf as roundHashOf } from "@/server/services/idempotency";
 import { createNotificationTx } from "@/server/services/notifications";
 import { WALKIN_NOTE_PREFIX } from "@/server/services/reservations";
@@ -486,8 +489,18 @@ export function submitOrder(ctx: AccessContext, orderId: string, db: Client = pr
     }
     if (order.items.length === 0) throw new ValidationError("Cannot submit an empty order");
     const updated = await tx.order.update({ where: { id: orderId }, data: { status: "SENT" } });
-    // Route every item to its preparation station (one KOT per station).
+    // Route every item to its preparation station (one KOT per station). For a guest QR order the
+    // kitchen gate passes only when verified online payments cover it (kitchenGate.ts).
     const kots = await createKOTsForOrder(tx, ctx, orderId);
+    // Only possible for a guest QR order held after a late payment (paid in full, staff chose to cook it):
+    // it is settled now, exactly as an on-time payment would have settled it.
+    if (isGuestQrOrder(order)) {
+      // createKOTsForOrder skips the gate when no item is left to ticket; settling must never depend on that.
+      await assertKitchenReleasableTx(tx, order);
+      await settleOrderTx(tx, ctx, order);
+      await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Order", entityId: orderId, outletId: order.outletId, before: { status: order.status }, after: { status: "PAID", kots: kots.map((k) => k.number), via: "held-release" } });
+      return tx.order.findUniqueOrThrow({ where: { id: orderId } });
+    }
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Order", entityId: orderId, outletId: order.outletId, before: { status: order.status }, after: { status: "SENT", kots: kots.map((k) => k.number) } });
     return updated;
   });
@@ -675,7 +688,8 @@ export async function getOrder(db: PrismaClient, ctx: AccessContext, orderId: st
   if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
   assertOutletAccess(ctx, order.outletId);
   assertCan(ctx, "order.view", order.outletId);
-  return order;
+  // Paid online in full but held after a late payment: staff decide (send or refund), the guest does not.
+  return { ...order, heldForReview: await isHeldForReviewTx(db, order) };
 }
 
 const listSchema = z.object({
@@ -709,7 +723,9 @@ export async function listOrders(db: PrismaClient, ctx: AccessContext, input: z.
     include: { customer: customerSelect, table: { select: { code: true } }, items: { select: { id: true, name: true, qty: true, lineTotal: true } }, kots: { select: { status: true } } },
     ...(f.cursor ? { cursor: { id: f.cursor }, skip: 1 } : {}),
   });
-  const items = rows.slice(0, f.take);
+  const page = rows.slice(0, f.take);
+  // A guest QR order that is paid but was held (late payment) waits for a staff decision, not for the guest.
+  const items = await Promise.all(page.map(async (o) => ({ ...o, heldForReview: await isHeldForReviewTx(db, o) })));
   return { items, nextCursor: rows.length > f.take ? items[items.length - 1].id : null };
 }
 

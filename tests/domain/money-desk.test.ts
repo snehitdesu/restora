@@ -35,9 +35,11 @@ async function paid(opts: { channel?: string; source?: string; menuItemId?: stri
   const o = await createOrder(sys, { outletId: M, channel: (opts.channel ?? "DINE_IN") as never, source: (opts.source ?? "POS") as never });
   if (opts.menuItemId) await addOrderItem(sys, o.id, { menuItemId: opts.menuItemId, qty: opts.qty ?? 1 });
   else await addOrderItem(sys, o.id, { name: "Open item", qty: 1, unitPrice: opts.price!, taxPct: 0 });
-  await submitOrder(sys, o.id);
+  // A guest's table-QR order is paid through the gateway first; the verified payment sends it to the kitchen (kitchenGate.ts).
+  const guestQr = opts.source === "QR";
+  if (!guestQr) await submitOrder(sys, o.id);
   const total = num((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).total);
-  const p = await createPayment(sys, o.id, { method: opts.method as never, amount: total });
+  const p = await createPayment(sys, o.id, { method: opts.method as never, amount: total, ...(guestQr ? { provider: "mock" } : {}) });
   await verifyPayment(sys, p.id);
   return { orderId: o.id, paymentId: p.id, total };
 }

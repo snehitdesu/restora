@@ -6,11 +6,13 @@
  *  1. the committed migration history (`prisma migrate deploy`)
  *  2. the Coders' Cafe dataset: real menu, tables T01–T10, one user per role
  *  3. what an operator sets up in Settings: the outlet's GSTIN (a registered
- *     business issues CGST / SGST invoices) and the Razorpay account binding
- *     (webhooks are bound to the tenant by Razorpay's account id)
+ *     business issues CGST / SGST invoices) and the bank merchant binding
+ *     (bank callbacks are bound to the tenant by the merchant id; here the
+ *     test bank emulator's)
  *  4. what an operator sets up under Recipes / Inventory: ingredients for the
  *     dish the test orders (Loaded Veg Nachos), its approved recipe, and received
- *     stock in the kitchen department. The Coders' Cafe dataset ships no recipes.
+ *     stock in the kitchen department. The Coders' Cafe draft recipes are left
+ *     out here (seedCodersCafe { draftRecipes: false }).
  *  5. a second, unrelated restaurant (owner, outlet, table, dish) for the
  *     cross-tenant checks.
  *
@@ -39,10 +41,12 @@ async function main() {
   const { createMenuItem } = await import("@/server/services/menu");
   const fx = await import("./fixture");
 
-  const cafe = await seedCodersCafe(prisma);
-  const account = process.env.RAZORPAY_ACCOUNT_ID;
-  if (!account) throw new Error("RAZORPAY_ACCOUNT_ID is required (playwright.acceptance.config.ts)");
-  await prisma.integrationConnection.create({ data: { organizationId: cafe.organizationId, outletId: cafe.outletId, kind: "PAYMENT", provider: "razorpay", externalRef: account, status: "CONNECTED", mode: "SANDBOX" } });
+  // Without the estimated draft recipes: step 4 sets up the dish's own approved
+  // recipe (a menu item has one recipe), and the spec asserts its exact quantities.
+  const cafe = await seedCodersCafe(prisma, { draftRecipes: false });
+  const merchant = process.env.UPI_EMULATOR_MERCHANT_ID;
+  if (!merchant) throw new Error("UPI_EMULATOR_MERCHANT_ID is required (playwright.acceptance.config.ts)");
+  await prisma.integrationConnection.create({ data: { organizationId: cafe.organizationId, outletId: cafe.outletId, kind: "PAYMENT", provider: "upi_emulator", externalRef: merchant, status: "CONNECTED", mode: "MOCK" } });
   await prisma.outlet.update({ where: { id: cafe.outletId }, data: { gstin: fx.CAFE_GSTIN } });
 
   // ---- ingredients, recipe, stock (the dish the acceptance order buys)
@@ -66,7 +70,7 @@ async function main() {
   await prisma.restaurantTable.create({ data: { organizationId: other.id, outletId: otherOutlet.id, code: "X01", qrToken: fx.OTHER.tableToken } });
   await createMenuItem(systemContext(other.id, [otherOutlet.id]), { name: fx.OTHER.dish, price: 99, taxPct: 5, station: "KITCHEN" });
 
-  console.log(`acceptance e2e: Coders' Cafe ${cafe.items} items, ${cafe.tables.length} tables, GSTIN set, Razorpay account bound, recipe + stock for "${fx.DISH.name}"; second restaurant "${fx.OTHER.orgName}" created`);
+  console.log(`acceptance e2e: Coders' Cafe ${cafe.items} items, ${cafe.tables.length} tables, GSTIN set, test bank merchant bound, recipe + stock for "${fx.DISH.name}"; second restaurant "${fx.OTHER.orgName}" created`);
   await prisma.$disconnect();
 }
 

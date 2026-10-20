@@ -13,6 +13,7 @@ import { assertCan, can } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
 import { createNotificationTx } from "@/server/services/notifications";
 import { runAfterCommit, isRootClient } from "@/server/services/afterCommit";
+import { assertKitchenReleasableTx } from "@/server/services/kitchenGate";
 
 type Tx = Prisma.TransactionClient;
 type Client = PrismaClient | Tx;
@@ -38,13 +39,18 @@ export async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
   return (last?.number ?? 0) + 1;
 }
 
-/** Create one KOT per station for the order's items. Idempotent-ish: skips items already on a KOT. */
+/**
+ * Create one KOT per station for the order's items. Idempotent-ish: skips items already on a KOT.
+ * The single place kitchen tickets are made, so the online-payment gate for guest QR orders
+ * (kitchenGate.ts) is enforced here for every caller.
+ */
 export async function createKOTsForOrder(tx: Tx, ctx: AccessContext, orderId: string) {
   const order = await tx.order.findUnique({ where: { id: orderId }, include: { items: { include: { kotItems: true } } } });
   if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
 
   const pending = order.items.filter((it) => it.kotItems.length === 0);
   if (pending.length === 0) return [];
+  await assertKitchenReleasableTx(tx, order);
 
   const byStation = new Map<string, typeof pending>();
   for (const it of pending) {

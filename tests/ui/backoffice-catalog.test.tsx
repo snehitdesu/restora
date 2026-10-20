@@ -234,6 +234,19 @@ describe("menu items", () => {
     expect(posts()[2]).toMatchObject({ method: "DELETE", path: "/api/menu/items/m1/modifier-groups/g1" });
   });
 
+  it("plate cost with unpriced ingredients reads 'Cost unavailable'; margin and food cost are unknown, not ₹0 / 0%", async () => {
+    state.routes = {
+      "GET /api/menu": () => [item()], "GET /api/menu/categories": () => cats, "GET /api/menu/modifier-groups": () => [],
+      "GET /api/recipes/menu-items/m1/margin": () => ({ price: 250, cost: null, plateCost: null, margin: null, foodCostPct: null, overheadPct: 0, overhead: null, versionId: "v1", complete: false, lines: [{ materialId: "x", name: "Paneer", priced: false }] }),
+    };
+    renderAs(<MenuItemDetail id="m1" />, ["menu.view", "recipe.view", "reports.view"], { orgWide: true });
+    expect(await screen.findByText("Cost unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Ingredient costs not entered at this outlet for Paneer.")).toBeInTheDocument();
+    expect(screen.getAllByText("Unknown")).toHaveLength(2);
+    expect(screen.queryByText("₹0.00")).not.toBeInTheDocument();
+    expect(screen.queryByText("0.0%")).not.toBeInTheDocument();
+  });
+
   it("without an approved recipe the plate cost explains why", async () => {
     state.routes = { "GET /api/menu": () => [item()], "GET /api/menu/categories": () => cats, "GET /api/menu/modifier-groups": () => [], "GET /api/recipes/menu-items/m1/margin": () => fail(422, "ValidationError", "Paneer Tikka has no approved recipe") };
     renderAs(<MenuItemDetail id="m1" />, ["menu.view", "recipe.view", "reports.view"]);
@@ -363,7 +376,13 @@ describe("recipes", () => {
   const line = (over = {}) => ({ id: "l1", componentType: "MATERIAL", materialId: "mat1", subRecipeId: null, qty: "150", unitId: "g", wastagePct: "5", sortOrder: 0, name: "Paneer", sku: "RM-1", unit: "g", ...over });
   const version = (over = {}) => ({ id: "v2", version: 2, status: "DRAFT", effectiveFrom: at, yieldQty: "1", yieldUnitId: null, yieldUnit: null, servingSize: "1", notes: null, approvedAt: null, createdAt: at, lines: [line(), line({ id: "l2", componentType: "SUB_RECIPE", materialId: null, subRecipeId: "rs", name: "Tikka masala", sku: null, unit: null, qty: "0.1", wastagePct: "0" })], ...over });
   const recipe = (versions = [version(), version({ id: "v1", version: 1, status: "APPROVED", approvedAt: at })]) => ({ id: "r1", name: "Paneer Tikka", outputType: "MENU_ITEM", active: true, menuItemId: "m1", outputMaterialId: null, createdAt: at, menuItem: { id: "m1", name: "Paneer Tikka", price: "250" }, outputMaterial: null, versions });
-  const cost = { total: 42.5, quantity: 1, lines: [{ materialId: "mat1", name: "Paneer", sku: "RM-1", unit: "kg", quantity: 0.1575, unitCost: 250, cost: 39.38 }, { materialId: "mat2", name: "Chilli", sku: "RM-2", unit: "kg", quantity: 0.01, unitCost: 0, cost: 0 }] };
+  // Chilli has no cost at the outlet: the server sends no total (a partial sum is not the cost).
+  const cost = {
+    complete: false, total: null, pricedSubtotal: 39.38, unpricedCount: 1, quantity: 1,
+    lines: [{ materialId: "mat1", name: "Paneer", sku: "RM-1", unit: "kg", quantity: 0.1575, priced: true, unitCost: 250, cost: 39.38 }, { materialId: "mat2", name: "Chilli", sku: "RM-2", unit: "kg", quantity: 0.01, priced: false, unitCost: null, cost: null }],
+  };
+  const pricedCost = { ...cost, complete: true, total: 42.5, pricedSubtotal: 42.5, unpricedCount: 0, lines: [cost.lines[0], { ...cost.lines[1], priced: true, unitCost: 312, cost: 3.12 }] };
+  const unpricedCost = { ...cost, pricedSubtotal: 0, unpricedCount: 2, lines: cost.lines.map((l) => ({ ...l, priced: false, unitCost: null, cost: null })) };
 
   it("list: server search / type filter, array paging, latest version status; create only for org-wide authors", async () => {
     state.routes = { "GET /api/recipes": (c) => (c.query.get("cursor") ? [listRow(99)] : Array.from({ length: 25 }, (_, i) => listRow(i, i === 3 ? { versions: [{ id: "x", version: 1, status: "DRAFT", effectiveFrom: at }] } : {}))) };
@@ -418,9 +437,33 @@ describe("recipes", () => {
     expect(within(lines).getByRole("link", { name: "Tikka masala" })).toHaveAttribute("href", "/recipes/rs");
     const breakdown = await screen.findByRole("table", { name: "Cost breakdown" });
     expect(within(breakdown).getByText("No cost")).toBeInTheDocument();
-    expect(screen.getByText("₹42.50")).toBeInTheDocument();
+    // Partly priced: the card says so and names the gap; no figure poses as the recipe's cost.
+    expect(screen.getByText("Incomplete")).toBeInTheDocument();
+    expect(screen.getByText(/Priced ingredients only come to ₹39.38; 1 of 2 ingredients have no cost/)).toBeInTheDocument();
+    expect(screen.getByTestId("recipe-cost-unpriced")).toHaveTextContent("No purchase cost at this outlet for Chilli");
+    expect(screen.queryByText("₹42.50")).not.toBeInTheDocument();
+    expect(screen.queryByText("₹0.00")).not.toBeInTheDocument();
     expect(gets("/api/recipes/versions/v2/cost")[0].query.get("outletId")).toBe(OUT_A);
     for (const name of [/Approve/, /Discard/, /Archive/, /Edit draft/, /Add line/, /New version/]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+  });
+
+  it("no ingredient costs: the cost reads 'Cost unavailable', never ₹0.00", async () => {
+    state.routes = { "GET /api/recipes/r1": () => recipe(), "GET /api/recipes/versions/v2/cost": () => unpricedCost };
+    renderAs(<RecipeDetail id="r1" />, ["recipe.view", "reports.view"]);
+    await screen.findByRole("table", { name: "Cost breakdown" });
+    expect(screen.getByText("Cost unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Ingredient costs not entered at this outlet.")).toBeInTheDocument();
+    expect(screen.getByTestId("recipe-cost-unpriced")).toHaveTextContent("Cost unavailable: ingredient costs not entered. No purchase cost at this outlet for Paneer, Chilli");
+    expect(screen.queryByText(/₹0\.00/)).not.toBeInTheDocument();
+  });
+
+  it("every ingredient priced: the total is the cost", async () => {
+    state.routes = { "GET /api/recipes/r1": () => recipe(), "GET /api/recipes/versions/v2/cost": () => pricedCost };
+    renderAs(<RecipeDetail id="r1" />, ["recipe.view", "reports.view"]);
+    await screen.findByRole("table", { name: "Cost breakdown" });
+    expect(screen.getByText("₹42.50")).toBeInTheDocument();
+    expect(screen.queryByText("Incomplete")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("recipe-cost-unpriced")).not.toBeInTheDocument();
   });
 
   it("draft workflow: edit, add a line in another unit, remove a line, approve (transition table × recipe.approve)", async () => {

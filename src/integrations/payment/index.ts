@@ -1,8 +1,10 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { hmacMatches, stringAt } from "@/integrations/hmac";
-import { assertMockAllowed, mockProvidersAllowed, ProviderUnavailableError, unknownProvider } from "@/integrations/policy";
+import { assertMockAllowed, ProviderUnavailableError, unknownProvider } from "@/integrations/policy";
 import { basicAuth, IntegrationError, requestJson, type FetchLike } from "@/integrations/http";
 import { z } from "zod";
+import { SbiUpiPaymentProvider } from "./sbiUpi";
+import { UpiEmulatorPaymentProvider } from "./upiEmulator";
 import type { CheckoutRequest, CheckoutSession, IntegrationMode, PaymentProvider, PaymentSettlementRow, PaymentWebhookEvent, ProviderPaymentStatus, RefundRequest, VerifyResult } from "./types";
 
 const KNOWN_EVENTS = ["payment.captured", "payment.failed", "refund.processed"] as const;
@@ -82,19 +84,7 @@ const RAZORPAY_API = "https://api.razorpay.com/v1";
 const paise = (rupees: number) => Math.round(rupees * 100);
 const rupees = (p: number) => Math.round(p) / 100;
 
-export type RazorpayConfig = { keyId?: string; keySecret?: string; webhookSecret?: string; fetch?: FetchLike; timeoutMs?: number; backoffMs?: number; apiBase?: string };
-
-/**
- * RAZORPAY_API_BASE points the adapter at a Razorpay-compatible emulator for
- * automated end-to-end tests. Honoured ONLY where mock providers are allowed
- * (never on a production deployment without ALLOW_MOCK_PROVIDERS=true, which
- * startup validation refuses together with this variable), and the adapter then
- * reports mode MOCK: it is not talking to Razorpay.
- */
-function configuredApiBase(): string | undefined {
-  const v = process.env.RAZORPAY_API_BASE?.trim();
-  return v && mockProvidersAllowed() ? v.replace(/\/+$/, "") : undefined;
-}
+export type RazorpayConfig = { keyId?: string; keySecret?: string; webhookSecret?: string; fetch?: FetchLike; timeoutMs?: number; backoffMs?: number };
 
 const rzpPayment = z.object({ id: z.string(), amount: z.number(), currency: z.string().optional(), status: z.string(), order_id: z.string().nullish(), notes: z.union([z.record(z.unknown()), z.array(z.unknown())]).nullish(), created_at: z.number().optional() });
 const rzpOrder = z.object({ id: z.string(), amount: z.number(), amount_paid: z.number().default(0), currency: z.string().optional(), status: z.string() });
@@ -117,10 +107,15 @@ function hexEquals(a: string, b: string): boolean {
 }
 
 /**
- * Razorpay adapter over its REST API. Server-side only: the amount of every
- * checkout is the Payment row's (computed by the payment service), the checkout
- * signature is checked with the key secret, and capture is confirmed by asking
- * Razorpay — the browser's word is never enough. Credentials come from the
+ * Razorpay adapter over its REST API — LEGACY ONLY (retired 2026-10-20 for new
+ * online checkouts; docs/payments-razorpay.md). It can no longer create or
+ * reopen a checkout (no createCheckout / resumeCheckout) and getCheckoutProvider
+ * refuses it, so it is never selected for, or fallen back to by, a new
+ * payment. What remains resolves payments created before the switch: capture
+ * verification (verify / getPaymentStatus, used by the guest's status check,
+ * the pending-payment recovery job and signed webhooks), refunds, and
+ * settlement reports for reconciliation. Server-side only: capture is
+ * confirmed by asking Razorpay — the browser's word is never enough. Credentials come from the
  * environment (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET / RAZORPAY_WEBHOOK_SECRET)
  * and never appear in errors or responses. Contract-tested against recorded
  * Razorpay response shapes; it has not been run against a live account here.
@@ -133,13 +128,9 @@ export class RazorpayPaymentProvider implements PaymentProvider {
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
   private readonly backoffMs: number;
-  private readonly api: string;
-  private readonly emulated: boolean;
+  private readonly api = RAZORPAY_API;
 
   constructor(cfg: RazorpayConfig = {}) {
-    const base = cfg.apiBase ?? configuredApiBase();
-    this.api = base ?? RAZORPAY_API;
-    this.emulated = Boolean(base) && base !== RAZORPAY_API;
     this.timeoutMs = cfg.timeoutMs ?? 8000;
     this.backoffMs = cfg.backoffMs ?? 250;
     this.keyId = cfg.keyId ?? process.env.RAZORPAY_KEY_ID;
@@ -149,7 +140,6 @@ export class RazorpayPaymentProvider implements PaymentProvider {
   }
 
   get mode(): IntegrationMode {
-    if (this.emulated) return "MOCK";
     return this.keyId?.startsWith("rzp_live_") ? "LIVE" : "SANDBOX";
   }
   get configured(): boolean {
@@ -166,20 +156,6 @@ export class RazorpayPaymentProvider implements PaymentProvider {
       if (!p.success) throw new IntegrationError("MALFORMED", "Razorpay returned an unexpected response", false);
       return p.data;
     });
-  }
-
-  /** A Razorpay order for the server-computed amount. Not retried (Razorpay orders have no idempotency key; a retry would only leave an unused order). */
-  async createCheckout(input: CheckoutRequest): Promise<CheckoutSession> {
-    const body = JSON.stringify({ amount: paise(input.amount), currency: input.currency, receipt: input.paymentId.slice(0, 40), notes: { aharos_payment: input.paymentId, aharos_order: input.orderId } });
-    const raw = await requestJson<unknown>(this.fetchImpl, `${this.api}/orders`, { method: "POST", headers: this.auth(), body, attempts: 1, timeoutMs: this.timeoutMs });
-    const order = rzpOrder.safeParse(raw);
-    if (!order.success || order.data.amount !== paise(input.amount)) throw new IntegrationError("MALFORMED", "Razorpay returned an unexpected order", false);
-    return { providerRef: order.data.id, checkout: { provider: "razorpay", mode: this.mode, keyId: this.keyId!, orderId: order.data.id, amount: order.data.amount, currency: input.currency } };
-  }
-
-  resumeCheckout(input: { providerRef: string; amount: number; currency: string }): Record<string, string | number> {
-    if (!this.keyId) throw new ProviderUnavailableError("Razorpay is not configured (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET)");
-    return { provider: "razorpay", mode: this.mode, keyId: this.keyId, orderId: input.providerRef, amount: paise(input.amount), currency: input.currency };
   }
 
   /**
@@ -293,14 +269,25 @@ export class RazorpayPaymentProvider implements PaymentProvider {
   }
 }
 
-/** Providers that hold customer money and must execute refunds themselves. */
-export const GATEWAY_PROVIDERS = new Set(["mock", "razorpay"]);
+/** Providers that hold customer money: verified with the provider, and refunded through it. */
+export const GATEWAY_PROVIDERS = new Set(["mock", "upi_emulator", "sbi_upi", "razorpay"]);
+/** Providers a NEW guest checkout may use. Razorpay is not one of them (legacy only), and is never a fallback. */
+export const CHECKOUT_PROVIDERS = new Set(["sbi_upi", "upi_emulator", "mock"]);
+/** Retired for new checkouts; kept only to resolve payments created before the switch. */
+export const LEGACY_PROVIDERS = new Set(["razorpay"]);
+export const RAZORPAY_RETIRED = "Razorpay is retired for new online payments; RESTORA keeps it only to settle and refund older Razorpay payments";
 
+/** The adapter for a payment's provider, by name (verification, webhooks, refunds, reconciliation, recovery). */
 export function getPaymentProvider(name?: string): PaymentProvider {
   const provider = (name ?? process.env.PAYMENT_PROVIDER ?? "mock").toLowerCase();
   switch (provider) {
+    case "sbi_upi":
+      return new SbiUpiPaymentProvider();
     case "razorpay":
       return new RazorpayPaymentProvider();
+    case "upi_emulator":
+      assertMockAllowed("payment (UPI bank emulator)");
+      return new UpiEmulatorPaymentProvider({ timeoutMs: emulatorTimeoutMs() });
     case "mock":
       assertMockAllowed("payment");
       return new MockPaymentProvider();
@@ -309,4 +296,24 @@ export function getPaymentProvider(name?: string): PaymentProvider {
   }
 }
 
+/** Test hook: a short bank timeout for the emulator (UPI_EMULATOR_TIMEOUT_MS); unset = the adapter default. */
+function emulatorTimeoutMs(): number | undefined {
+  const n = Number(process.env.UPI_EMULATOR_TIMEOUT_MS);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * The provider for a NEW guest checkout (PAYMENT_PROVIDER). Refuses Razorpay (legacy only) and,
+ * through getPaymentProvider, mocks in production; there is no fallback. An unimplemented provider
+ * (sbi_upi today) is returned and reports itself unhealthy, so online payment shows as unavailable.
+ */
+export function getCheckoutProvider(): PaymentProvider {
+  const provider = (process.env.PAYMENT_PROVIDER ?? "mock").trim().toLowerCase();
+  if (LEGACY_PROVIDERS.has(provider)) throw new ProviderUnavailableError(RAZORPAY_RETIRED);
+  if (!CHECKOUT_PROVIDERS.has(provider)) return unknownProvider("payment", provider);
+  return getPaymentProvider(provider);
+}
+
+export { SbiUpiPaymentProvider, SBI_UPI_IMPLEMENTED, SBI_UPI_UNAVAILABLE } from "./sbiUpi";
+export { UpiEmulatorPaymentProvider } from "./upiEmulator";
 export type { CheckoutRequest, CheckoutSession, IntegrationMode, PaymentProvider, PaymentSettlementRow, PaymentWebhookEvent, ProviderPaymentStatus, RefundRequest, VerifyResult } from "./types";

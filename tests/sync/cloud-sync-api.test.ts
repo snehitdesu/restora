@@ -9,8 +9,9 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/server/db/client";
 import { middleware } from "@/middleware";
 import { rotateTableQr } from "@/server/services/masterData";
-import { cancelOrder } from "@/server/services/orders";
-import { getGuestOrder } from "@/server/services/guestOrdering";
+import { cancelOrder, placeOrder } from "@/server/services/orders";
+import { getGuestOrder, startGuestPayment, confirmGuestPayment } from "@/server/services/guestOrdering";
+import { guestTracker } from "@/domain/orderProgress";
 import * as Guest from "@/app/api/qr/[[...path]]/route";
 import * as Sync from "@/app/api/sync/[[...path]]/route";
 import * as Orders from "@/app/api/orders/[[...path]]/route";
@@ -35,6 +36,15 @@ async function guestOrder(items = [{ menuItemId: w.coffee, qty: 2, modifierOptio
   const res = await call(Guest, "POST", `t/${t}/orders`, { headers: { "idempotency-key": `guest-${RUN}-${++n}-key` }, body: { items, ...extra } });
   expect(res.status).toBe(200);
   return res.json.data as { orderId: string; ref: string; accessKey: string };
+}
+/**
+ * A cloud order that may be accepted before payment (ONLINE channel, fresh table). A guest QR order cannot be
+ * accepted before its online payment is verified (kitchenGate.ts; see "guest QR orders" below).
+ */
+async function onlineOrder(items = [{ menuItemId: w.coffee, qty: 2, modifierOptionIds: [w.largeOption] }, { menuItemId: w.brownie, qty: 1 }]) {
+  const table = await prisma.restaurantTable.create({ data: { organizationId: w.orgId, outletId: w.outletId, code: `X${++n}` } });
+  const o = await placeOrder(w.ctx, { outletId: w.outletId, channel: "ONLINE", source: "ONLINE", tableId: table.id, items, idempotencyKey: `online-${RUN}-${++n}-key` });
+  return { orderId: o.id };
 }
 const feed = async (session: string, qs = "") => (await call(Sync, "GET", `orders?outletId=${w.outletId}${qs}`, { session })).json?.data as WireFeed;
 
@@ -184,7 +194,7 @@ describe("feed: scoped, incremental, minimal (scenarios 3, 8, 10, 20)", () => {
 
 describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7, 9, 11, 13, 17, 18)", () => {
   it("accepts once: one KOT, however often the same operation is retried; a different operation finds it already accepted", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     const id = opId();
     const a = await call(Sync, "POST", "ops", { session: cashier, body: { action: "ACCEPT", opId: id, orderId: placed.orderId } });
     expect(a.status).toBe(200);
@@ -196,9 +206,8 @@ describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7,
     expect(second.json.data).toMatchObject({ outcome: "ALREADY", replayed: false });
     expect(await prisma.kot.count({ where: { orderId: placed.orderId } })).toBe(1);
     expect(await prisma.syncOpReceipt.count({ where: { organizationId: w.orgId, orderId: placed.orderId } })).toBe(2);
-    // accepted → the customer's own tracker follows, and the order is still unpaid
-    const view = await getGuestOrder(placed.orderId, placed.accessKey);
-    expect(view.tracker.confirmed).toBe(true);
+    // accepted → the customer-facing tracker follows, and the order is still unpaid
+    expect(guestTracker(await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId }, include: { kots: true } })).confirmed).toBe(true);
     expect((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).status).toBe("SENT");
     expect(await prisma.payment.count({ where: { orderId: placed.orderId } })).toBe(0);
   });
@@ -237,7 +246,7 @@ describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7,
   });
 
   it("moves a ticket forward once, treats repeats as already done and a stale request as superseded", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     const acc = await call(Sync, "POST", "ops", { session: cashier, body: { action: "ACCEPT", opId: opId(), orderId: placed.orderId } });
     const kotId = (acc.json.data as SyncOpResult).order.kots[0].id;
     const step = (to: string, id = opId()) => call(Sync, "POST", "ops", { session: kitchen, body: { action: "KOT_STATUS", opId: id, orderId: placed.orderId, kotId, to } });
@@ -255,7 +264,7 @@ describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7,
   });
 
   it("reaches the same state whether accepted through the sync API or the hosted POS (no second KOT)", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     expect((await call(Orders, "POST", `${placed.orderId}/submit`, { session: cashier, body: {} })).status).toBe(200);
     const r = await call(Sync, "POST", "ops", { session: cashier, body: { action: "ACCEPT", opId: opId(), orderId: placed.orderId } });
     expect(r.json.data.outcome).toBe("ALREADY");
@@ -263,7 +272,7 @@ describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7,
   });
 
   it("keeps an order unpaid until a staff-verified payment, which the feed then carries", async () => {
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await call(Sync, "POST", "ops", { session: cashier, body: { action: "ACCEPT", opId: opId(), orderId: placed.orderId } });
     expect((await feed(cashier, "&includeActive=1")).orders.find((x) => x.id === placed.orderId)).toMatchObject({ status: "SENT", payments: [], paidAt: null });
     const total = (await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).total.toString();
@@ -276,6 +285,27 @@ describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7,
     void Kitchen;
   });
 
+  it("guest QR orders: no acceptance before the online payment is verified (CONFLICT, no KOT), no counter payment; paying releases it once", async () => {
+    const placed = await guestOrder();
+    const id = opId();
+    const r = await call(Sync, "POST", "ops", { session: cashier, body: { action: "ACCEPT", opId: id, orderId: placed.orderId } });
+    expect(r.status).toBe(200);
+    expect(r.json.data).toMatchObject({ outcome: "CONFLICT" });
+    expect((r.json.data as SyncOpResult).detail).toMatch(/waiting for the guest's online payment/);
+    expect((r.json.data as SyncOpResult).order.kots).toHaveLength(0);
+    expect((await call(Sync, "POST", "ops", { session: manager, body: { action: "ACCEPT", opId: opId(), orderId: placed.orderId } })).json.data).toMatchObject({ outcome: "CONFLICT" });
+    expect((await call(Orders, "POST", `${placed.orderId}/submit`, { session: manager, body: {} })).status).toBe(422);
+    const total = Number((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).total);
+    expect((await call(Payments, "POST", "", { session: cashier, body: { orderId: placed.orderId, method: "CASH", amount: total } })).status).toBe(422);
+    expect(await prisma.kot.count({ where: { orderId: placed.orderId } })).toBe(0);
+    const pay = await startGuestPayment(placed.orderId, placed.accessKey, `gp-${RUN}-${++n}-key`);
+    await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: pay.paymentId });
+    expect(await prisma.kot.count({ where: { orderId: placed.orderId } })).toBe(1);
+    expect((await call(Sync, "POST", "ops", { session: cashier, body: { action: "ACCEPT", opId: opId(), orderId: placed.orderId } })).json.data).toMatchObject({ outcome: "ALREADY" });
+    expect(await prisma.kot.count({ where: { orderId: placed.orderId } })).toBe(1);
+    expect((await getGuestOrder(placed.orderId, placed.accessKey)).tracker.confirmed).toBe(true);
+  });
+
   // 2026-10-19: the desktop settles a cloud order with its device token only (mirrorGuard.createPaymentMirrored).
   // The edge middleware used to 401 it before the router could validate the token.
   it("a linked desktop takes payment for a cloud order with its device token alone (edge + router)", async () => {
@@ -285,7 +315,7 @@ describe("actions: accept + kitchen, idempotent and conflict-aware (scenarios 7,
     const edge = middleware(new NextRequest("https://restora.example/api/payments", { method: "POST", headers: bearer }));
     expect(edge.headers.get("x-middleware-next")).toBe("1");
 
-    const placed = await guestOrder();
+    const placed = await onlineOrder();
     await call(Sync, "POST", "ops", { headers: bearer, body: { action: "ACCEPT", opId: opId(), orderId: placed.orderId } });
     const total = Number((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).total);
     const pay = await call(Payments, "POST", "", { headers: { ...bearer, "idempotency-key": `desk-pay-${RUN}` }, body: { orderId: placed.orderId, method: "CASH", amount: total } });

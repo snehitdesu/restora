@@ -196,7 +196,7 @@ export function WorksheetScreen() {
   ];
   if (showCost) {
     columns.push(
-      { key: "plate", header: "Plate cost", numeric: true, cell: (r) => (r.plateCost === null || r.plateCost === undefined ? "No recipe" : formatMoney(r.plateCost)) },
+      { key: "plate", header: "Plate cost", numeric: true, cell: (r) => (r.plateCost === null || r.plateCost === undefined ? <span title="No approved recipe, or an ingredient has no cost at this outlet">Cost unavailable</span> : formatMoney(r.plateCost)) },
       { key: "wc", header: "Wastage ₹", numeric: true, cell: (r) => formatMoney(r.wastageCost ?? 0) },
       { key: "vc", header: "Unexplained ₹", numeric: true, cell: (r) => (r.varianceCost === null || r.varianceCost === undefined ? "—" : formatMoney(r.varianceCost)) },
     );

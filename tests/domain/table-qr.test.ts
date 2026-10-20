@@ -6,7 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
@@ -16,13 +16,17 @@ import { createMenuItem } from "@/server/services/menu";
 import { confirmGuestPayment, getGuestOrder, guestMenu, placeGuestOrder, quoteGuestCart, resolveTable } from "@/server/services/guestOrdering";
 import {
   CAFE_TABLE_CODES,
+  INVESTOR_DEMO_LABEL,
+  LOCAL_TEST_LABEL,
   TableQrError,
   buildTableQrPack,
   guestOrderingUrl,
+  isLocalDestinationHost,
   isNonPublicHost,
   normalizeQrOrigin,
   parseQrArgs,
   qrBaseUrlProblem,
+  qrPurposeBaseUrlProblem,
   renameWithRetry,
   writeTableQrFiles,
 } from "@/server/qr/tableLabels";
@@ -157,14 +161,171 @@ describe("table QR URL validation", () => {
     expect(qrBaseUrlProblem("https://[2606:4700:4700::1111]", "production")).toBeNull();
   });
 
-  it("defaults local mode to this computer and rejects table, outlet, token, and price arguments", () => {
-    expect(parseQrArgs([], {})).toEqual({ help: false, mode: "local", baseUrl: "http://localhost:3000", outDir: "artifacts/table-qr/local" });
-    expect(parseQrArgs(["--mode", "production"], { PUBLIC_BASE_URL: PUBLIC })).toMatchObject({ help: false, mode: "production", baseUrl: PUBLIC, outDir: "artifacts/table-qr/production" });
-    expect(parseQrArgs(["--help"], {})).toEqual({ help: true });
-    expect(() => parseQrArgs(["--mode", "production"], {})).toThrow(/public https/);
+  it("accepts an explicit local or production URL and rejects table, outlet, token, and price arguments", () => {
+    expect(parseQrArgs(["--base-url", "http://localhost:3000"])).toEqual({ help: false, mode: "local", baseUrl: "http://localhost:3000", outDir: "artifacts/table-qr/local" });
+    expect(parseQrArgs(["--mode", "production", "--base-url", PUBLIC])).toEqual({ help: false, mode: "production", baseUrl: PUBLIC, outDir: "artifacts/table-qr/production" });
+    expect(parseQrArgs(["--help"])).toEqual({ help: true });
     for (const flag of ["--table", "--outlet", "--token", "--price", "T01"]) {
-      expect(() => parseQrArgs([flag], {})).toThrow(TableQrError);
+      expect(() => parseQrArgs([flag, "--base-url", "http://localhost:3000"])).toThrow(TableQrError);
     }
+  });
+
+  describe("--base-url is required on every run", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("fails without --base-url when PUBLIC_BASE_URL is absent", () => {
+      vi.stubEnv("PUBLIC_BASE_URL", undefined);
+      for (const argv of [[], ["--mode", "local"], ["--mode", "production"], ["--purpose", "local-test"], ["--out", "artifacts/table-qr/x"]]) {
+        expect(() => parseQrArgs(argv), argv.join(" ")).toThrow(/explicit --base-url is required/);
+      }
+    });
+
+    it("fails without --base-url even when PUBLIC_BASE_URL is set", () => {
+      for (const env of [PUBLIC, "http://localhost:3000", "http://192.168.1.4:3000"]) {
+        vi.stubEnv("PUBLIC_BASE_URL", env);
+        for (const argv of [[], ["--mode", "local"], ["--mode", "production"], ["--purpose", "investor-demo"]]) {
+          expect(() => parseQrArgs(argv), `${env} ${argv.join(" ")}`).toThrow(/explicit --base-url is required/);
+        }
+      }
+    });
+
+    it("uses the explicit URL, never PUBLIC_BASE_URL", () => {
+      vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+      expect(parseQrArgs(["--base-url", "http://localhost:3000"])).toMatchObject({ mode: "local", baseUrl: "http://localhost:3000" });
+      vi.stubEnv("PUBLIC_BASE_URL", "http://localhost:3000");
+      expect(parseQrArgs(["--mode", "production", "--base-url", PUBLIC])).toMatchObject({ mode: "production", baseUrl: PUBLIC });
+    });
+
+    it("refuses an empty --base-url value", () => {
+      expect(() => parseQrArgs(["--base-url"])).toThrow(/--base-url requires a URL/);
+      expect(() => parseQrArgs(["--base-url", ""])).toThrow(/--base-url requires a URL/);
+    });
+
+    it("refuses a missing --base-url before reading tokens or writing files", async () => {
+      vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+      const out = `artifacts/table-qr/refuse-missing-${RUN}`;
+      const db = {
+        organization: { findFirst: () => Promise.reject(new Error("database should not be read")) },
+      };
+      await expect(runQrGenerate(["--out", out], db as never)).rejects.toThrow(/explicit --base-url is required/);
+      await expect(runQrGenerate(["--mode", "production", "--out", out], db as never)).rejects.toThrow(/explicit --base-url is required/);
+      expect(fs.existsSync(out)).toBe(false);
+    });
+  });
+
+  it("--purpose investor-demo labels a local sheet and is refused for production", () => {
+    expect(parseQrArgs(["--base-url", "http://192.168.1.20:3000", "--purpose", "investor-demo"])).toEqual({ help: false, mode: "local", baseUrl: "http://192.168.1.20:3000", outDir: "artifacts/table-qr/local", purpose: "investor-demo" });
+    expect(() => parseQrArgs(["--purpose", "launch"])).toThrow(TableQrError);
+    expect(() => parseQrArgs(["--mode", "production", "--base-url", PUBLIC, "--purpose", "investor-demo"])).toThrow(/local sheets only/);
+    expect(() => buildTableQrPack({ mode: "production", baseUrl: PUBLIC, restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "investor-demo" })).toThrow(/local sheets only/);
+    const pack = buildTableQrPack({ mode: "local", baseUrl: "http://192.168.1.20:3000", restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "investor-demo" });
+    expect(pack.printReady).toBe(false);
+    expect(pack.notice).toMatch(/^LOCAL INVESTOR DEMO — NOT FOR CUSTOMER USE\. LOCAL TEST — NOT FOR CUSTOMER PRINTING\./);
+    expect(pack.html).toContain(INVESTOR_DEMO_LABEL);
+    expect(pack.manifest.notice).toBe(pack.notice);
+    const test = buildTableQrPack({ mode: "local", baseUrl: "http://192.168.1.20:3000", restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "local-test" });
+    expect(test.notice?.startsWith(`${LOCAL_TEST_LABEL} `)).toBe(true);
+    expect(test.html).toContain(LOCAL_TEST_LABEL);
+    expect(parseQrArgs(["--purpose", "local-test", "--base-url", "http://localhost:3000"])).toMatchObject({ mode: "local", purpose: "local-test" });
+  });
+
+  it("--purpose fails closed: explicit --base-url required, PUBLIC_BASE_URL ignored, only local destinations", () => {
+    // Missing base URL: no localhost default and no PUBLIC_BASE_URL fallback.
+    expect(() => parseQrArgs(["--purpose", "investor-demo"])).toThrow(/explicit --base-url/);
+    vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+    expect(() => parseQrArgs(["--purpose", "local-test"])).toThrow(/explicit --base-url/);
+    // An explicit local URL wins and PUBLIC_BASE_URL is not consulted.
+    expect(parseQrArgs(["--purpose", "local-test", "--base-url", "http://127.0.0.1:3000"])).toMatchObject({ baseUrl: "http://127.0.0.1:3000", purpose: "local-test" });
+    vi.unstubAllEnvs();
+
+    const allowed = [
+      "http://localhost:3000",
+      "http://LOCALHOST:3000/",
+      "http://127.0.0.1:3000",
+      "http://127.1.2.3",
+      "http://[::1]:3000",
+      "http://10.0.0.5:3000",
+      "http://172.16.0.1:3000",
+      "http://172.31.255.254:3000",
+      "http://192.168.1.4:3000",
+      "https://192.168.1.4:3443",
+    ];
+    for (const url of allowed) {
+      expect(qrPurposeBaseUrlProblem(url), url).toBeNull();
+      expect(parseQrArgs(["--base-url", url, "--purpose", "investor-demo"]), url).toMatchObject({ purpose: "investor-demo" });
+    }
+
+    const refused = [
+      // public hostnames
+      PUBLIC,
+      "https://restora-beta-six.vercel.app",
+      "http://localhost.example.com:3000",
+      "http://127.0.0.1.nip.io:3000",
+      "http://cafe.local:3000",
+      "http://app.localhost:3000",
+      // public IPs
+      "http://8.8.8.8:3000",
+      "http://1.1.1.1",
+      "http://172.32.0.1:3000",
+      "http://192.169.1.4:3000",
+      "http://11.0.0.1",
+      "http://[2606:4700::1111]:3000",
+      // non-routable but not a usable local destination
+      "http://0.0.0.0:3000",
+      "http://[::]:3000",
+      "http://169.254.1.1",
+      "http://100.64.0.1",
+      "http://[fd00::1]:3000",
+      "http://[::ffff:8.8.8.8]",
+      // malformed / not an origin
+      "",
+      "   ",
+      "not a url",
+      "localhost:3000",
+      "//localhost:3000",
+      "ftp://localhost",
+      "file:///C:/menu",
+      "javascript:alert(1)",
+      "http://user:pw@localhost:3000",
+      "http://user@192.168.1.4:3000",
+      "http://localhost:3000/t/abc",
+      "http://localhost:3000/app",
+      "http://localhost:3000/?x=1",
+      "http://localhost:3000/#frag",
+      "http://999.1.1.1",
+    ];
+    for (const url of refused) {
+      expect(qrPurposeBaseUrlProblem(url), url).not.toBeNull();
+      if (url.trim()) expect(() => parseQrArgs(["--base-url", url, "--purpose", "local-test"]), url).toThrow(TableQrError);
+      expect(() => buildTableQrPack({ mode: "local", baseUrl: url, restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "investor-demo" }), url).toThrow(TableQrError);
+    }
+
+    // URL parsing, not string prefixes: alternate spellings resolve to the real host.
+    expect(qrPurposeBaseUrlProblem("http://0x7f.0.0.1:3000")).toBeNull();
+    expect(qrPurposeBaseUrlProblem("http://localhost:3000@8.8.8.8")).not.toBeNull();
+    expect(qrPurposeBaseUrlProblem("http://192.168.1.4.evil.com")).not.toBeNull();
+    expect(qrPurposeBaseUrlProblem("http://134744072")).not.toBeNull(); // 8.8.8.8 as one integer
+
+    // Plain local mode (no --purpose) still accepts a public origin; production needs its explicit URL.
+    expect(qrBaseUrlProblem(PUBLIC, "local")).toBeNull();
+    expect(parseQrArgs(["--mode", "production", "--base-url", PUBLIC])).toMatchObject({ mode: "production", baseUrl: PUBLIC });
+    expect(isLocalDestinationHost("[::1]")).toBe(true);
+    expect(isLocalDestinationHost("menus.example.com")).toBe(false);
+  });
+
+  it("refuses a public --purpose run before reading tokens or writing files", async () => {
+    const out = `artifacts/table-qr/refuse-purpose-${RUN}`;
+    const db = {
+      organization: { findFirst: () => Promise.reject(new Error("database should not be read")) },
+    };
+    vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+    await expect(runQrGenerate(["--purpose", "investor-demo", "--out", out], db as never)).rejects.toThrow(/explicit --base-url/);
+    vi.unstubAllEnvs();
+    await expect(runQrGenerate(["--purpose", "investor-demo", "--base-url", PUBLIC, "--out", out], db as never)).rejects.toThrow(/public hosts are refused/);
+    await expect(runQrGenerate(["--purpose", "local-test", "--base-url", "http://8.8.8.8:3000", "--out", out], db as never)).rejects.toThrow(/public hosts are refused/);
+    expect(fs.existsSync(out)).toBe(false);
   });
 
   it("refuses a production localhost run before writing files or reading tokens", async () => {
@@ -172,7 +333,7 @@ describe("table QR URL validation", () => {
     const db = {
       organization: { findFirst: () => Promise.reject(new Error("database should not be read")) },
     };
-    await expect(runQrGenerate(["--mode", "production", "--base-url", "http://localhost:3000", "--out", out], db as never, {})).rejects.toThrow(/public https/);
+    await expect(runQrGenerate(["--mode", "production", "--base-url", "http://localhost:3000", "--out", out], db as never)).rejects.toThrow(/public https/);
     expect(fs.existsSync(out)).toBe(false);
   });
 });

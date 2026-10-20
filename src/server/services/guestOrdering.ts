@@ -14,13 +14,14 @@
  *  - Payments use the existing payment service: a PENDING payment for the
  *    server-computed outstanding balance, made SUCCESS only by gateway
  *    verification (payment.verifyPayment, with its balance/concurrency rules).
- *  - Kitchen dispatch uses the existing routing (orders.submitOrder ->
- *    kot.createKOTsForOrder). A guest paying CASH at the counter is sent to the
- *    kitchen as the order is placed (same transaction: no order without its
- *    KOT, no KOT without its order) and stays unpaid until staff record the
- *    payment. An ONLINE order arrives OPEN and reaches the kitchen only when
- *    the gateway payment is verified (payment.verifyPayment); staff can still
- *    accept an OPEN order at the POS.
+ *  - Guests pay online; there is no pay-at-the-counter choice. An order
+ *    arrives OPEN and reaches the kitchen only when verified gateway payments
+ *    cover its total (payment.verifyPayment -> kot.createKOTsForOrder). The
+ *    kitchen gate (kitchenGate.ts) refuses every other release — POS accept,
+ *    captain rounds / fire, desktop Cloud Sync — and counter payments cannot
+ *    settle it, so neither a client nor a member of staff can send an unpaid
+ *    guest order to the kitchen. Ordering is refused while online payment is
+ *    unavailable.
  *
  * Services run with a system context scoped to the resolved outlet (the same
  * pattern as webhooks); every input that reaches them is fixed here.
@@ -31,7 +32,7 @@ import { z } from "zod";
 import { prisma } from "@/server/db/client";
 import { isGuestTableToken } from "@/lib/qr/tableQrUrl";
 import { systemContext } from "@/server/auth/context";
-import { type AccessContext, NotFoundError, ValidationError } from "@/server/db/scope";
+import { type AccessContext, ConflictError, NotFoundError, ValidationError } from "@/server/db/scope";
 import { DEV_AUTH_SECRET_PLACEHOLDER } from "@/server/config/env";
 import { writeAudit } from "@/server/audit/log";
 import { createNotificationTx } from "@/server/services/notifications";
@@ -47,12 +48,15 @@ import type { Tx } from "@/server/services/_workflow";
 import { formatClock, formatHours, hasHours, isOpenAt } from "@/domain/openingHours";
 import { guestTracker, type GuestTracker } from "@/domain/orderProgress";
 import { createPayment, verifyPayment } from "@/server/services/payment";
+import { isAwaitingOnlinePayment, isPastFulfilmentWindow, verifiedOnlineTotalTx } from "@/server/services/kitchenGate";
 import { buildBill, billOrderInclude, loadBillVenue, orderRef, type Bill } from "@/server/services/bill";
 import { getOrderInvoices } from "@/server/services/invoicing";
-import { getPaymentProvider, type IntegrationMode } from "@/integrations/payment";
+import { getCheckoutProvider, type IntegrationMode, type PaymentProvider } from "@/integrations/payment";
+import { IntegrationError } from "@/integrations/http";
+import { ProviderUnavailableError } from "@/integrations/policy";
 import { D, money, num } from "@/domain/money";
 import { MAX_SPLIT_PARTS, MIN_SPLIT_PARTS, splitShare } from "@/domain/billSplit";
-import { FULFILMENT_LABEL, GUEST_AWAITING_PAYMENT_LABEL } from "@/domain/orderProgress";
+import { FULFILMENT_LABEL, GUEST_AWAITING_PAYMENT_LABEL, GUEST_HELD_FOR_REVIEW_LABEL } from "@/domain/orderProgress";
 
 // ---------------- access keys ----------------
 
@@ -128,9 +132,11 @@ export async function resolveTable(token: string, db: PrismaClient = prisma): Pr
 // ---------------- payment availability ----------------
 
 /**
- * online: a gateway is configured and reachable. testMode: the in-process
- * development gateway (MOCK — no gateway at all). mode: what the gateway is —
- * SANDBOX = Razorpay test mode (no real money), LIVE = real money.
+ * online: a checkout provider (getCheckoutProvider: SBI UPI, or the emulator /
+ * mock outside production — never Razorpay, which is legacy-only) is configured
+ * and reachable. testMode: the in-process development gateway (MOCK — no
+ * gateway at all). mode: MOCK = emulator / simulator, SANDBOX = the bank's test
+ * environment (no real money), LIVE = real money.
  */
 export type GuestPaymentOptions = { online: boolean; testMode: boolean; mode: IntegrationMode | null };
 
@@ -145,9 +151,9 @@ let health: { key: string; at: number; ok: boolean } | null = null;
  * (`fresh`) always asks the gateway, so a payment is never begun while it is down.
  */
 export async function guestPaymentOptions(opts: { fresh?: boolean } = {}): Promise<GuestPaymentOptions> {
-  let gw: ReturnType<typeof getPaymentProvider>;
+  let gw: PaymentProvider;
   try {
-    gw = getPaymentProvider();
+    gw = getCheckoutProvider();
   } catch {
     return OFFLINE;
   }
@@ -367,7 +373,11 @@ const guestOrderSchema = z
     items: z.array(guestItem).min(1, "Your cart is empty").max(30),
     notes: z.string().trim().max(300).optional(),
     customer: guestCustomer.optional(),
-    /** How the guest says they will pay. Informational for the staff; payment itself is verified separately. */
+    /**
+     * How the guest will pay: online only. CASH (pay at the counter) is refused with a message rather than
+     * accepted and ignored, so an older page that still offers it cannot place an order the guest thinks is
+     * on its way to the kitchen.
+     */
     paymentMethod: z.enum(["CASH", "ONLINE"]).optional(),
     /**
      * The total the guest was shown at checkout. Never used as a price: the order
@@ -395,14 +405,18 @@ export class GuestPriceChangedError extends Error {
     this.details = { total };
   }
 }
+export const ORDER_TOO_OLD_TO_PAY = "This order is too old to be sent to the kitchen now. Please order again, or ask the staff.";
+export const PAY_ONLINE_ONLY = "QR orders are paid online before they go to the kitchen. Please choose online payment.";
+export const ONLINE_PAYMENT_UNAVAILABLE = "Online payment isn't available right now, so orders can't be placed from the table. Please order with the staff.";
 const idemKey = z.string().trim().min(8).max(64).regex(/^[\w.:-]+$/, "Invalid idempotency key");
 
-/** Unaccepted guest orders a table may have waiting at once (a QR is a public link). */
+/** Guest orders a table may have waiting for their online payment at once (a QR is a public link). */
 export const MAX_WAITING_GUEST_ORDERS = 3;
 /**
- * Unpaid guest orders a table may have at once when paying at the counter. A
- * cash order reaches the kitchen with nobody at the till, so a public QR link
- * must not be able to flood the kitchen; paying (or staff cancelling) frees it.
+ * Unsettled guest orders a table may have at once (a public QR link must not
+ * be able to pile up orders; paying, or staff cancelling, frees one). Orders
+ * reach the kitchen only once paid online, so today this mostly bounds orders
+ * placed before that rule (pay-at-the-counter orders sent straight to the kitchen).
  *
  * This is an abuse guard, not a documented restaurant rule: 6 was chosen during
  * development (a table of six each ordering separately). The owner can change it
@@ -423,9 +437,8 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
   const key = idemKey.parse(idempotencyKey);
   const data = guestOrderSchema.parse(input);
   const t = await resolveTable(token, db);
-  // Paying at the counter: the café's workflow sends the order to the kitchen now.
-  // Online: it waits for the verified payment (or a member of staff) instead.
-  const dispatch = data.paymentMethod === "CASH";
+  // No order reaches the kitchen before its online payment is verified (kitchenGate.ts): paying at the counter is not offered.
+  if (data.paymentMethod === "CASH") throw new ValidationError(PAY_ONLINE_ONLY);
   // Namespaced per table: a key can only ever replay an order of this table.
   const scopedKey = `qr:${t.table.id}:${key}`;
   const placedUnderKey = () => db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: t.ctx.organizationId, idempotencyKey: scopedKey } }, select: { id: true } });
@@ -435,12 +448,15 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
     // Independent reads: the limits and every line's price, at once.
     const [waiting, unpaid, lines] = await Promise.all([
       db.order.count({ where: { ...atTable, status: "OPEN" } }),
-      dispatch ? db.order.count({ where: { ...atTable, status: { in: UNSETTLED_STATUSES } } }) : Promise.resolve(0),
+      db.order.count({ where: { ...atTable, status: { in: UNSETTLED_STATUSES } } }),
       priceGuestLines(db, t, data.items),
     ]);
-    if (waiting >= MAX_WAITING_GUEST_ORDERS) throw new ValidationError("Several orders from this table are waiting for the restaurant to accept them. Please wait, or ask the staff.");
+    // The order can only ever be paid online: without a usable gateway it would wait forever. A recent
+    // "down" answer is asked again before refusing (the gateway may be back); a recent "up" one is trusted.
+    if (!(await guestPaymentOptions()).online && !(await guestPaymentOptions({ fresh: true })).online) throw new ValidationError(ONLINE_PAYMENT_UNAVAILABLE);
+    if (waiting >= MAX_WAITING_GUEST_ORDERS) throw new ValidationError("Several orders from this table are waiting for payment. Please pay for one of them, or ask the staff.");
     const unpaidCap = maxUnpaidGuestOrders();
-    if (unpaid >= unpaidCap) throw new ValidationError(`This table already has ${unpaidCap} unpaid orders. Please pay at the counter, or ask the staff, before ordering more.`);
+    if (unpaid >= unpaidCap) throw new ValidationError(`This table already has ${unpaidCap} unpaid orders. Please pay for them, or ask the staff, before ordering more.`);
     const ordering = orderingStatus(t);
     if (!ordering.open) throw new ValidationError(ordering.message!);
     // Every line is checked (and priced) before anything is created, so a sold-out
@@ -483,9 +499,8 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
     notes: data.notes || undefined,
     idempotencyKey: scopedKey,
     items: data.items.map((i) => ({ menuItemId: i.menuItemId, variantId: i.variantId, modifierOptionIds: i.modifierOptionIds?.length ? i.modifierOptionIds : undefined, qty: i.qty, notes: i.notes || undefined })),
-    // submitOrder (SENT + one KOT per station) runs in the order's own transaction:
-    // a failed dispatch creates nothing, and a replayed request never dispatches again.
-    submit: dispatch,
+    // OPEN until the online payment is verified; payment.verifyPayment sends it to the kitchen.
+    submit: false,
   }, db, {
     knownNew,
     // Inside the order's transaction (queued with every other SQLite write):
@@ -493,10 +508,9 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
     // separate transaction afterwards could time out under load and answer 500
     // for an order that had already been placed and sent to the kitchen.
     afterCreate: async (tx, placed) => {
-      const pays = data.paymentMethod === "ONLINE" ? "paying online" : data.paymentMethod === "CASH" ? "pays at the counter" : null;
       await writeAudit(tx, t.ctx, { action: "CREATE", entityType: "Order", entityId: placed.id, outletId: t.outlet.id, after: { via: "guest-qr", table: t.table.code, total: money(placed.total).toString(), ...(guestName ? { guestName } : {}), ...(data.paymentMethod ? { paymentMethod: data.paymentMethod } : {}) }, ip: meta.ip, userAgent: meta.userAgent?.slice(0, 200) });
       // Staff (POS / captain alert centre) learn about the order in-app.
-      await createNotificationTx(tx, t.ctx, { outletId: t.outlet.id, type: "NEW_ORDER", title: `New QR order · table ${t.table.code}`, body: [`${orderRef(placed.id)} · ₹${money(placed.total).toFixed(2)} — ${dispatch ? "sent to the kitchen" : "waiting to be accepted"}`, guestName, pays].filter(Boolean).join(" · ") });
+      await createNotificationTx(tx, t.ctx, { outletId: t.outlet.id, type: "NEW_ORDER", title: `New QR order · table ${t.table.code}`, body: [`${orderRef(placed.id)} · ₹${money(placed.total).toFixed(2)} — waiting for the guest's online payment`, guestName].filter(Boolean).join(" · ") });
     },
   });
   // Coupon, referral and consent ride on the order but never fail it: each reports its own outcome.
@@ -547,6 +561,13 @@ export type GuestOrderView = {
   canPay: boolean;
   payment: GuestPaymentOptions;
   pendingPaymentId: string | null;
+  /**
+   * Paid online in full, but the payment was verified after the fulfilment window, so the order was not sent
+   * to the kitchen automatically: staff will send it or refund it (kitchenGate.ts).
+   */
+  heldForReview: boolean;
+  /** Waiting for its online payment, but past the fulfilment window: no new payment is taken for it. */
+  expired: boolean;
   /** The same dishes as a cart, for "order the same again": current price and availability are checked when the cart is priced. */
   reorder: GuestReorderLine[];
   /** Splitting the bill from the phones: how many online parts guests have already paid. */
@@ -570,9 +591,11 @@ async function viewOf(order: Awaited<ReturnType<typeof loadGuestOrder>>, db: Pri
   const bill = buildBill(order, await loadBillVenue(db, order.organizationId, order.outletId), await getOrderInvoices(db, order.id));
   const payment = await guestPaymentOptions();
   const pending = order.payments.filter((p) => p.status === "PENDING" && p.method === "ONLINE" && !p.actorId).at(-1);
-  // Not yet in the kitchen while the guest's own online payment is open: what it
-  // waits for is that payment, not the restaurant.
-  const awaitingPayment = bill.fulfilment === "AWAITING_ACCEPTANCE" && pending !== undefined;
+  // Not yet in the kitchen: a guest order waits for its online payment, not for the restaurant (kitchenGate.ts).
+  const waitingForPayment = isAwaitingOnlinePayment(order);
+  const heldForReview = waitingForPayment && D(order.total).gt(0) && (await verifiedOnlineTotalTx(db, order.id)).gte(D(order.total));
+  const expired = waitingForPayment && !heldForReview && pending === undefined && isPastFulfilmentWindow(order);
+  const awaitingPayment = !heldForReview && bill.fulfilment === "AWAITING_ACCEPTANCE" && (pending !== undefined || waitingForPayment);
   const reorder: GuestReorderLine[] = order.items
     .filter((i) => i.menuItemId)
     .map((i) => ({
@@ -592,12 +615,14 @@ async function viewOf(order: Awaited<ReturnType<typeof loadGuestOrder>>, db: Pri
     ref: orderRef(order.id),
     status: order.status,
     fulfilment: bill.fulfilment,
-    fulfilmentLabel: awaitingPayment ? GUEST_AWAITING_PAYMENT_LABEL : FULFILMENT_LABEL[bill.fulfilment],
+    fulfilmentLabel: heldForReview ? GUEST_HELD_FOR_REVIEW_LABEL : awaitingPayment ? GUEST_AWAITING_PAYMENT_LABEL : FULFILMENT_LABEL[bill.fulfilment],
     tracker: guestTracker(order),
     bill,
-    canPay: payment.online && !["PAID", "CANCELLED", "REFUNDED"].includes(order.status) && D(bill.balanceDue).gt(0),
+    canPay: payment.online && !expired && !["PAID", "CANCELLED", "REFUNDED"].includes(order.status) && D(bill.balanceDue).gt(0),
     payment,
     pendingPaymentId: pending?.id ?? null,
+    heldForReview,
+    expired,
     reorder,
     split: { sharesPaid: guestSharesPaid(order.payments), minParts: MIN_SPLIT_PARTS, maxParts: MAX_SPLIT_PARTS },
   };
@@ -631,8 +656,8 @@ export async function startGuestPayment(orderId: string, key: string | null | un
   const order = await loadGuestOrder(orderId, key, db);
   if (["PAID", "CANCELLED", "REFUNDED"].includes(order.status)) throw new ValidationError(`This order is already ${order.status.toLowerCase()}`);
   const options = await guestPaymentOptions({ fresh: true });
-  if (!options.online) throw new ValidationError("Online payment is not available here. Please pay at the counter.");
-  const gateway = getPaymentProvider();
+  if (!options.online) throw new ValidationError(isAwaitingOnlinePayment(order) ? ONLINE_PAYMENT_UNAVAILABLE : "Online payment is not available here. Please pay at the counter.");
+  const gateway = getCheckoutProvider();
   const collected = order.payments.filter((p) => p.status === "SUCCESS" || p.status === "PARTIAL").reduce((a, p) => a.plus(D(p.amount)), D(0));
   const outstanding = money(D(order.total).minus(collected));
   if (outstanding.lte(0)) throw new ValidationError("Nothing is due on this order");
@@ -643,6 +668,9 @@ export async function startGuestPayment(orderId: string, key: string | null | un
   // A refresh resumes the guest's own open payment. Whole-bill payments share one open payment for the same amount; a part
   // belongs to the phone that asked for it (its Idempotency-Key), so two guests never end up on the same checkout.
   const resumable = share ? undefined : order.payments.find((p) => p.status === "PENDING" && p.method === "ONLINE" && p.provider === gateway.name && !p.actorId && D(p.amount).eq(outstanding));
+  // An order the kitchen would no longer receive automatically is not charged again (a new QR / payment);
+  // an open checkout can still finish (it is then held for staff, never lost).
+  if (!resumable && isAwaitingOnlinePayment(order) && isPastFulfilmentWindow(order)) throw new ValidationError(ORDER_TOO_OLD_TO_PAY);
   const payment = resumable ?? (await createPayment(ctx, order.id, { method: "ONLINE", amount: num(amount), provider: gateway.name, idempotencyKey: `qrpay:${order.id.slice(-12)}:${idem}` }, db));
   // Gateway-side checkout for the SERVER's amount (the Payment row), created outside any DB
   // transaction. A failure leaves the payment PENDING without a reference; the next attempt
@@ -652,12 +680,22 @@ export async function startGuestPayment(orderId: string, key: string | null | un
     let providerRef = payment.providerRef;
     if (!providerRef) {
       const session = await gateway.createCheckout({ paymentId: payment.id, orderId: order.id, amount: num(payment.amount), currency: "INR" });
-      const claimed = await db.payment.updateMany({ where: { id: payment.id, status: "PENDING", providerRef: null }, data: { providerRef: session.providerRef } });
-      providerRef = claimed.count === 1 ? session.providerRef : (await db.payment.findUniqueOrThrow({ where: { id: payment.id } })).providerRef;
+      // Compare-and-set, queued like every other write (runInTx): a bare write outside the queue lost
+      // SQLite's write lock under a burst of guests starting payments at once (socket timeout).
+      // The checkout's public data (a bank QR and its expiry) is kept so a refresh shows the same QR.
+      const claimed = await runInTx(db, (tx) => tx.payment.updateMany({ where: { id: payment.id, status: "PENDING", providerRef: null }, data: { providerRef: session.providerRef, checkoutData: JSON.stringify(session.checkout), checkoutExpiresAt: session.expiresAt ?? null } }));
+      if (claimed.count === 1) providerRef = session.providerRef;
+      else {
+        // Another start stored its checkout first (resumed below), or the payment was decided meanwhile —
+        // declined or paid without a reference — and has no checkout left to open: the guest starts again.
+        const now = await db.payment.findUniqueOrThrow({ where: { id: payment.id }, select: { status: true, providerRef: true } });
+        if (now.status !== "PENDING" || !now.providerRef) throw new ConflictError("This payment changed while it was being started. Please try again.");
+        providerRef = now.providerRef;
+      }
       checkout = providerRef === session.providerRef ? session.checkout : undefined;
     }
     // Resuming (refresh mid-payment): reopen the same gateway checkout, never a second gateway order.
-    if (!checkout && providerRef) checkout = gateway.resumeCheckout?.({ providerRef, amount: num(payment.amount), currency: "INR" });
+    if (!checkout && providerRef) checkout = storedCheckout(await db.payment.findUniqueOrThrow({ where: { id: payment.id }, select: { checkoutData: true } })) ?? gateway.resumeCheckout?.({ providerRef, amount: num(payment.amount), currency: "INR" });
     checkout ??= { provider: gateway.name, mode: gateway.mode, orderId: providerRef ?? "", amount: Math.round(num(payment.amount) * 100), currency: "INR" };
   }
   return { paymentId: payment.id, amount: money(payment.amount).toFixed(2), provider: gateway.name, mode: gateway.mode, testMode: options.testMode, checkout, ...(share ? { share: { parts, remainingParts: share.remainingParts, last: share.last } } : {}) };
@@ -679,12 +717,31 @@ const confirmSchema = z
  * a status check ("I closed the window — did it go through?"): an undecided
  * payment stays PENDING (`pending`), it is not failed.
  */
+/** The checkout data stored when the payment's checkout was created (public data only), or undefined. */
+function storedCheckout(p: { checkoutData: string | null }): Record<string, string | number> | undefined {
+  if (!p.checkoutData) return undefined;
+  try {
+    const v = JSON.parse(p.checkoutData) as unknown;
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, string | number>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function confirmGuestPayment(orderId: string, key: string | null | undefined, input: unknown, db: PrismaClient = prisma): Promise<GuestOrderView & { paymentStatus: string; pending: boolean }> {
   const data = confirmSchema.parse(input);
   const order = await loadGuestOrder(orderId, key, db);
   const payment = order.payments.find((p) => p.id === data.paymentId);
   if (!payment || payment.method !== "ONLINE" || payment.actorId) throw new NotFoundError("Payment not found");
   const ctx = systemContext(order.organizationId, [order.outletId]);
-  const res = await verifyPayment(ctx, payment.id, { providerRef: data.providerRef, payload: data.gateway }, db);
+  let res: { payment: { status: string }; pending?: boolean };
+  try {
+    res = await verifyPayment(ctx, payment.id, { providerRef: data.providerRef, payload: data.gateway }, db);
+  } catch (e) {
+    // The gateway could not be reached or timed out: nothing was decided and nothing changed. The guest is told the
+    // payment is still being confirmed (never paid, never failed); the pending-payment recheck settles it later.
+    if (!(e instanceof IntegrationError && e.retryable) && !(e instanceof ProviderUnavailableError)) throw e;
+    res = { payment: { status: payment.status }, pending: true };
+  }
   return { ...(await getGuestOrder(orderId, key, db)), paymentStatus: res.payment.status, pending: Boolean(res.pending) };
 }

@@ -33,6 +33,8 @@ const MIN_AUTH_SECRET_LENGTH = 32;
 export const DEV_SECRET_PLACEHOLDERS = ["dev-webhook-secret", "dev-cron-secret", "changeme", "change-me", "secret"];
 const WEBHOOK_SECRET_VARS = ["PAYMENT_WEBHOOK_SECRET", "AGGREGATOR_WEBHOOK_SECRET", "PETPOOJA_WEBHOOK_SECRET", "RAZORPAY_WEBHOOK_SECRET", "CRON_SECRET"] as const;
 const PROVIDER_VARS = ["PAYMENT_PROVIDER", "POS_PROVIDER", "WHATSAPP_PROVIDER", "EMAIL_PROVIDER", "GOOGLE_SHEETS_PROVIDER"] as const;
+/** integrations/payment getPaymentProvider: sbi_upi (not implemented yet), upi_emulator / mock (tests), razorpay (legacy only). */
+const PAYMENT_PROVIDER_NAMES = ["sbi_upi", "upi_emulator", "mock", "razorpay"];
 const LOG_LEVELS = ["debug", "info", "warn", "error"];
 
 const isSet = (v: string | undefined): v is string => v !== undefined && v.trim() !== "";
@@ -124,17 +126,29 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
     }
   }
 
-  // --- Razorpay: a configured gateway must be complete, or guests cannot pay / webhooks are refused ---
-  if (env.PAYMENT_PROVIDER?.trim().toLowerCase() === "razorpay") {
-    if (!isSet(env.RAZORPAY_KEY_ID) || !/^rzp_(test|live)_[A-Za-z0-9]+$/.test(env.RAZORPAY_KEY_ID.trim())) problems.push("RAZORPAY_KEY_ID must be a Razorpay key id (rzp_test_… or rzp_live_…) when PAYMENT_PROVIDER=razorpay");
-    if (!isSet(env.RAZORPAY_KEY_SECRET)) problems.push("RAZORPAY_KEY_SECRET is required when PAYMENT_PROVIDER=razorpay");
-    if (!isSet(env.RAZORPAY_WEBHOOK_SECRET)) problems.push("RAZORPAY_WEBHOOK_SECRET is required when PAYMENT_PROVIDER=razorpay (payment webhooks are verified with it)");
+  // --- Online payment provider (new checkouts). Unknown names fail loudly; there is no fallback. ---
+  const paymentProvider = env.PAYMENT_PROVIDER?.trim().toLowerCase();
+  if (paymentProvider && !PAYMENT_PROVIDER_NAMES.includes(paymentProvider)) problems.push(`PAYMENT_PROVIDER must be one of ${PAYMENT_PROVIDER_NAMES.join(", ")}`);
+  // The UPI bank emulator is a test adapter: it must never take a production guest's payment.
+  if (!mocksAllowed) {
+    if (paymentProvider === "upi_emulator") problems.push("PAYMENT_PROVIDER=upi_emulator (test bank emulator) is refused in production");
+    for (const name of ["UPI_EMULATOR_BASE", "UPI_EMULATOR_API_KEY", "UPI_EMULATOR_MERCHANT_ID", "UPI_EMULATOR_WEBHOOK_SECRET"]) if (isSet(env[name])) problems.push(`${name} (test bank emulator) must not be set in production`);
+  }
+  // Vercel's Production environment serves real guests: no opt-in turns the test adapters on there (Preview may still run them).
+  if (env.VERCEL_ENV === "production") {
+    if (mocksAllowed) problems.push("ALLOW_MOCK_PROVIDERS must not be true on a Vercel Production deployment (mock and test-bank adapters approve payments without a bank)");
+    if (paymentProvider === "upi_emulator" || paymentProvider === "mock") problems.push(`PAYMENT_PROVIDER=${paymentProvider} is a test adapter and is refused on a Vercel Production deployment`);
+  }
+  // --- Razorpay (LEGACY ONLY: settles / refunds payments made before it was retired). Keys, when present, must be complete. ---
+  if (isSet(env.RAZORPAY_KEY_ID) || isSet(env.RAZORPAY_KEY_SECRET)) {
+    if (!isSet(env.RAZORPAY_KEY_ID) || !/^rzp_(test|live)_[A-Za-z0-9]+$/.test(env.RAZORPAY_KEY_ID.trim())) problems.push("RAZORPAY_KEY_ID must be a Razorpay key id (rzp_test_… or rzp_live_…) when Razorpay keys are configured for legacy payments");
+    if (!isSet(env.RAZORPAY_KEY_SECRET)) problems.push("RAZORPAY_KEY_SECRET is required with RAZORPAY_KEY_ID (legacy Razorpay payments are verified and refunded with it)");
+    if (!isSet(env.RAZORPAY_WEBHOOK_SECRET)) problems.push("RAZORPAY_WEBHOOK_SECRET is required with RAZORPAY_KEY_ID (legacy Razorpay webhooks are verified with it)");
   }
   // A public demo must not enable mock adapters: they approve any payment and
-  // relax webhook-secret checks. Razorpay test keys (rzp_test_) are the simulated
-  // path that still verifies signatures and cannot charge real money.
+  // relax webhook-secret checks.
   if (env.DEMO_DEPLOYMENT === "true" && mocksAllowed) {
-    problems.push("ALLOW_MOCK_PROVIDERS must not be true when DEMO_DEPLOYMENT is set (mock adapters approve any payment and are not for a public demo; use Razorpay test keys instead)");
+    problems.push("ALLOW_MOCK_PROVIDERS must not be true when DEMO_DEPLOYMENT is set (mock adapters approve any payment and are not for a public demo)");
   }
   if (isSet(env.DEMO_STAFF_PASSWORD) || env.DEMO_DATABASE_CONFIRMED === "true") {
     problems.push("DEMO_STAFF_PASSWORD and DEMO_DATABASE_CONFIRMED are seed-CLI settings and must not be set on the running app");
@@ -144,8 +158,6 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
   if (liveRazorpay && (mocksAllowed || env.DEMO_DEPLOYMENT === "true")) {
     problems.push("RAZORPAY_KEY_ID must not be a live key when ALLOW_MOCK_PROVIDERS or DEMO_DEPLOYMENT is set (simulated/test payments only)");
   }
-  // The Razorpay emulator override exists for automated tests only.
-  if (isSet(env.RAZORPAY_API_BASE) && !mocksAllowed) problems.push("RAZORPAY_API_BASE (test emulator) must not be set in production");
 
   // Vercel has no durable in-process worker; cron invokes /api/cron/worker with this secret.
   if (env.VERCEL === "1") {
@@ -182,6 +194,8 @@ export function validateProductionEnv(env: NodeJS.ProcessEnv = process.env): voi
   if (isSet(env.LOG_FORMAT) && !["json", "pretty"].includes(env.LOG_FORMAT)) problems.push('LOG_FORMAT must be "json" or "pretty"');
   for (const p of [
     intProblem(env, "TRUSTED_PROXY_HOPS", 1, 10),
+    intProblem(env, "GUEST_FULFILMENT_WINDOW_MINUTES", 1, 240),
+    intProblem(env, "PAYMENT_RECHECK_MAX_AGE_HOURS", 1, 168),
     intProblem(env, "SLOW_REQUEST_MS", 1),
     intProblem(env, "SHUTDOWN_TIMEOUT_MS", 1000, 600_000),
     intProblem(env, "SHUTDOWN_DELAY_MS", 0, 120_000),
@@ -215,8 +229,11 @@ export function productionEnvWarnings(env: NodeJS.ProcessEnv = process.env): str
       if (isSet(v) && DEV_SECRET_PLACEHOLDERS.includes(v.trim().toLowerCase())) w.push(`${name} uses a development placeholder value`);
     }
   }
-  if (env.PAYMENT_PROVIDER?.trim().toLowerCase() === "razorpay" && env.RAZORPAY_KEY_ID?.trim().startsWith("rzp_test_")) w.push("RAZORPAY_KEY_ID is a TEST key: online payments are Razorpay test-mode payments, no real money is collected (staging only)");
-  if (isSet(env.RAZORPAY_API_BASE)) w.push("RAZORPAY_API_BASE is set: Razorpay calls go to a test emulator, not to Razorpay");
+  const paymentProvider = env.PAYMENT_PROVIDER?.trim().toLowerCase();
+  if (paymentProvider === "razorpay") w.push("PAYMENT_PROVIDER=razorpay: Razorpay is retired for new online payments, so guest QR ordering reports online payment as unavailable (Razorpay keys still settle and refund older Razorpay payments). Set PAYMENT_PROVIDER=sbi_upi once SBI is live");
+  if (paymentProvider === "sbi_upi") w.push("PAYMENT_PROVIDER=sbi_upi: the SBI UPI adapter is not implemented yet (waiting for SBI's API specification and UAT), so guest QR ordering reports online payment as unavailable");
+  if (paymentProvider === "upi_emulator") w.push("PAYMENT_PROVIDER=upi_emulator: online payments go to the local TEST bank emulator, no real money (tests only)");
+  if (isSet(env.RAZORPAY_KEY_ID) && env.RAZORPAY_KEY_ID.trim().startsWith("rzp_test_")) w.push("RAZORPAY_KEY_ID is a TEST key: legacy Razorpay payments on this deployment are test-mode payments");
   const db = env.DATABASE_URL ?? "";
   if (db.startsWith("file:") && env.AHAROS_DESKTOP !== "1") w.push("DATABASE_URL is SQLite: the server deployment target is PostgreSQL (docs/production-infrastructure.md)");
   if (env.AHAROS_DESKTOP !== "1") {

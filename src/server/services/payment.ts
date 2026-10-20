@@ -29,7 +29,8 @@ import { issueInvoiceTx, issueCreditNoteTx } from "@/server/services/invoicing";
 import { reverseOrderLoyaltyTx } from "@/server/services/loyalty";
 import { afterOrderPaidTx } from "@/server/services/growthHooks";
 import { reverseReferralRewardTx } from "@/server/services/referrals";
-import { getPaymentProvider, GATEWAY_PROVIDERS } from "@/integrations/payment";
+import { getPaymentProvider, GATEWAY_PROVIDERS, type PaymentProvider, type VerifyResult } from "@/integrations/payment";
+import { assertCounterPaymentAllowed, fulfilmentWindowMs, isGuestQrOrder, isPastFulfilmentWindow } from "@/server/services/kitchenGate";
 import { D, money, moneyAmount, type Decimalish } from "@/domain/money";
 
 type Tx = Prisma.TransactionClient;
@@ -116,6 +117,8 @@ async function createPaymentTx(ctx: AccessContext, orderId: string, data: z.infe
     const order = await tx.order.findUnique({ where: { id: orderId } });
     if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
     assertCan(ctx, "payment.take", order.outletId);
+    // A guest QR order waiting for its online payment is settled only by a gateway (kitchenGate.ts).
+    assertCounterPaymentAllowed(order, gatewayFor(data.provider) !== null);
     // An early check only: PENDING payments are not counted (none can be
     // cancelled, so an abandoned one would block the order forever). The
     // binding check is in verifyPayment, where a payment becomes SUCCESS.
@@ -140,15 +143,29 @@ async function createPaymentTx(ctx: AccessContext, orderId: string, data: z.infe
   }, { lockKey });
 }
 
+/** The gateway adapter for a payment's provider, or null for a counter payment (cash, card terminal, till UPI). */
+function gatewayFor(provider: string | null | undefined): PaymentProvider | null {
+  return provider && GATEWAY_PROVIDERS.has(provider) ? getPaymentProvider(provider) : null;
+}
+
 /**
  * Verify a payment server-side and, if the order is now fully paid, mark it PAID
  * and consume inventory. Returns the updated payment plus whether the order was
  * settled.
+ *
+ * The gateway is asked first, OUTSIDE any database transaction and outside the
+ * outlet's settlement queue: a slow or timing-out gateway must not hold the
+ * outlet lock or a database connection. Its answer is then applied in one short
+ * transaction that re-reads the payment and applies it only while the payment
+ * is still in the state, with the reference and amount, that the gateway was
+ * asked about (compare-and-set). A gateway error or timeout changes nothing:
+ * the payment stays PENDING.
  */
 export async function verifyPayment(ctx: AccessContext, paymentId: string, opts: { providerRef?: string; payload?: unknown } = {}, db: Client = prisma) {
   let result: VerifyPaymentResult;
   try {
-    result = await serialByOutlet(db, paymentId, () => verifyPaymentTx(ctx, paymentId, opts, db));
+    const check = await askGateway(ctx, paymentId, opts, db);
+    result = await serialByOutlet(db, paymentId, () => verifyPaymentTx(ctx, paymentId, opts, check, db));
   } catch (e) {
     // Domain refusals (4xx: not found / forbidden / overpayment) are client errors; anything else is a payment-path failure.
     if (!((e as { status?: number })?.status && (e as { status: number }).status < 500)) {
@@ -172,6 +189,28 @@ export async function verifyPayment(ctx: AccessContext, paymentId: string, opts:
   return result;
 }
 
+/** What the gateway said about a payment, and the reference and amount it was asked about. */
+type GatewayCheck = { providerRef: string | null; amount: string; result: VerifyResult };
+
+/**
+ * Ask the gateway about a PENDING (or FAILED, possibly captured late) gateway
+ * payment. Reads only: no transaction, no lock. Null for counter payments and
+ * for payments already decided (verifyPaymentTx returns those as they are).
+ */
+async function askGateway(ctx: AccessContext, paymentId: string, opts: { providerRef?: string; payload?: unknown }, db: Client): Promise<GatewayCheck | null> {
+  const payment = await db.payment.findUnique({ where: { id: paymentId }, select: { organizationId: true, outletId: true, orderId: true, status: true, provider: true, providerRef: true, amount: true } });
+  if (!payment || payment.organizationId !== ctx.organizationId) throw new NotFoundError("Payment not found");
+  assertCan(ctx, "payment.take", payment.outletId);
+  const gateway = gatewayFor(payment.provider);
+  if (!gateway || (payment.status !== "PENDING" && payment.status !== "FAILED")) return null;
+  // The reference stored when the checkout was created is authoritative: a
+  // client-supplied one may not redirect verification to another gateway order.
+  if (payment.providerRef && opts.providerRef && opts.providerRef !== payment.providerRef) throw new ValidationError("Payment reference does not match this payment");
+  const providerRef = payment.providerRef ?? opts.providerRef ?? null;
+  const result = await gateway.verify({ orderId: payment.orderId, amount: Number(payment.amount), providerRef: providerRef ?? undefined, payload: opts.payload });
+  return { providerRef, amount: money(payment.amount).toString(), result };
+}
+
 /**
  * Settlement-path transactions (verify -> invoice number, refund -> credit-note
  * number) at one outlet queue in-process instead of colliding on the outlet's
@@ -191,9 +230,13 @@ export type VerifyPaymentResult = {
   pending?: boolean;
   /** The gateway captured money the order can no longer take (raised as an anomaly; refund it). */
   unapplied?: boolean;
+  /** Verified, but after the fulfilment window: the money is recorded, the order waits for staff (not sent to the kitchen). */
+  heldForReview?: boolean;
 };
 
-function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { providerRef?: string; payload?: unknown }, db: Client): Promise<VerifyPaymentResult> {
+const CHANGED_DURING_VERIFY = "The payment changed while it was being verified; check it again";
+
+function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { providerRef?: string; payload?: unknown }, check: GatewayCheck | null, db: Client): Promise<VerifyPaymentResult> {
   return runInTx(db, async (tx) => {
     const payment = await tx.payment.findUnique({ where: { id: paymentId }, include: { order: true } });
     if (!payment || payment.organizationId !== ctx.organizationId) throw new NotFoundError("Payment not found");
@@ -202,15 +245,22 @@ function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { provider
     // Gateway payments are verified with the gateway. Counter payments (cash,
     // card terminal, UPI QR at the till — no gateway provider on the payment)
     // are attested by the staff member holding payment.take at this outlet.
-    const gateway = payment.provider && GATEWAY_PROVIDERS.has(payment.provider) ? getPaymentProvider(payment.provider) : null;
+    const gateway = gatewayFor(payment.provider);
     // A FAILED gateway payment can still turn out captured: the guest retried
     // inside the same checkout after a declined attempt, or the capture arrived
     // late. Only the gateway can say so — it is asked again, never the client.
     const recovering = payment.status === "FAILED" && gateway !== null;
+    // Already decided (a concurrent verification or webhook got here first): nothing to apply.
     if (payment.status !== "PENDING" && !recovering) return { payment, orderSettled: false };
-    // The reference stored when the checkout was created is authoritative: a
-    // client-supplied one may not redirect verification to another gateway order.
-    if (gateway && payment.providerRef && opts.providerRef && opts.providerRef !== payment.providerRef) throw new ValidationError("Payment reference does not match this payment");
+    if (gateway) {
+      // The gateway's answer (askGateway) is about the payment as it was read before the call: it is
+      // applied only to that payment — same amount, same reference.
+      if (!check || !money(payment.amount).eq(D(check.amount)) || (payment.providerRef !== null && payment.providerRef !== check.providerRef)) throw new ConflictError(CHANGED_DURING_VERIFY);
+      if (opts.providerRef && payment.providerRef && opts.providerRef !== payment.providerRef) throw new ValidationError("Payment reference does not match this payment");
+    } else {
+      // A guest QR order waiting for its online payment is never settled by staff attestation (kitchenGate.ts).
+      assertCounterPaymentAllowed(payment.order, false);
+    }
 
     // Successful payments must never exceed the order total. Re-check the
     // balance here, in the transaction that makes the payment SUCCESS (several
@@ -231,10 +281,21 @@ function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { provider
       notPayable = e;
     }
 
-    const result = gateway
-      ? await gateway.verify({ orderId: payment.orderId, amount: Number(payment.amount), providerRef: payment.providerRef ?? opts.providerRef, payload: opts.payload })
-      : { verified: D(payment.amount).gt(0), providerRef: undefined as string | undefined, pending: false };
+    const result: VerifyResult = gateway && check ? check.result : { verified: D(payment.amount).gt(0), providerRef: undefined, pending: false };
 
+    // Compare-and-set on the status read above: of two verifications that both got past the reads, one applies.
+    const claim = async (data: Prisma.PaymentUpdateManyMutationInput) => {
+      const moved = await tx.payment.updateMany({ where: { id: paymentId, status: payment.status }, data });
+      if (moved.count !== 1) throw new ConflictError(CHANGED_DURING_VERIFY);
+      return tx.payment.findUniqueOrThrow({ where: { id: paymentId } });
+    };
+
+    // The bank says "paid", but not for this payment as we created it (merchant / reference / amount /
+    // currency): never accepted. It stays PENDING — money may have moved — and a person must look.
+    if (result.mismatch && !result.verified) {
+      await raiseAnomaly(tx, ctx, { type: "RECONCILIATION_MISMATCH", severity: "HIGH", outletId: payment.outletId, entityType: "Payment", entityId: payment.id, message: `${payment.provider} reported a successful payment for ${payment.providerRef ?? "this payment"} that does not match RESTORA's payment of ₹${money(payment.amount).toFixed(2)} for order #${payment.orderId.slice(-6).toUpperCase()} (${result.mismatch}). It was NOT accepted as paid and the order was not sent to the kitchen. Check the bank statement, then refund or reconcile it.` });
+      return { payment, orderSettled: false, pending: true };
+    }
     // Undecided at the gateway: nothing changes (no FAILED, no notification).
     if (result.pending && !result.verified) return { payment, orderSettled: false, pending: true };
     if (!result.verified) {
@@ -244,20 +305,17 @@ function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { provider
       // Captured at the gateway, but the order is already settled / cancelled
       // (paid another way meanwhile): the money must go back to the guest.
       await raiseAnomaly(tx, ctx, { type: "RECONCILIATION_MISMATCH", severity: "HIGH", outletId: payment.outletId, entityType: "Payment", entityId: payment.id, message: `Gateway ${payment.provider} captured ₹${money(payment.amount).toFixed(2)} (${payment.providerRef ?? "no reference"}) for order #${payment.orderId.slice(-6).toUpperCase()}, which cannot take it (${notPayable.message}). Refund the guest at the gateway.` });
-      const closed = payment.status === "PENDING" ? await tx.payment.update({ where: { id: paymentId }, data: { status: "FAILED" } }) : payment;
+      const closed = payment.status === "PENDING" ? await claim({ status: "FAILED" }) : payment;
       await writeAudit(tx, ctx, { action: "PAYMENT", entityType: "Payment", entityId: paymentId, outletId: payment.outletId, before: { status: payment.status }, after: { status: closed.status, via: payment.provider, unappliedCapture: true } });
       return { payment: closed, orderSettled: false, unapplied: true };
     }
 
-    const updated = await tx.payment.update({
-      where: { id: paymentId },
-      data: {
-        status: result.verified ? "SUCCESS" : "FAILED",
-        providerRef: result.providerRef ?? payment.providerRef,
-        verifiedAt: result.verified ? new Date() : null,
-      },
+    const updated = await claim({
+      status: result.verified ? "SUCCESS" : "FAILED",
+      providerRef: result.providerRef ?? payment.providerRef,
+      verifiedAt: result.verified ? new Date() : null,
     });
-    await writeAudit(tx, ctx, { action: "PAYMENT", entityType: "Payment", entityId: paymentId, outletId: payment.outletId, before: recovering ? { status: "FAILED" } : undefined, after: { status: updated.status, via: gateway ? gateway.name : "counter", ...(recovering ? { recovered: "gateway confirmed capture" } : {}) } });
+    await writeAudit(tx, ctx, { action: "PAYMENT", entityType: "Payment", entityId: paymentId, outletId: payment.outletId, before: recovering ? { status: "FAILED" } : undefined, after: { status: updated.status, via: gateway ? gateway.name : "counter", ...(result.bankRef ? { bankRef: result.bankRef } : {}), ...(recovering ? { recovered: "gateway confirmed capture" } : {}) } });
 
     if (!result.verified) {
       // Cashiers see failed attempts in the alert centre (the guest / cashier retries; nothing is charged).
@@ -275,24 +333,47 @@ function verifyPaymentTx(ctx: AccessContext, paymentId: string, opts: { provider
     let orderSettled = false;
     if (paidTotal.gte(orderTotal) && orderTotal.gt(0)) {
       if (canTransition(ORDER_TRANSITIONS, payment.order.status as OrderStatus, "PAID") || SETTLEABLE.has(payment.order.status)) {
-        // A guest's prepaid QR order that staff have not accepted yet: the
-        // verified payment is the confirmation — send it to the kitchen now
-        // (same KOT routing as submitOrder), or the food would never be made.
+        // A guest's prepaid QR order: the verified payment is what releases it
+        // to the kitchen (same KOT routing as submitOrder; kitchenGate.ts checks
+        // that verified online payments cover the total), or the food would never be made.
         if (payment.order.status === "OPEN" && payment.order.source === "QR") {
+          // ...unless it arrived after the fulfilment window: the guest may have left or ordered again.
+          // The money stays recorded (SUCCESS above); the order waits, unsent, for staff to send or refund it.
+          if (isGuestQrOrder(payment.order) && isPastFulfilmentWindow(payment.order)) {
+            await holdLatePaidOrderTx(tx, ctx, payment.order, updated);
+            return { payment: updated, orderSettled: false, heldForReview: true };
+          }
           const kots = await createKOTsForOrder(tx, ctx, payment.orderId);
           await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Order", entityId: payment.orderId, outletId: payment.outletId, before: { status: "OPEN" }, after: { status: "PAID", kots: kots.map((k) => k.number), via: "prepaid" } });
         }
-        await tx.order.update({ where: { id: payment.orderId }, data: { status: "PAID", paidAt: new Date(), billedAt: payment.order.billedAt ?? new Date() } });
-        // Sequential invoice + frozen tax breakdown, in the same transaction (gapless numbering).
-        await issueInvoiceTx(tx, ctx, payment.orderId);
-        await consumeInventoryForOrder(tx, ctx, payment.orderId);
-        await afterOrderPaidTx(tx, ctx, payment.orderId); // loyalty, referral reward, feedback request: idempotent, no-ops without a customer
-        if (payment.order.tableId) await releaseTableTx(tx, payment.order.tableId, payment.orderId);
+        await settleOrderTx(tx, ctx, payment.order);
         orderSettled = true;
       }
     }
     return { payment: updated, orderSettled };
   });
+}
+
+/**
+ * Mark a fully paid order PAID, with its sequential invoice (frozen tax breakdown), inventory consumption,
+ * loyalty / referral / feedback hooks and the table released — all in the caller's transaction. Used when a
+ * verification completes the bill, and when staff send a held, already-paid guest QR order (orders.submitOrder).
+ */
+export async function settleOrderTx(tx: Tx, ctx: AccessContext, order: { id: string; billedAt: Date | null; tableId: string | null }) {
+  await tx.order.update({ where: { id: order.id }, data: { status: "PAID", paidAt: new Date(), billedAt: order.billedAt ?? new Date() } });
+  await issueInvoiceTx(tx, ctx, order.id);
+  await consumeInventoryForOrder(tx, ctx, order.id);
+  await afterOrderPaidTx(tx, ctx, order.id); // loyalty, referral reward, feedback request: idempotent, no-ops without a customer
+  if (order.tableId) await releaseTableTx(tx, order.tableId, order.id);
+}
+
+/** A late verified payment: record why the order did not go to the kitchen, and ask staff to decide (send or refund). */
+async function holdLatePaidOrderTx(tx: Tx, ctx: AccessContext, order: { id: string; outletId: string; createdAt: Date; total: Prisma.Decimal }, payment: { id: string; provider: string | null; providerRef: string | null; amount: Prisma.Decimal }) {
+  const ref = `#${order.id.slice(-6).toUpperCase()}`;
+  const minutes = Math.round((Date.now() - order.createdAt.getTime()) / 60_000);
+  await raiseAnomaly(tx, ctx, { type: "LATE_PAYMENT_HELD", severity: "HIGH", outletId: order.outletId, entityType: "Order", entityId: order.id, message: `Guest QR order ${ref}: the online payment of ₹${money(payment.amount).toFixed(2)} (${payment.provider ?? "gateway"} ${payment.providerRef ?? ""}) was verified ${minutes} min after the order was placed, past the ${fulfilmentWindowMs() / 60_000}-minute fulfilment window. The money is recorded; the order was NOT sent to the kitchen. Check with the guest, then send it from the POS or refund the payment.` });
+  await createNotificationTx(tx, ctx, { outletId: order.outletId, type: "NEW_ORDER", title: `Paid late · order ${ref} needs a decision`, body: `₹${money(payment.amount).toFixed(2)} received ${minutes} min after ordering. Not sent to the kitchen: send it from the POS, or refund it.` });
+  await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Order", entityId: order.id, outletId: order.outletId, before: { status: "OPEN" }, after: { status: "OPEN", heldForReview: true, reason: "payment verified after the fulfilment window", paymentId: payment.id, minutesAfterOrder: minutes } });
 }
 
 const refundSchema = z.object({ amount: moneyAmount(z.number().positive()), reason: z.string().optional(), idempotencyKey: z.string().min(8).max(100).optional() });
