@@ -7,8 +7,8 @@
 | Same suite, PostgreSQL 16 | `TEST_DATABASE_URL=postgresql://…/<fresh db> npm run test:pg` | 162 files (159 run, 3 skipped), 1604 passed, 31 skipped, 0 failed |
 | Browser E2E (production build), SQLite | `npm run e2e` | 133/133 (5 sign-in setups + 128 specs), CI |
 | Browser E2E, PostgreSQL 16 | `E2E_DATABASE_URL=postgresql://…/<fresh, empty db> npm run e2e:test` | 133/133, CI (PostgreSQL 16 service container, committed migrations, demo seed) |
-| Investor business flow (Razorpay emulator) | `npm run e2e:investor` | 3/3, CI |
-| Coders' Cafe 30-step customer / investor acceptance (fresh database, Razorpay emulator, five attack families) | `npm run e2e:acceptance` | 7 tests = steps 1-30 + final sweep, all passing (2026-10-12), CI; evidence in `docs/acceptance-coders-cafe.md` |
+| Investor business flow (UPI bank emulator) + Coders' Cafe draft recipe screens | `npm run e2e:investor` | 4 tests, CI |
+| Coders' Cafe 30-step customer / investor acceptance (fresh database, UPI bank emulator, five attack families) | `npm run e2e:acceptance` | 7 tests = steps 1-30 + final sweep, all passing (2026-10-12), CI; evidence in `docs/acceptance-coders-cafe.md` |
 | Desktop E2E + packaged-app verification | `npm run desktop:build && npm run desktop:e2e`; `npx electron-builder --dir && npm run desktop:verify` | Windows, macOS arm64 and macOS x64 in CI: build, E2E, packaging (fuses, asar integrity, upgrade from the previous release, launch attacks), DMG |
 | Backup / restore drill, load test | `node scripts/ops/backup-drill.mjs`, `node scripts/ops/load-test.mjs` | 2026-10-09 on the current schema: drill 10/10; load run 0 correctness violations (`docs/production-infrastructure.md` §7.1, §8.0). PITR drill and post-deploy smoke last run 2026-10-05 |
 
@@ -143,7 +143,7 @@ No API mocking. Requires `npx playwright install chromium` once.
 | `catalog.spec.ts` | menu item → POS; outlet price override; sold-out enforced server-side; recipe draft → cost → approve → plate cost |
 | `guests.spec.ts` | loyalty on paid orders; reservation book → confirm → seat → complete |
 | `rbac.spec.ts` | page + API refusals per role, outlet isolation, org-wide vs outlet authority, deactivation (session killed, sign-in refused, audited) |
-| `qr-transaction.spec.ts` (Phase 2) | three parties at once — guest phone (no account) scans the table QR → menu → modifiers → order; POS sees the incoming QR order and accepts it (KOT); KDS Accept → Start → Ready → Served while the guest page follows; guest pays (test gateway: decline then approve); guest receipt == POS reprint; exact stock consumption and sales delta. Prepaid order reaches the KDS without staff; invalid QR; price tampering (422); cross-origin (403); a lost response + refresh replays the same order |
+| `qr-transaction.spec.ts` (Phase 2) | three parties at once — guest phone (no account) scans the table QR → menu → modifiers → order (nothing in the kitchen yet); guest pays online (test gateway: decline — still no KOT — then approve) → exactly one KOT; POS finds the paid order under Recent; KDS Accept → Start → Ready → Served while the guest page follows; guest receipt == POS reprint; exact stock consumption and sales delta. Prepaid order reaches the KDS without staff; invalid QR; price tampering (422); cross-origin (403); a lost response + refresh replays the same order |
 
 The E2E database is only ever modified through the app, except `e2eDb()` in
 `e2e/helpers.ts`, used solely to simulate the passage of time (expiring one session).
@@ -154,12 +154,12 @@ and one export test injects a simulated DB fault to exercise the FAILED path.
 
 ## Customer / investor acceptance (`npm run e2e:acceptance`)
 `playwright.acceptance.config.ts`, `e2e/acceptance/`. Its own database (`prisma/e2e-acceptance.db`, deleted and rebuilt by `prepare-db.ts` on every run: migrations,
-the Coders' Cafe dataset, the outlet's GSTIN, the Razorpay account binding, a recipe with stocked ingredients for Loaded Veg Nachos, and a second, unrelated restaurant for
+the Coders' Cafe dataset, the outlet's GSTIN, the test bank's merchant binding, a recipe with stocked ingredients for Loaded Veg Nachos, and a second, unrelated restaurant for
 the cross-tenant checks), its own ports, the production build. One test walks the order from a phone scanning table T07 to a served, invoiced, stock-consumed,
 reported order (steps 1-25); one test per attack family follows (26 failed payment, 27 duplicate payment / webhook, 28 duplicate submission, 29 amount, 30 restaurant /
 outlet / table identifiers); a last test proves the books still hold exactly the one paid order after all of them. Every step records what it observed to
-`e2e/.evidence-acceptance/acceptance-evidence.{json,md}` (+ screenshots); CI uploads that folder as an artifact. Razorpay is the emulator, so this proves RESTORA's side
-of the contract, not Razorpay's. The guest write limit (60 a minute per address) applies to the attacks too: each simulated visitor uses its own address.
+`e2e/.evidence-acceptance/acceptance-evidence.{json,md}` (+ screenshots); CI uploads that folder as an artifact. The bank is the local UPI emulator (RESTORA's own test
+format), so this proves RESTORA's side of a direct-bank checkout, not SBI's. The guest write limit (60 a minute per address) applies to the attacks too: each simulated visitor uses its own address.
 
 ## Core transaction (Phase 2)
 | Command | Covers |
@@ -193,7 +193,14 @@ The SQLite test database (`vitest.global-setup.ts`) and the E2E database (`e2e/p
 | `npx vitest run tests/api/mobile-routes.test.ts` | Phase 6 over HTTP: rounds with Idempotency-Key, removal, bill, mobile read models (403 / 404 / 422), per-user notification reads, staff admin behind reauth, privilege escalation, deactivation ends the session |
 | `npx vitest run tests/ui/mobile.test.tsx` | captain and manager phone screens: board, keyed send reused on retry, round, serve, bill, offline banner, alerts, staff cards |
 | `e2e/staff-mobile.spec.ts` | phone viewport: captain end to end with kitchen + cashier, manager incl. staff admin, server-side refusals |
-| `npx vitest run tests/integrations/razorpay.test.ts` | Phase 7: Razorpay adapter contract (no network): checkout amount, checkout signature + capture checks, order-status verification, bounded retries / 4xx / malformed / timeout, webhook signature + parsing, refunds, settlements, credential redaction |
+| `npx vitest run tests/integrations/razorpay.test.ts` | Razorpay adapter, LEGACY only (no network): cannot create / reopen a checkout; checkout signature + capture checks and order-status verification for older payments, bounded retries / 4xx / malformed / timeout, webhook signature + parsing, refunds, settlements |
+| `npx vitest run tests/integrations/upi-direct-bank.test.ts` | Direct-bank UPI boundary (LOCAL UNIT / EMULATOR): final-success / merchant / reference / amount / INR decision, the emulator adapter over real HTTP (QR creation, status, timeout / 5xx / malformed, callback HMAC, refunds), the SBI adapter refusing everything, Razorpay never a checkout provider, mocks refused in production |
+| `npx vitest run tests/domain/upi-checkout-flow.test.ts` | Guest QR order → bank QR → verified payment → one payment / invoice / KOT set, against the emulator: pending, failure, expiry, mismatch, forged / replayed callbacks, timeout + recovery, closed browser, races (callback + status check + worker; two phones), late payment held for staff (send or refund), cancelled order, split bill, bank down during QR creation |
+| `npx vitest run tests/domain/bill-printing.test.ts` | Bill / receipt: counter-POS paid bill (lines, discount, tax after discount, payment, invoice, INR), unpaid / part-paid / cancelled never shown as paid, print + duplicate + reasoned reprint create no payment / invoice / stock movement / KOT, 58 mm and 80 mm ESC/POS widths, no receipt printer = clear refusal, simulated printer never "printed" |
+| `e2e/bill-print.spec.ts` | `/pos/bill/:id` in a real browser: unpaid BILL vs paid RECEIPT with invoice number, Print button calls the browser print once, print media hides the toolbar, reprint changes nothing (no physical printer: `window.print` is counted) |
+| `npx vitest run tests/domain/coders-cafe-recipes.test.ts` | Coders' Cafe draft recipes: every draft names a board item (or is listed as not covered), valid ingredients / quantities, notes label estimates and never claim allergen-free, seeding idempotent and the menu byte-for-byte unchanged, estimated drafts never consumed or costed and not approvable until confirmed |
+| `npx vitest run tests/domain/payment-recovery.test.ts` | Pending-payment recovery: evidence rules, throttling, starvation, concurrent workers (claims), call / time budgets, and the unmocked `/api/cron/worker` and `/api/cron/payments` → recovery chain |
+| `npx vitest run tests/domain/coders-cafe-upi.test.ts` | The real Coders' Cafe menu through the bank-QR guest flow (emulator) with every bank failure path |
 | `npx vitest run tests/integrations/phase7-units.test.ts` | ESC/POS rendering, printer SSRF guard, phone normalization / masking, Twilio status mapping, accounting CSV / Tally formats, bounded backoff |
 | `npx vitest run tests/domain/integrations-p7.test.ts` | gateway checkout / webhooks / refunds end to end, printing + drawer over a real TCP endpoint, messaging outbox (MOCK + Twilio contract), aggregator cancellation + status push, accounting export, integration management security |
 | `npx vitest run tests/api/integrations-routes.test.ts` | Phase 7 routes over HTTP: RBAC, re-confirmation, write-only secrets, SSRF 422, cross-tenant 404, messaging webhook signature |

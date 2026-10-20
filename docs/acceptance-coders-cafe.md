@@ -1,5 +1,11 @@
 # Coders' Cafe customer / investor acceptance test
 
+> **2026-10-20:** the spec (`e2e/acceptance/acceptance.spec.ts`) was converted from
+> the Razorpay emulator to the direct-bank UPI QR emulator
+> (`tests/support/upiBankEmulator.ts`) when Razorpay was retired for new payments.
+> The evidence recorded below is from the **2026-10-12 Razorpay-emulator run** and
+> is kept as history; re-run `npm run e2e:acceptance` for current evidence.
+
 _Run of 2026-10-12 on a fresh database, on the branch merged with `main` (`a80caa9`) (`prisma/e2e-acceptance.db`, rebuilt from the committed migrations for every run), production build, SQLite. Command: `npm run build && npm run e2e:acceptance`. Result: **7 tests passed, 31 of 31 recorded steps PASS** (steps 1-30 and the final sweep). The suite is `e2e/acceptance/acceptance.spec.ts`; it is also a CI step, and CI uploads the full evidence (every observation, screenshots) as the artifact `acceptance-evidence-coders-cafe`._
 
 ## The order, by identifier
@@ -34,7 +40,7 @@ Step 20 failed the first time it was run. Nothing in the application ever wrote 
 
 | # | Step | Result | Evidence (observed in this run) |
 |---|---|---|---|
-| 1 | Open the Coders' Cafe table ordering page | PASS | the link on T07's QR dialog (`http://localhost:3230/t/ccZivJX3UARCmdym9KSjygqB`) opens with HTTP 200; page title `Coders' Cafe · Table T07` |
+| 1 | Open the Coders' Cafe table ordering page | PASS | the link on T07's QR dialog (`http://localhost:3230/t/<T07 token>`, token from that run's disposable database, redacted) opens with HTTP 200; page title `Coders' Cafe · Table T07` |
 | 2 | Use a real seeded table (T07) | PASS | table row `7e278a1dbfa766b3fe8fa9661b3041c0` code T07 of outlet CC01; the token in the link is that row's `qrToken`; the server answers `table: T07`, restaurant Coders' Cafe |
 | 3 | Browse the live menu | PASS | 64 items from the server = 64 active items in the database = 64 Add buttons on the phone; Loaded Veg Nachos ₹150 on screen, in the API and in the database |
 | 4 | Add an item | PASS | Loaded Veg Nachos added; sticky bar `1 item · ₹157.50 incl. GST View cart` |

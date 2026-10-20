@@ -139,6 +139,27 @@ rebuild, and regenerate the manifest (size + sha256) from that exact file; the
 test then passes against it. The test and the existing installers were left
 unchanged.
 
+**Resolved locally 2026-10-20.** The manifest is the correct record: the draft
+GitHub release `v1.0.0-rc.1` (created 2026-10-10, not published) holds exactly
+those two files, and GitHub's asset digests equal the manifest's sha256 values
+(Setup `67ec34c5…`, Portable `3a1415ad…`). The manifest was therefore kept. The
+mislabelled 2026-10-15 rebuild was moved, not deleted, to
+`dist-desktop/unreleased-2026-10-15-build-labelled-rc.1/` (with a README holding
+both sets of sizes/hashes), so `dist-desktop/` no longer offers a file under the
+rc.1 name that is not rc.1. No rc.2 was built: the next release's contents are
+the uncommitted review work, which is not yet approved. When it is:
+
+1. Bump `package.json` `version` to `1.0.0-rc.2` (and the rc.1 literals in
+   `tests/site/website.test.ts` together with the manifest).
+2. `npm run desktop:dist` on a clean checkout of the approved commit (no dev server
+   running; see the desktop build hazards in this file).
+3. `npm run desktop:verify`, then `node scripts/site/release-manifest.mjs`.
+4. Independently check `certutil -hashfile dist-desktop\RESTORA-Setup-1.0.0-rc.2.exe SHA256`
+   (and Portable) against the manifest, upload both to a new draft release, and
+   compare GitHub's asset digests before publishing.
+5. The installed copy on this PC reports 1.0.0-rc.1 but is the 2026-10-15 build:
+   install rc.2 over it once released.
+
 ## Start-up time (measured 2026-10-19, installed 1.0.0-rc.1 build of 2026-10-15)
 Measured from the app's own `Startup timings` log line on this machine (8 GB RAM,
 under 1 GB free during the runs), with isolated data folders (`AHAROS_DATA_DIR`):

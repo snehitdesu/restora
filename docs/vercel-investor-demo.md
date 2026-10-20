@@ -57,20 +57,19 @@ Set these on the Vercel project. Values are never recorded here.
 | `AUTH_SECRET` | ≥ 32 random characters, **not** the development placeholder |
 | `CRON_SECRET` | ≥ random; Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`. Not `dev-cron-secret` |
 | `PUBLIC_BASE_URL` | `https://<this-deployment>` — table QR codes and callbacks |
-| `DEMO_DEPLOYMENT` | `true` — demo banner; **refuses live Razorpay keys** and **refuses `ALLOW_MOCK_PROVIDERS`** |
+| `DEMO_DEPLOYMENT` | `true` — demo banner; **refuses live (legacy) Razorpay keys** and **refuses `ALLOW_MOCK_PROVIDERS`** |
 
-### Required for simulated payments
+### Online payments on a public demo (changed 2026-10-20)
 
-Use **Razorpay test mode**. Do not set `ALLOW_MOCK_PROVIDERS` on this public demo. Mock adapters approve any payment and are refused together with `DEMO_DEPLOYMENT`. `rzp_test_…` keys only. Never `rzp_live_`.
-
-| Name | Why |
-|---|---|
-| `PAYMENT_PROVIDER` | `razorpay` |
-| `RAZORPAY_KEY_ID` | must start with `rzp_test_` |
-| `RAZORPAY_KEY_SECRET` | test secret |
-| `RAZORPAY_WEBHOOK_SECRET` | test webhook secret |
-
-Startup **refuses** `rzp_live_` when `ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT` is set.
+Razorpay test mode is **no longer available**: Razorpay is retired for new
+payments (`docs/payments-razorpay.md`), and the direct SBI UPI adapter is not
+implemented yet (`docs/sbi-upi-integration.md`). The test bank emulator and the
+mock adapters need `ALLOW_MOCK_PROVIDERS`, which a `DEMO_DEPLOYMENT` refuses.
+So on a public demo, online payment — and therefore guest QR ordering — shows
+as **unavailable**; demonstrate the POS, kitchen and back office with staff
+orders, and the QR checkout only on a non-public test deployment (with the
+emulator) or after SBI UAT. Startup still **refuses** `rzp_live_` keys when
+`ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT` is set.
 
 ### Strongly recommended
 
@@ -89,7 +88,7 @@ Startup **refuses** `rzp_live_` when `ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT`
 | `ALLOW_DEMO_SEED` | Startup refuses it in production (the seed wipes data) |
 | `ALLOW_MOCK_PROVIDERS` | Startup refuses it together with `DEMO_DEPLOYMENT` (mock adapters approve any payment) |
 | `RATE_LIMIT_DISABLED` | Startup refuses `true` |
-| `RAZORPAY_API_BASE` | Test emulator only |
+| `UPI_EMULATOR_*` / `PAYMENT_PROVIDER=upi_emulator` | Test bank only; refused in production |
 | `RAZORPAY_KEY_ID` live (`rzp_live_`) | Real charges |
 | `DEMO_DATABASE_CONFIRMED` / `DEMO_STAFF_PASSWORD` | CLI seed only, never the app |
 
@@ -161,7 +160,8 @@ local `Demo@12345` value):
    (migrations include `20261021100000_append_only_rate_limit`).
 4. Sign in as owner with the unique password from §3.
 5. Open Tables → a T01–T10 QR → guest menu (Coders' Cafe, unchanged) → cart →
-   order → Razorpay test-mode payment (no live charge) → kitchen KDS.
+   checkout shows "online payment isn't available" (expected until SBI is live);
+   place a staff order at the POS → kitchen KDS.
 6. Confirm the demo banner is visible and a live Razorpay key cannot be saved
    in this environment.
 

@@ -42,8 +42,11 @@ risky-but-legal setting. Messages name the variable only, never its value.
 | `INTEGRATION_SECRETS_KEY` | recommended | ≥ 32 chars when set; unset → derived from `AUTH_SECRET` (warning). |
 | `ALLOW_DEMO_SEED` | no | must not be `true`. |
 | `EXPORT_DIR`, `EXPORT_RUNNER`, `EXPORT_RETENTION_HOURS` | recommended | `EXPORT_DIR` unset → warning (temp dir). |
-| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | when `PAYMENT_PROVIDER=razorpay` | all three required; key id must be `rzp_test_…` / `rzp_live_…`; a test key under production → warning (staging only). Guide: `docs/payments-razorpay.md`. |
-| `RAZORPAY_API_BASE` | never in production | test emulator only; refused unless `ALLOW_MOCK_PROVIDERS=true` (the adapter then reports MOCK). |
+| `PAYMENT_PROVIDER` (online payment) | no | one of `sbi_upi` (not implemented yet: online payment reports unavailable, warning), `upi_emulator` / `mock` (refused unless `ALLOW_MOCK_PROVIDERS=true`), `razorpay` (retired for new payments: warning). Guide: `docs/payment-safety.md`, `docs/sbi-upi-integration.md`. |
+| `UPI_EMULATOR_BASE`, `UPI_EMULATOR_API_KEY`, `UPI_EMULATOR_MERCHANT_ID`, `UPI_EMULATOR_WEBHOOK_SECRET` | never in production | the local test bank; each refused unless `ALLOW_MOCK_PROVIDERS=true`. |
+| `GUEST_FULFILMENT_WINDOW_MINUTES` | recommended | 1–240, default 10: a payment verified later is recorded but the order is held for staff. |
+| `PAYMENT_RECHECK_MAX_AGE_HOURS` | no | 1–168, default 26: how long pending payments are re-asked at the bank. |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | only while legacy Razorpay payments remain | when any key is set all three are required; key id `rzp_test_…` / `rzp_live_…`. Legacy settlement / refunds only (`docs/payments-razorpay.md`). |
 | `PUBLIC_BASE_URL` | for provider callbacks, printed table QR codes, and password-reset links | must be https. Unset → the Tables screen's QR uses the address it is viewed on and warns (a desktop / localhost address is unreachable from guests' phones). Also required when Resend password-reset email is configured. |
 | `RESEND_API_KEY`, `RESEND_FROM` | together, for password-reset email | Optional. Both plus `PUBLIC_BASE_URL` must be set, or neither Resend variable. `RESEND_API_KEY` is a Resend key (`re_…`). `RESEND_FROM` is a verified sender (`Name <addr@host>` or a bare address). Unset → no reset email is sent (warning); a manager issues the link. A partial setup refuses to boot. |
 | `LOG_LEVEL` (`debug|info|warn|error`), `LOG_FORMAT` (`json|pretty`), `SLOW_REQUEST_MS` | no | validated. |

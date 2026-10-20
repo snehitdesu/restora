@@ -1,6 +1,77 @@
-# Razorpay online payments
+# Razorpay online payments — LEGACY ONLY
 
-How guests pay online from the table QR, how RESTORA decides a payment is real,
+> **Retired for new checkouts on 2026-10-20** (owner decision: direct SBI UPI
+> collection replaces it — `docs/sbi-upi-integration.md`,
+> `docs/payment-safety.md`). Everything below the line describes how Razorpay
+> payments made *before* that date are still resolved; nothing creates a new
+> Razorpay payment any more.
+
+## Legacy-only status
+
+| | |
+| --- | --- |
+| New Razorpay checkout | **Disabled.** `getCheckoutProvider()` refuses `razorpay`; the adapter has no `createCheckout` / `resumeCheckout`; `PAYMENT_PROVIDER=razorpay` boots with a warning and online payment shows *unavailable*. Razorpay is never a fallback. |
+| Browser checkout | **Removed:** `src/features/guest/razorpay.ts` (checkout.js loader), the Razorpay branch of the guest order page, the CSP / Permissions-Policy / COOP exceptions for `/o/*`. |
+| Retained (server-side only) | `RazorpayPaymentProvider.verify` / `getPaymentStatus` (guest status check, recovery job, webhooks), `POST /api/webhooks/payment/razorpay` + `x-razorpay-signature`, `refund`, `getSettlements` (reconciliation), the `RAZORPAY_*` env validation (all three required when any key is set), the tenant binding (`IntegrationConnection` provider `razorpay`). Historical `Payment` / `Refund` / `WebhookEvent` rows are untouched. |
+| Removed with the E2E conversion | `RAZORPAY_API_BASE` emulator hook, `tests/support/razorpayEmulator.ts`, `scripts/razorpay/sandbox-check.ts` (it created new Razorpay orders). |
+
+### Three different states (only the first two are true today)
+
+1. **New Razorpay checkout disabled — DONE (code, tests).** No code path creates
+   a Razorpay order or loads checkout.js; `PAYMENT_PROVIDER=razorpay` gives
+   "online payment unavailable", never a silent switch.
+2. **Legacy Razorpay support retained — DONE, deliberately.** Server-side
+   verify / status / signed webhook / refund / settlements stay so that any
+   older Razorpay payment can still be settled, refunded and reconciled.
+3. **Full Razorpay removal — NOT DONE and not yet safe.** It needs the
+   read-only production counts below (unknown today) and the conditions in
+   "When the residual code can be removed".
+
+### Outstanding obligations — could not be checked here
+
+The production database was not available to this work (read-only access was
+not established), so it is **unknown** whether Razorpay payments are still
+`PENDING` or may need refunds. Before removing the retained code, run on the
+production database (read-only):
+
+```sql
+-- Undecided Razorpay payments (the recovery job keeps asking Razorpay for 26 h after creation).
+SELECT count(*) FROM "Payment" WHERE provider = 'razorpay' AND status = 'PENDING';
+-- Captured Razorpay money that may still be refunded (refund window is the merchant's policy / Razorpay's limit).
+SELECT count(*), max("createdAt") FROM "Payment" WHERE provider = 'razorpay' AND status IN ('SUCCESS', 'PARTIAL');
+-- Unresolved anomalies about Razorpay captures (refund at Razorpay, then resolve).
+SELECT count(*) FROM "Anomaly" a JOIN "Payment" p ON p.id = a."entityId" WHERE a."entityType" = 'Payment' AND p.provider = 'razorpay' AND a.status IN ('OPEN', 'ACKNOWLEDGED');
+-- Refunds recorded in RESTORA without a Razorpay refund id (not confirmed at Razorpay).
+SELECT count(*) FROM "Refund" r JOIN "Payment" p ON p.id = r."paymentId" WHERE p.provider = 'razorpay' AND r."providerRef" IS NULL;
+-- Razorpay webhooks received but not processed (failed or never applied).
+SELECT status, count(*) FROM "WebhookEvent" WHERE provider = 'razorpay' AND status IN ('RECEIVED', 'FAILED') GROUP BY status;
+```
+
+Run these only on a connection that is **read-only** (a read-only database
+role or a read replica), never with the application's write credentials, and
+copy out the counts only — no payment ids, references, amounts or payloads.
+Status 2026-10-20: **BLOCKED** — no read-only Production connection exists for
+this work (the Production database connection itself is not on record).
+
+### When the residual code can be removed
+
+All of: the first and third queries return 0; the newest Razorpay `SUCCESS` /
+`PARTIAL` payment is older than the refund window the owner accepts (Razorpay
+allows refunds of a payment for a limited period — confirm the current limit in
+the Razorpay dashboard); the Razorpay dashboard's settlements reconcile with
+RESTORA for the last period; and the Razorpay webhook has been disabled in the
+Razorpay dashboard. Then delete `RazorpayPaymentProvider`, `razorpay` from
+`GATEWAY_PROVIDERS` / `LEGACY_PROVIDERS` / the webhook resolver / the env
+validation / `PAYMENT_PROVIDER_NAMES`, the `RAZORPAY_*` variables, and
+`tests/integrations/razorpay.test.ts` + the legacy section of
+`tests/domain/integrations-p7.test.ts`. Keep historical rows (provider
+`razorpay`) — they are the audit trail; reports read them as data.
+
+---
+
+*The rest of this page is the original description, kept for resolving legacy payments.*
+
+How guests paid online from the table QR, how RESTORA decides a payment is real,
 and what an operator must configure. Cash, card-terminal and UPI-at-the-till
 payments are counter payments (staff attest them with `payment.take`); this page
 is about the gateway.
@@ -30,7 +101,7 @@ which asks Razorpay.
 
 | Gateway says | Payment | Notes |
 |---|---|---|
-| order `created` / `attempted`, payment `created` / `authorized` | stays **PENDING** | Undecided: never failed, no alert. A refresh offers **Resume payment** (same Razorpay order). |
+| order `created` / `attempted`, payment `created` / `authorized` | stays **PENDING** | Undecided: never failed, no alert. The guest's status check, signed webhooks and the recovery job re-ask Razorpay (there is no **Resume payment** any more: checkout was retired). |
 | captured, amount and order match | **SUCCESS** → order PAID | Exactly once: invoice number, KOT, stock, loyalty are idempotent. |
 | `payment.failed` webhook / failed payment | **FAILED** | Cashier alert. A later capture (retry inside the same window, late UPI) **recovers** it to SUCCESS after Razorpay confirms the capture. |
 | captured, but the order was meanwhile paid another way / cancelled | **FAILED** + HIGH `RECONCILIATION_MISMATCH` anomaly "Refund the guest at the gateway" | Money is never applied twice; the webhook is acknowledged (no endless redelivery). |
@@ -41,16 +112,18 @@ which asks Razorpay.
 
 | Variable | Value |
 |---|---|
-| `PAYMENT_PROVIDER` | `razorpay` |
+| `PAYMENT_PROVIDER` | not `razorpay` any more: new checkouts use `sbi_upi` (unavailable until SBI is live). `razorpay` still boots, with a warning, and online payment shows *unavailable* |
 | `RAZORPAY_KEY_ID` | `rzp_test_…` (test mode, no real money) or `rzp_live_…` |
 | `RAZORPAY_KEY_SECRET` | the key secret (server only; never sent to the browser) |
 | `RAZORPAY_WEBHOOK_SECRET` | the secret you set on the webhook in the Razorpay dashboard |
 | `PUBLIC_BASE_URL` | the public https address (webhook URL, printed table QR codes) |
 
-Production startup refuses `PAYMENT_PROVIDER=razorpay` unless all three
-`RAZORPAY_*` values are present and the key id is a Razorpay key; test keys under
+Production startup refuses a partial Razorpay configuration: once
+`RAZORPAY_KEY_ID` or `RAZORPAY_KEY_SECRET` is set, all three `RAZORPAY_*` values
+must be present and the key id must be a Razorpay key. Test keys under
 `NODE_ENV=production` are logged as a warning at every boot (staging only).
-`RAZORPAY_API_BASE` (the automated-test emulator) is refused in production.
+`RAZORPAY_API_BASE` (the old test-emulator hook) is no longer read: the adapter
+always talks to `api.razorpay.com`.
 
 ### Razorpay dashboard
 
@@ -88,15 +161,11 @@ Mock providers are refused in production unless `ALLOW_MOCK_PROVIDERS=true`
 
 | What | How | Status |
 |---|---|---|
-| Adapter contract (signatures, amounts, pending, retries, refunds, settlements, no secret leakage) | `tests/integrations/razorpay.test.ts` (recorded Razorpay response shapes) | automated |
-| Full transaction on the real menu with every failure path | `tests/domain/coders-cafe-razorpay.test.ts` (adapter → service → webhook → order/KOT/invoice/analytics; Razorpay emulated over HTTP) | automated |
-| Browser: owner / manager / chef / customer, Razorpay success, decline + retry, cash | `npm run e2e:investor` (production build; Razorpay emulated; Checkout script stubbed) | automated |
-| The same transaction as a 30-step acceptance, fresh database, with the shortcut-to-paid, failed-payment, duplicate-webhook, amount and identifier attacks | `npm run e2e:acceptance`; evidence in `docs/acceptance-coders-cafe.md` | automated |
-| Against Razorpay's real test mode | `npx tsx scripts/razorpay/sandbox-check.ts` with `rzp_test_` keys, then one manual payment (below) | **requires your test keys** |
+| Adapter contract for the retained legacy paths (signatures, status, refunds, settlements, no secret leakage) | `tests/integrations/razorpay.test.ts` (recorded Razorpay response shapes) | automated |
+| `PAYMENT_PROVIDER=razorpay` creates nothing; legacy webhook / verify still settle an older payment | `tests/domain/integrations-p7.test.ts` | automated |
+| Browser and acceptance runs | `npm run e2e:investor`, `npm run e2e:acceptance`: now exercise the direct-bank UPI emulator, **not** Razorpay | automated (UPI only) |
+| Against Razorpay's real test mode | No longer applicable: `scripts/razorpay/sandbox-check.ts` and `tests/domain/coders-cafe-razorpay.test.ts` were removed because they create new Razorpay orders | n/a |
 
-### Test-mode run (with real `rzp_test_` keys)
-
-1. `RAZORPAY_KEY_ID=rzp_test_… RAZORPAY_KEY_SECRET=… RAZORPAY_WEBHOOK_SECRET=… npx tsx scripts/razorpay/sandbox-check.ts`: all checks PASS.
-2. Run the app with those keys and `PAYMENT_PROVIDER=razorpay`, expose it on https (for webhooks), bind the account id (above).
-3. Scan a table QR on a phone, order, **Pay online**, pay with a Razorpay test card / test UPI id (Razorpay docs → *Test card details*), once declined and once successful.
-4. Check: order PAID once, one KOT, invoice, Finance → Payments shows one ONLINE SUCCESS; Razorpay dashboard shows the same payment; webhook log shows `PROCESSED` then `DUPLICATE` on redelivery.
+The legacy paths that still matter in Production (webhook redelivery, refund of an
+older payment, settlement reconciliation) can only be proven against real data
+through the read-only audit in "Outstanding obligations" above.

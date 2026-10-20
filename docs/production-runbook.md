@@ -53,8 +53,8 @@ NODE_ENV=production
 DATABASE_URL=postgresql://restora_app:…@db:5432/restora?sslmode=require&connection_limit=10&pool_timeout=10
 AUTH_SECRET=…  INTEGRATION_SECRETS_KEY=…  METRICS_TOKEN=…  ALERT_WEBHOOK_URL=https://…
 TRUSTED_PROXY_HOPS=1  PUBLIC_BASE_URL=https://pos.example.com  EXPORT_DIR=/var/lib/restora/exports
-PAYMENT_PROVIDER=razorpay (or unset for counter payments only)
-RAZORPAY_KEY_ID=rzp_live_…  RAZORPAY_KEY_SECRET=…  RAZORPAY_WEBHOOK_SECRET=…   # docs/payments-razorpay.md
+PAYMENT_PROVIDER=sbi_upi   # direct SBI UPI: NOT implemented yet -> online payment / QR ordering shows "unavailable" (docs/sbi-upi-integration.md)
+# RAZORPAY_KEY_ID / _SECRET / _WEBHOOK_SECRET only while legacy Razorpay payments remain (docs/payments-razorpay.md "Legacy-only")
 BACKUP_STATUS_FILE=/var/backups/restora/last-backup.json
 npx next start -p 3000
 ```
@@ -62,15 +62,18 @@ Check: the boot log has `server started` and only the `config_warning`s you expe
 `curl https://pos.example.com/api/health/ready` → `{"status":"ready"}`.
 
 ### 1.4a Online payments and table QR codes (if guests pay online)
-1. Razorpay dashboard: webhook `https://pos.example.com/api/webhooks/payment/razorpay`, secret =
-   `RAZORPAY_WEBHOOK_SECRET`, events payment.captured / payment.failed / refund.processed;
-   automatic capture on.
-2. RESTORA → Settings → Integrations → Payment · razorpay → Razorpay account id (`acc_…`).
-   Webhooks of an unbound account are refused (503) and nothing changes.
-3. Tables → QR per table → **Download QR (SVG)** and print. The code points at
+Guest QR orders are paid online (direct-bank UPI QR) before they reach the kitchen; while
+online payment is unavailable, QR ordering is refused and guests order through the staff.
+1. **SBI UPI is not implemented yet.** Follow `docs/sbi-upi-integration.md` (SBI onboarding,
+   specification, UAT) before anything here can be enabled. Razorpay is retired for new
+   payments (`docs/payments-razorpay.md`).
+2. Once SBI is implemented: register the callback URL SBI requires
+   (`https://pos.example.com/api/webhooks/payment/sbi_upi`), and bind the merchant id in
+   Settings → Integrations → Payment · sbi_upi. Callbacks of an unbound merchant are refused.
+3. Configure the pending-payment recovery scheduler (`/api/cron/payments` every minute,
+   `docs/payment-safety.md` §3) and confirm `GUEST_FULFILMENT_WINDOW_MINUTES` with the owner.
+4. Tables → QR per table → **Download QR (SVG)** and print. The code points at
    `PUBLIC_BASE_URL`; check one with a phone on mobile data (not the restaurant Wi-Fi).
-4. Test once with test keys first (`scripts/razorpay/sandbox-check.ts`, then a phone
-   payment), then switch to live keys and restart.
 
 ### 1.5 Backups (before the first customer)
 Backup host cron (daily, quiet hour) as `restora_backup`:

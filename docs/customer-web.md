@@ -12,7 +12,7 @@ RESTORA gets the same website with a neutral look and its own name.
 QR on table ─► /t/<token>             home + menu (branded landing, categories, item sheet, sticky cart)
             ─► /t/<token>/cart        cart priced by the server (POST /api/qr/t/<token>/quote)
             ─► /t/<token>/checkout    optional name / phone, Cash or Pay online, Place order
-            ─► /o/<orderId>#k=<key>   confirmation, Razorpay (if chosen), live status, bill / receipt
+            ─► /o/<orderId>#k=<key>   confirmation, the bank's UPI QR, live status, bill / receipt
 ```
 
 | Page | What it shows | Data |
@@ -102,20 +102,24 @@ and per-table rate limits):
 
 ## Payment flows
 
-**Cash** (existing RESTORA flow): the order arrives OPEN → staff accept it at
-the POS (Open orders → "New QR order" → Send to kitchen = `submitOrder` → KOT)
-→ the cashier takes the cash at the POS. The website never marks anything paid.
+**No pay-at-the-counter for QR orders** (since 2026-10-20): a QR order is paid
+online before it reaches the kitchen; `paymentMethod: "CASH"` is refused and the
+counter cannot settle a QR order still waiting for its online payment. Staff
+orders (POS, captain) take cash, card and till UPI as before.
 
-**Online (Razorpay)**: checkout places the order, then opens the order page with
-`#…&pay=1`, which starts the payment once (the flag is removed so a refresh does
-not reopen it). Razorpay Checkout is allowed only on `/o/*` (CSP). The server
-creates the Razorpay order for the **server's** outstanding amount; the signed
-response (or a closed window) goes to `POST …/payments/confirm`, where the
-payment service verifies signature, payment id, order id, amount and capture
-with Razorpay. Webhooks (`/api/webhooks/payment/razorpay`) are signature-checked
-and idempotent. Only a verified capture makes the order PAID — and a verified
-prepayment of a waiting QR order creates its KOT in the same transaction
-(exactly once). Details: `docs/payments-razorpay.md`.
+**Online (direct-bank UPI QR)**: checkout places the order, then opens the order
+page with `#…&pay=1`, which starts the payment once (the flag is removed so a
+refresh does not restart it). The server asks the bank for a transaction-specific
+QR for the **server's** outstanding amount and RESTORA's reference, stores it so a
+refresh shows the same QR, and the page renders it (no third-party script). The
+page then asks `POST …/payments/confirm` every 4 s; the server asks the bank and
+only a final, matching success (merchant, reference, amount, INR) makes the
+payment SUCCESS — and releases the order's KOTs in the same transaction (exactly
+once). Signed bank callbacks (`/api/webhooks/payment/<provider>`) trigger the same
+verification. A payment verified after the fulfilment window is recorded but the
+order is held for staff. Details: `docs/payment-safety.md`. The SBI adapter is
+not implemented yet (`docs/sbi-upi-integration.md`); until it is, QR ordering
+reports online payment as unavailable.
 
 ## Kitchen and status
 
@@ -141,18 +145,20 @@ the same order and payment; the website shows only the customer bill / receipt.
    (e.g. `https://order.coderscafe.in`). Never `localhost`: a phone cannot
    reach the laptop's localhost.
 2. Tables screen → QR for T01…T10 → download the SVG, print, place on tables.
-   The Coders' Cafe demo dataset uses tokens derived from public constants —
-   **rotate every table's QR before real use**, then print.
+   Tokens are random (`src/server/qr/tableToken.ts`). A database seeded
+   before 2026-10-20 still holds the demo seed's derivable tokens:
+   `npm run qr:audit` lists them, and `docs/qr-token-rotation.md` is the
+   checklist for rotating them before real use.
 3. A lost or misused code: rotate (new token) or disable it on the Tables screen.
 
 ## Production requirements (not provided by the code)
 
 | Requirement | Why |
 |---|---|
-| Public HTTPS domain pointing at one RESTORA web instance | the QR must open on customers' phones; Razorpay requires HTTPS |
+| Public HTTPS domain pointing at one RESTORA web instance | the QR must open on customers' phones; bank callbacks need HTTPS |
 | `PUBLIC_BASE_URL=https://…` | printed QR links |
-| `PAYMENT_PROVIDER=razorpay`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | online payment (test keys `rzp_test_…` first) |
-| Razorpay webhook → `https://<domain>/api/webhooks/payment/razorpay` (payment.captured, payment.failed, refund.processed) and the account bound in Settings → Integrations | captures confirmed even if the phone closes |
+| `PAYMENT_PROVIDER=sbi_upi` with SBI's credentials (after SBI onboarding + UAT, `docs/sbi-upi-integration.md`) | online payment; without it QR ordering is refused |
+| SBI callback URL registered (as SBI's specification requires) and the merchant bound in Settings → Integrations; the recovery scheduler (`docs/payment-safety.md` §3) | payments confirmed even if the phone closes |
 | `AUTH_SECRET` (≥ 32 chars, secret) | sessions and guest order access keys |
 | Outlet address / phone / opening hours in Admin → Outlets | shown on the website (and hours enforce ordering) |
 | Rotated table QR tokens | demo tokens are derivable |
