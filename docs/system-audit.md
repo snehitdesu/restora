@@ -1,5 +1,11 @@
 # System audit and gap register — 2026-10-13
 
+> **Historical snapshot (2026-10-13), kept as written.** On 2026-10-20 Razorpay guest checkout was retired and
+> the investor / acceptance suites moved from the Razorpay emulator to a local UPI bank emulator (investor suite
+> now 4 tests). The "Razorpay test-mode keys" blocker below is superseded by SBI's UPI specification and UAT
+> access (`docs/sbi-upi-integration.md`); guest online checkout is unavailable until that integration is
+> implemented. Current status: `docs/owner-go-live-checklist.md`.
+
 _Completion, debugging, hardening and authentication pass. One authoritative
 register for this pass; the long-lived feature register stays in
 `docs/master-feature-audit.md`. "Verified" means an automated test or an

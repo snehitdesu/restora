@@ -72,13 +72,13 @@ staff or a missing common workflow; **S3** nice to have. Scope: **S** ≤ 1 day,
 5–9. Defect fixed; no further work proposed.
 
 ### 7. Refunds and cancellation
-1. [O: Billing]. 2. **[S]:** append-only `Refund` rows, never above the refundable amount, gateway refund with a stable idempotency key, credit note per refund, loyalty / referral / coupon reversal on a full refund; order cancel behind step-up `order.void`. Tests: `tests/domain/idempotency-refunds.test.ts`, `tests/domain/coders-cafe-razorpay.test.ts`, `tests/db/append-only.test.ts`.
+1. [O: Billing]. 2. **[S]:** append-only `Refund` rows, never above the refundable amount, gateway refund with a stable idempotency key, credit note per refund, loyalty / referral / coupon reversal on a full refund; order cancel behind step-up `order.void`. Tests: `tests/domain/idempotency-refunds.test.ts`, `tests/integrations/upi-direct-bank.test.ts` (gateway refund once per key, never above the amount paid; replaces `tests/domain/coders-cafe-razorpay.test.ts`, removed 2026-10-20), `tests/db/append-only.test.ts`.
 3. **Confirmed missing:** cancellation **reason codes** are free text only; no void report by reason (see row 3).
 4. **Unknown:** Petpooja's refund approval flow.
 6. S3. 7. S. 9. P3, together with row 3's reason codes.
 
 ### 8. Guest QR ordering
-1. [O: Scan & Order]. 2. **[S]:** `/t/<token>` storefront, server-priced cart, sold-out and price-change refusal, idempotent placement with same-key replay and a "Check order status" unknown state (`src/features/guest/orderSubmit.ts`), cash orders go to the kitchen at placement, Razorpay online payment. Tests: `tests/ui/guest-order-submit.test.ts`, `tests/db/guest-checkout-concurrency.test.ts`, `tests/api/guest-routes.test.ts`, `tests/domain/qr-transaction.test.ts`.
+1. [O: Scan & Order]. 2. **[S]:** `/t/<token>` storefront, server-priced cart, sold-out and price-change refusal, idempotent placement with same-key replay and a "Check order status" unknown state (`src/features/guest/orderSubmit.ts`), guest orders are online-payment-only and reach the kitchen only after the payment is verified (`src/server/services/kitchenGate.ts`). _Updated 2026-10-20: when this matrix was written, cash orders went to the kitchen at placement and online payment was Razorpay; Razorpay guest checkout is now retired, and guest online checkout is unavailable until direct SBI UPI is implemented (`docs/sbi-upi-integration.md`)._ Tests: `tests/ui/guest-order-submit.test.ts`, `tests/db/guest-checkout-concurrency.test.ts`, `tests/api/guest-routes.test.ts`, `tests/domain/qr-transaction.test.ts`, `tests/domain/qr-payment-gate.test.ts`.
 3. **Confirmed missing:** photos and allergens on the guest menu (QR-03 NOT BUILT); delivery / takeaway ordering website (QR-09 NOT BUILT). Hosted latency: see `docs/production-readiness.md` (region decision pending).
 4. **Unknown:** Petpooja's QR payment-first vs order-first options.
 6. S2 (photos / allergens). 7. M. 9. P2.

@@ -5,6 +5,16 @@ _Last updated: 2026-10-09 — end of the master program (Groups 1-9). Current, v
 truth) and `docs/group-delivery-map.md` (where each group lives). The sections below "Earlier status" are the
 historical record up to Phase 5B and are kept as written._
 
+> **Payments — update of 2026-10-20 (supersedes the payment statements further down).** Razorpay guest
+> checkout was retired: the browser checkout, `scripts/razorpay/sandbox-check.ts`,
+> `tests/support/razorpayEmulator.ts` and `tests/domain/coders-cafe-razorpay.test.ts` were removed. Server-side
+> Razorpay verification, signed webhooks, refunds and settlement reconciliation remain only to resolve payments
+> made before the retirement (`docs/payments-razorpay.md`). Guest QR orders are now online-payment-only and reach
+> the kitchen only after the payment is verified. The direct SBI UPI adapter is a deliberate placeholder, so
+> **guest online checkout, and with it guest QR ordering, is unavailable** until SBI's API specification and UAT
+> access are obtained and the integration is implemented and configured (`docs/sbi-upi-integration.md`,
+> `docs/payment-safety.md`). Automated tests use a local UPI bank emulator, not SBI.
+
 ## Current status (2026-10-09)
 Groups 1-9 of the master program are implemented on branch `claude/serene-ramanujan-rmvdss` (PR #1 into `main`).
 Of the 187 audited rows: **130 IMPLEMENTED + VERIFIED, 25 IMPLEMENTED + NOT EXTERNALLY VERIFIED (mock / emulator only),
@@ -31,7 +41,7 @@ drill 10/10 and an end-to-end load run with zero correctness violations on the c
 sweeps clean. The browser suites are CI release gates.
 
 **Not verified (external):** hosting and HTTPS, scheduled backups / WAL archiving on real infrastructure, a hosted PostgreSQL instance,
-code-signing certificates, and every real provider (Razorpay keys, Petpooja, Zomato / Swiggy, WhatsApp / SMS, Resend mailbox, Tally,
+code-signing certificates, and every real provider (online payment: Razorpay keys at the time, SBI's UPI specification and UAT since 2026-10-20 as noted above; Petpooja, Zomato / Swiggy, WhatsApp / SMS, Resend mailbox, Tally,
 Zoho Books, Google Sheets, printers). PostgreSQL row-level security is designed but not applied (`docs/postgres-rls.md`).
 Full list with what each needs: `docs/stabilization-report.md` §8.4.
 
@@ -51,6 +61,8 @@ browser E2E 77/77 on both databases, desktop E2E 7/7, packaged-desktop security 
 staging deployment rehearsal smoke 18/18.
 
 ## 2026-10-06 — production completion pass (real menu, Razorpay, QR)
+_Historical record. The Razorpay guest checkout, sandbox check and emulator tests described here were removed on
+2026-10-20 (see the payments note at the top)._
 Report: `docs/production-completion-report.md`.
 - **Real menu**: Coders' Cafe, 64 items / 8 categories transcribed from the owner's board photos, 10 unreadable entries listed and not imported (`docs/coders-cafe-menu.md`, `npm run db:seed:cafe [-- --reset]`, org-scoped reset).
 - **Razorpay**: Checkout on the guest order page (CSP opened for Razorpay on `/o/*` only); undecided = PENDING (never failed); FAILED → SUCCESS recovery when Razorpay confirms a capture (retry in the same window, late capture); a capture for an order already paid another way → HIGH reconciliation anomaly, never applied twice; stored gateway reference is authoritative; production refuses an incomplete Razorpay config (`docs/payments-razorpay.md`). **Not yet run against Razorpay's real test mode: needs `rzp_test_` keys** (`scripts/razorpay/sandbox-check.ts`).
@@ -58,6 +70,8 @@ Report: `docs/production-completion-report.md`.
 - **Tests**: Razorpay emulator (`tests/support/razorpayEmulator.ts`); `tests/domain/coders-cafe-*.test.ts`; investor browser E2E `npm run e2e:investor` (owner / manager / chef / customer; Razorpay success, cash, decline + retry); the 30-step customer acceptance `npm run e2e:acceptance` on a fresh database (T07 to a served, invoiced, stock-consumed, reported order, then failed payment, duplicate webhook / submission, amount and identifier tampering; `docs/acceptance-coders-cafe.md`).
 
 ## 2026-10-06 — customer website (table QR storefront)
+_Historical record. Since 2026-10-20 checkout offers no Cash option and no Razorpay payment (see the payments note
+at the top)._
 Doc: `docs/customer-web.md`. The guest QR pages (`/t/<token>`, `/o/<orderId>`) became the
 customer website — Coders' Cafe branded, any other restaurant neutral — on the existing
 guest-ordering services (no second order / payment / kitchen engine).
@@ -104,6 +118,10 @@ Zod · bcryptjs · Vitest.
 All additive or data-preserving; no historical timestamps rewritten.
 
 ## Status by category
+
+_Historical: written 2026-10-01 to 2026-10-04 (initial build) and not maintained since. For example, the Razorpay
+"skeleton" entry below predates the full adapter, which was later built and then retired for new payments on
+2026-10-20. Current status is at the top of this file._
 
 ### ✅ COMPLETE (implemented, tested, exposed via API)
 | Subsystem | Notes |

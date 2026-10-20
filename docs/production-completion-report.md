@@ -1,5 +1,12 @@
 # RESTORA — production completion pass (2026-10-06)
 
+> **Historical snapshot (2026-10-06), kept as written.** Razorpay guest checkout was retired on 2026-10-20:
+> `scripts/razorpay/sandbox-check.ts`, `tests/support/razorpayEmulator.ts` and
+> `tests/domain/coders-cafe-razorpay.test.ts` no longer exist, and the Razorpay test-mode run named below as the
+> blocker is no longer planned. Server-side Razorpay code remains only for older payments
+> (`docs/payments-razorpay.md`); guest online checkout is unavailable until direct SBI UPI is implemented
+> (`docs/sbi-upi-integration.md`). Current status: `docs/owner-go-live-checklist.md`.
+
 Scope: take the existing RESTORA V1 (1.0.0-rc.1) to a deployable state around the
 real restaurant transaction: real menu → table QR → order → cash / Razorpay →
 KOT / KDS → bill → finance, with hardening and full validation. No commits were

@@ -1,5 +1,11 @@
 # RESTORA stabilization / verification report (2026-10-08, completed 2026-10-09)
 
+> **Historical snapshot, kept as written.** Since 2026-10-20 Razorpay guest checkout is retired: the
+> `RAZORPAY_API_BASE` emulator hook and its startup check are gone (the adapter no longer reads it), the
+> investor / acceptance suites use a local UPI bank emulator, and the Razorpay test-mode / live-key items in §8
+> are superseded by SBI's UPI specification and UAT access (`docs/sbi-upi-integration.md`). Guest online checkout
+> is unavailable until that integration is implemented. Current status: `docs/owner-go-live-checklist.md`.
+
 > Sections 1-7 are the stabilization pass of 2026-10-08 on Groups 1-5, kept as written (including "No Group 6 work"). **Section 8 is the end-of-program record of 2026-10-09:** the verification matrix at the final commit, defects found since, the external dependencies, and what remains.
 
 Scope: Groups 1-5 as they stand at `main` = `d922cda`, plus the fixes made in this pass.
