@@ -5,6 +5,27 @@
  * stack — no extra downloads.
  */
 
+/*
+ * The rupee sign (U+20B9) is the only character on these pages outside Inter's
+ * preloaded latin subset: drawing it made every guest page download Inter's
+ * latin-ext file (~86 KB, not preloaded) and re-lay out the whole menu when it
+ * arrived. The ₹ is taken from a font the phone already has; when none of
+ * these is installed the face fails and the next family (Inter) draws it.
+ */
+@font-face {
+  font-family: "SF Rupee";
+  font-weight: 100 549;
+  src: local("Roboto"), local("Roboto-Regular"), local("Segoe UI"), local("SegoeUI"), local("Noto Sans"), local("NotoSans-Regular"), local("Arial"), local("ArialMT");
+  unicode-range: U+20B9;
+}
+
+@font-face {
+  font-family: "SF Rupee";
+  font-weight: 550 1000;
+  src: local("Roboto Bold"), local("Roboto-Bold"), local("Segoe UI Bold"), local("SegoeUI-Bold"), local("Noto Sans Bold"), local("NotoSans-Bold"), local("Arial Bold"), local("Arial-BoldMT");
+  unicode-range: U+20B9;
+}
+
 .sf {
   --sf-bg: #f6ecdc;
   --sf-surface: #fffaf2;
@@ -30,7 +51,7 @@
   --sf-shadow: 0 1px 2px rgb(36 19 17 / 0.06), 0 8px 24px -12px rgb(36 19 17 / 0.28);
   --sf-shadow-lg: 0 -12px 40px -16px rgb(36 19 17 / 0.45);
   --sf-display: var(--font-display, "Fraunces"), "Fraunces", Georgia, serif;
-  --sf-sans: var(--font-inter, "Inter"), "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sf-sans: "SF Rupee", var(--font-inter, "Inter"), "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --sf-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --sf-top-h: 60px;
   --sf-tabs-h: 54px;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { qrSvgPath } from "@/lib/qrSvg";
 import { formatMoney } from "@/lib/format";
 import { Spinner } from "@/features/guest/components/Bits";
@@ -78,7 +78,8 @@ export function UpiQrPayment({ checkout, onCheck, onRenew, busy }: { checkout: U
     return () => window.clearInterval(t);
   }, [checkout.paymentId, checkout.expiresAt]);
 
-  const { size, d } = qrSvgPath(checkout.qr);
+  // The countdown re-renders every second: encode the QR once per checkout, not on every tick.
+  const { size, d } = useMemo(() => qrSvgPath(checkout.qr), [checkout.qr]);
   const mm = String(Math.floor(left / 60));
   const ss = String(left % 60).padStart(2, "0");
 
