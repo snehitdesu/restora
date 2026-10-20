@@ -191,7 +191,7 @@ export function createRouter(routes: Route[], opts: { resource?: string } = {}) 
 
       const background = req.headers.get(BACKGROUND_HEADER) === "1";
       let current = hit.r.public ? null : await resolveFromToken(req.cookies.get(SESSION_COOKIE)?.value, { activity: !background && !hit.r.kdsIdleExempt });
-      if (current && hit.r.kdsIdleExempt && isKitchenDisplayUser(current.ctx)) await recordSessionActivity(prisma, current.session.id);
+      if (current && hit.r.kdsIdleExempt && isKitchenDisplayUser(current.ctx)) await recordSessionActivity(prisma, current.session);
       if (!hit.r.public && !current) current = await resolveFromDeviceToken(prisma, req.headers.get("authorization"), { touch: true });
       if (!hit.r.public && !current) throw new UnauthorizedError();
       if (current) {
