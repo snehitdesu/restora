@@ -1,4 +1,10 @@
-# Direct SBI UPI integration — readiness checklist
+# Direct SBI UPI integration — onboarding, acceptance and activation
+
+This is the **authoritative** document for the SBI integration: what SBI
+publishes (§1), the request to send SBI (§2), the acceptance matrix (§3), the
+configuration names (§4), the UAT scenarios (§5), the dependency-ordered
+implementation and Production activation plan (§6), and where each piece of work
+stands (§7). Other documents link here instead of repeating it.
 
 Status (2026-10-20): **BLOCKED on SBI.** RESTORA's side of a direct-bank UPI
 checkout is built (provider boundary, dynamic-QR checkout screen, server-side
@@ -83,51 +89,82 @@ documentation is published or linked.
 Send through the owner's SBI branch / relationship manager to the Transaction
 Banking Unit (and, only if the owner approves considering it, the SBIePay
 merchant onboarding desk). Never send credentials by e-mail or chat, and never
-paste them into a terminal transcript.
+paste them into a terminal transcript. Every point below is a **question**:
+none of these capabilities is assumed to exist until SBI confirms it in writing.
 
 > Subject: API-based dynamic UPI QR collection for our restaurant — technical
 > documentation and UAT request
 >
 > We hold a current account with SBI (account / CIF: ______, branch: ______). Our
-> restaurant uses its own ordering software (RESTORA). For each table order we
-> want to collect the exact bill amount by UPI directly into this account, and
-> our server must be able to confirm each payment before the kitchen starts
-> cooking. Please tell us which SBI product provides this and share:
+> restaurant (______, GSTIN: ______) uses its own ordering software (RESTORA).
+> For each table order we want to collect the exact bill amount by UPI directly
+> into this account, and our server must be able to confirm each payment before
+> the kitchen starts cooking. Please tell us which SBI product provides this and
+> share:
 >
 > 1. **Product and eligibility:** the SBI product name for API-based UPI
->    collection by a merchant (dynamic QR and/or UPI intent), account and
->    merchant-category eligibility for a restaurant, onboarding forms, fees per
->    transaction, settlement timing, and whether a separate merchant ID,
->    terminal ID, sub-merchant ID or VPA is issued.
-> 2. **API specification (UAT and production):** endpoints, request and response
->    formats, and error codes for (a) creating a transaction-specific dynamic QR
->    or UPI intent for a fixed amount with our unique transaction reference,
->    (b) its validity / expiry, and (c) cancelling it, if supported.
-> 3. **Security:** authentication of our API calls (API keys, client certificate
->    / mutual TLS, IP whitelisting), message encryption and signing algorithms
->    and key exchange, and certificate rotation.
-> 4. **Callback / notification:** whether SBI sends a server-to-server payment
->    notification, its payload, how it is signed or encrypted, retry schedule,
->    replay protection, source IP ranges, and how the callback URL is
->    registered.
-> 5. **Transaction-status inquiry API:** request format, the complete list of
->    status values and which are final (success, failure, expired, pending /
->    deemed), recommended polling frequency and limits, and how long after
->    creation a transaction can still change state.
-> 6. **References:** which fields carry our transaction reference, the bank
->    reference number (RRN / UTR), payer VPA (if shared), amount and currency in
->    the callback and status responses.
-> 7. **Refunds:** whether refunds of UPI collections can be initiated by API (and
->    its specification) or only through a branch / portal process, partial
->    refund support, and timelines.
-> 8. **Reconciliation:** the MIS / settlement report format, how it is delivered
->    (portal, SFTP, e-mail, API) and its schedule.
-> 9. **UAT:** access to the UAT environment, UAT credentials and certificates
->    (issued through SBI's secure channel), test VPAs / test apps, and the test
->    scenarios SBI requires before production sign-off.
-> 10. **Production activation:** go-live checklist, security review, and a
->     technical support contact and escalation matrix.
-> 11. **Fit of your existing products:** whether *E-Pay* (UPI channels) or
+>    collection by a merchant (dynamic QR and/or UPI intent), and whether a
+>    restaurant current account at our branch is eligible (merchant category,
+>    KYC, turnover or other conditions).
+> 2. **Merchant onboarding:** the forms and documents required, who must sign
+>    them, the expected timeline, which identifiers are issued (merchant ID,
+>    terminal ID, sub-merchant ID, VPA), and the settlement account and timing.
+> 3. **Dynamic QR / UPI intent:** endpoints, request and response formats and
+>    error codes for (a) creating a transaction-specific dynamic QR or UPI
+>    intent for a fixed amount carrying our unique transaction reference, (b)
+>    the format of what is returned (QR string, intent URI, or parameters we
+>    must assemble ourselves), (c) its validity / expiry and whether we can set
+>    it, and (d) cancelling it, if supported.
+> 4. **Amount locking:** confirmation that the payer's UPI app cannot change the
+>    amount; what happens if a different amount is paid against our reference;
+>    minimum and maximum amounts; INR only.
+> 5. **API authentication and security:** how our API calls are authenticated
+>    (API keys, OAuth, client certificate / mutual TLS, IP whitelisting, static
+>    source IPs required from us), message encryption and signing algorithms,
+>    key exchange, and certificate validity and rotation.
+> 6. **Transaction-status inquiry:** an API to query a transaction by our
+>    reference: request format, the complete list of status values and which
+>    are final (success, failure, expired, pending / deemed), recommended polling
+>    frequency and rate limits, and how long after creation a transaction can
+>    still change state.
+> 7. **Callback / notification:** whether SBI sends a server-to-server payment
+>    notification, whether delivery is guaranteed or best effort, its payload,
+>    how it is signed or encrypted, the response we must return, retry schedule,
+>    replay protection, source IP ranges, and how the callback URL is registered
+>    for UAT and for production.
+> 8. **Idempotency and duplicates:** what happens if we send the same create
+>    request (same reference) twice, whether one reference can ever be paid
+>    twice, the uniqueness rules, maximum length and allowed characters of our
+>    reference, and how duplicate notifications are identified.
+> 9. **Timeouts and uncertain outcomes:** recommended timeouts for each API, how
+>    to resolve a create or status call that timed out, what a pending / deemed
+>    status means and when it becomes final, and planned maintenance or
+>    downtime notices.
+> 10. **Late payments:** whether a payer can still complete a payment after the
+>     QR or intent has expired, and if so whether it is credited, rejected or
+>     auto-reversed, and how we are told.
+> 11. **References:** which fields carry our transaction reference, the bank
+>     reference number (RRN / UTR), payer VPA (if shared), amount and currency in
+>     the callback and status responses.
+> 12. **Refunds:** whether refunds of UPI collections can be initiated by API (and
+>     its specification, including refund status inquiry) or only through a
+>     branch / portal process; partial refunds; refunds after settlement; and
+>     timelines.
+> 13. **Reconciliation:** the MIS / settlement report format (per-transaction
+>     fields, including our reference and the RRN / UTR, fees and settlement
+>     batch), how it is delivered (portal, SFTP, e-mail, API) and its schedule.
+> 14. **Fees and charges:** per-transaction charges for UPI collection under this
+>     product, any set-up, annual or API charges, GST on charges, and how charges
+>     appear in settlement.
+> 15. **UAT:** access to the UAT environment, UAT credentials and certificates
+>     (issued through SBI's secure channel), test VPAs / test apps, and the test
+>     scenarios SBI requires before production sign-off.
+> 16. **Certification and production sign-off:** any security review, audit or
+>     certification our software or hosting must pass and who performs it, the
+>     documents required, and SBI's go-live checklist.
+> 17. **Support:** the technical contact for integration, production support
+>     hours, the escalation matrix, and how SBI notifies merchants of incidents.
+> 18. **Fit of your existing products:** whether *E-Pay* (UPI channels) or
 >     *E-Collection* with a Virtual Account Number can issue a per-order dynamic
 >     QR or intent and give us a server-side status / callback per transaction, or
 >     whether a different product is required.
@@ -155,8 +192,8 @@ in the blanks.*
    VPA) and where the RRN / UTR is returned.
 5. UAT access and the callback URL registration process.
 
-Refund API and MIS format are needed before production, but not to start the
-adapter.
+Refund API, MIS format, fees and certification requirements are needed before
+production, but not to start the adapter.
 
 ## 3. How SBI's answers map onto RESTORA
 
@@ -177,6 +214,30 @@ our transaction reference, the exact amount, INR and SBI's *final* success
 status, has contract tests against SBI's documented responses, and has passed
 SBI UAT (section 5).
 
+### 3.1 Acceptance matrix
+
+"Already in RESTORA" means implemented and tested against the local bank
+emulator only; nothing in this table has been tested against SBI. Every row
+needs its evidence before Production activation (§6, stage 7).
+
+| # | Area | SBI must provide | RESTORA must implement | How it is tested | Evidence required before activation |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Product, eligibility, onboarding | Written product confirmation; merchant approval; merchant / terminal / VPA identifiers; settlement account and timing | Nothing in code. Bind the merchant id in Settings → Integrations → Payment · sbi_upi | Document check by the owner | SBI's written confirmation; onboarding complete; identifiers configured (never committed) |
+| 2 | Dynamic QR / intent | Create API, returned format, expiry rules | `createCheckout` from SBI's spec. Already in RESTORA: server amount, `RST<paymentId>` reference, stored checkout data | Contract tests from SBI's documented examples; UAT 1 | Contract tests green; UAT 1 recorded |
+| 3 | Amount locking | Confirmation that the amount is fixed; behaviour on a different amount | Already in RESTORA: `decideUpiTxn` treats any amount other than the exact paise as a mismatch (never paid, HIGH anomaly) | Contract test with a mismatched amount; UAT 1, 12 | UAT record; SBI's written statement |
+| 4 | Authentication and security | Scheme, algorithms, UAT and production credentials and certificates through a secure channel | Server-side credential loading only; credentials never in `checkout` data | Unit test that checkout data carries no secret; UAT handshake | Credentials stored as Sensitive variables; handshake recorded in UAT |
+| 5 | Status inquiry | API, every status value, which are final, rate limits | `getPaymentStatus` / `verify` mapping SBI statuses through `decideUpiTxn` | Contract test per documented status; UAT 2, 3, 4, 6 | Every documented status covered by a test; UAT records |
+| 6 | Callbacks | Payload, signing, retries, source IPs, registration process | `verifyWebhook`, `accountRef`, `parseWebhookEvent`. Already in RESTORA: callback only triggers `verifyPayment`; unbound merchants refused | Contract tests: valid, bad signature, replay, unbound merchant; UAT 5, 11, 13 | UAT records; callback URL registered |
+| 7 | Idempotency and duplicates | Duplicate-create semantics; reference rules | Map our reference to SBI's rules. Already in RESTORA: one bank transaction per payment (stored checkout reused on refresh), idempotent apply | UAT 10, 11 | UAT records |
+| 8 | Timeouts and uncertain outcomes | Recommended timeouts; pending / deemed semantics | Timeouts from SBI's guidance. Already in RESTORA: a timeout writes nothing (payment stays PENDING); recovery job re-asks | UAT 6; recovery scheduler proven on the UAT deployment | UAT 6 record; scheduler `200` log |
+| 9 | Late payments | Behaviour after QR expiry | Already in RESTORA: fulfilment-window hold for staff (10 minutes is a **proposed default, not approved** — owner decision, `docs/payment-safety.md` §4) | UAT 7, 14 | Owner's written approval of the window; UAT records |
+| 10 | Refunds | Refund API or documented manual process; refund status | `refund` from SBI's spec, or a documented manual procedure recorded in RESTORA | UAT 8 | UAT 8 record; staff procedure written |
+| 11 | Reconciliation | MIS format and delivery | `getSettlements` or an import of SBI's report, depending on delivery | UAT 9 | One UAT day's MIS matched against RESTORA's payments |
+| 12 | Fees | Fee schedule | Nothing in code | — | Owner's written acceptance of the charges |
+| 13 | UAT and certification | UAT access, required test cases, security review / sign-off | Pass SBI's cases and §5 | §5 plus SBI's own cases | SBI's written UAT sign-off |
+| 14 | Support | Contacts, hours, escalation matrix | Record them in the owner's operating notes (not in this repository) | — | Contacts on record before the pilot |
+| 15 | Health | Health endpoint or availability guidance, if any | `healthCheck` reflecting real SBI availability | Contract test; UAT with SBI unreachable | Unreachable SBI shows "online payment unavailable" in UAT |
+
 ## 4. Configuration names (no values in source control)
 
 | Variable | Purpose |
@@ -187,9 +248,15 @@ SBI UAT (section 5).
 | `SBI_UPI_API_BASE` | SBI's UAT / production endpoint, from SBI's documentation. |
 | Credentials, keys, certificates | Names to be fixed from SBI's spec. Stored only as Vercel **Sensitive** environment variables (or the host's secret store), never in the repository, desktop bundle or client code. |
 
+`mock` and `upi_emulator` are test doubles for automated tests and a disposable
+local demo only. They move no money, prove nothing about SBI, and are refused in
+Production (`docs/payment-safety.md` §6).
+
 ## 5. UAT test scenarios (to run with SBI's UAT access)
 
-Mark each result as *SBI UAT*, never as local emulator evidence.
+Mark each result as *SBI UAT*, never as local emulator evidence. Scenarios 10–15
+depend on what SBI's specification allows; record "not applicable per SBI spec"
+rather than skipping silently.
 
 1. QR created for the exact server amount; amount cannot be changed by the payer.
 2. Successful payment → callback (if any) and status API agree; one payment,
@@ -201,15 +268,73 @@ Mark each result as *SBI UAT*, never as local emulator evidence.
 7. Payment after the fulfilment window → money recorded, order held for staff.
 8. Refund (API or SBI's documented process) and its reconciliation entry.
 9. MIS report matches RESTORA's payments for the test day.
+10. Page refreshed / checkout requested twice → the same QR, one SBI transaction.
+11. The same successful callback delivered twice → applied once.
+12. A different amount paid against our reference (if SBI's test tools allow it)
+    → not paid, `RECONCILIATION_MISMATCH` anomaly.
+13. Callback for a merchant not bound to the outlet → refused, nothing changes.
+14. Payment attempted after the QR's own expiry → SBI's documented outcome;
+    RESTORA records it as SBI reports it and never sends a late order to the
+    kitchen automatically.
+15. SBI unreachable → health check false, guest sees "online payment
+    unavailable", staff ordering continues.
 
-## 6. Production activation checklist
+## 6. Implementation and Production activation plan (dependency order)
+
+Each stage starts only when the stages it depends on are complete. Nothing in
+stages 1–8 has been started; stage 0 decisions are open.
+
+| Stage | Work | Depends on | Who |
+| --- | --- | --- | --- |
+| 0 | Owner decisions: approve sending §2; decide whether SBIePay may be considered; approve or change the 10-minute late-payment window; confirm the Vercel plan and the recovery scheduler choice (`docs/payment-safety.md` §3) | — | Owner |
+| 1 | Send §2; SBI confirms the product; onboarding forms, KYC and fees agreed | 0 | Owner + SBI |
+| 2 | SBI specification, security documents, UAT access and UAT credentials received through SBI's secure channel | 1 | SBI |
+| 3 | Implement `sbiUpi.ts` from the specification (statuses through `decideUpiTxn`), contract tests from SBI's documented examples, `healthCheck`, then set `SBI_UPI_IMPLEMENTED`; code review; full local test suites | 2 | RESTORA developer (local only) |
+| 4 | UAT deployment (non-Production, with its own database, never Production's): `SBI_UPI_ENVIRONMENT=uat`, UAT credentials as Sensitive variables, UAT callback URL registered, recovery scheduler running; run every §5 scenario and SBI's own cases; record results | 3 | Developer + owner + SBI |
+| 5 | SBI UAT sign-off and any certification / security review | 4 | SBI (owner coordinates) |
+| 6 | Production prerequisites, independent of SBI and startable any time after stage 0, all required before stage 7: Production `DATABASE_URL` confirmed and not shared with Preview; backup proven to restore; the nine pending migrations applied (`docs/payment-safety.md` §7); recovery scheduler configured and proven; table QR token audit, approved rotation and new cards (`docs/qr-token-rotation.md`); legacy Razorpay read-only audit (`docs/payments-razorpay.md`; keep `RAZORPAY_*` until it is clear); staff briefed on held orders and refunds | 0 | Owner, with controlled Production access |
+| 7 | Production activation, in a closed window: production credentials as Sensitive variables (never printed); production callback URL (HTTPS, production domain only) registered with SBI; merchant id bound in Settings → Integrations; CSP / security headers updated only if SBI's spec requires it (none needed today: the QR is rendered by RESTORA); `PAYMENT_PROVIDER=sbi_upi`, `SBI_UPI_ENVIRONMENT=production`; deploy; `/api/health` ready; one small real payment by the owner, verified, then refunded and reconciled | 5, 6 | Owner + developer |
+| 8 | One-outlet pilot for a week (`docs/payment-safety.md` §7): daily MIS reconciliation, anomaly review, scheduler `200`s; then normal operation | 7 | Owner + staff |
+
+Activation checklist (stage 7 is complete only when every box is ticked, each
+with its evidence from §3.1):
 
 - [ ] Owner has SBI's written product confirmation, fees and onboarding complete.
 - [ ] SBI API specification and security documents received through an official channel.
 - [ ] `sbiUpi.ts` implemented from that specification, with contract tests from SBI's documented examples.
+- [ ] All section 5 scenarios passed in SBI UAT and recorded; SBI's UAT sign-off received.
 - [ ] Callback URL registered with SBI (production domain only, HTTPS).
 - [ ] CSP / security headers updated for whatever SBI's spec requires (none needed today: the QR is rendered by RESTORA).
-- [ ] All section 5 scenarios passed in SBI UAT and recorded.
 - [ ] Credentials set as Sensitive variables in Production only; never printed.
-- [ ] External scheduler for payment recovery configured and proven (docs/payment-safety.md §3).
+- [ ] External scheduler for payment recovery configured and proven (`docs/payment-safety.md` §3).
+- [ ] Late-payment window approved by the owner in writing.
+- [ ] Production migrations applied and Production table QR tokens rotated (stage 6).
 - [ ] One-outlet pilot with staff briefed on the held-for-review and refund procedures.
+
+## 7. Where each piece of work stands (2026-10-20)
+
+**Implemented and verified locally** (unit / integration tests and browser E2E
+against the local UPI bank emulator; never against SBI): the payment provider
+boundary; the dynamic-QR checkout screen; server-side confirmation polling; the
+callback route with per-tenant merchant binding; pending-payment recovery
+(in-process worker, `GET /api/cron/payments`); the server-side kitchen gate; the
+late-payment hold; mismatch anomalies; refusal of `mock` / `upi_emulator` in
+Production; and the `sbi_upi` stub, which refuses every call. Online guest
+payment is **not operational**: with `PAYMENT_PROVIDER=sbi_upi` guests are told
+online payment is unavailable and QR ordering is refused.
+
+**Depends on SBI** (specification, onboarding, credentials, UAT): the `sbi_upi`
+adapter itself and every "SBI must provide" cell in §3.1; refunds and
+reconciliation against SBI; UAT and certification.
+
+**Requires owner approval:** sending §2; considering SBIePay; the late-payment
+window (10 minutes is a proposed default only); accepting SBI's fees; the Vercel
+plan and recovery scheduler; the Production migration window; the QR token
+rotation window; the release.
+
+**Requires controlled Production access, backups or hardware:** Production's
+`DATABASE_URL`; a backup proven to restore; applying migrations; configuring
+the recovery scheduler; the QR token audit, rotation and new printed cards; the
+legacy Razorpay read-only audit; Production credentials; and the physical bill
+printer check (`docs/physical-printer-test.md`). These are separate operational
+tasks, tracked in `docs/owner-go-live-checklist.md`.

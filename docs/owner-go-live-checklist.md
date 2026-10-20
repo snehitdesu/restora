@@ -1,12 +1,25 @@
 # RESTORA — owner go-live checklist (Coders' Cafe)
 
-Status 2026-10-20, branch `release/coders-cafe-2026-10-13` (local commits
-`0b9f06f` analytics, `ddbef68` bill print, `2ba65ee` payments / QR tokens /
-recipes, plus this documentation commit; not pushed). **Ready for the investor demo. Not ready for SBI UAT
-or Production.** Every item below needs a person or organisation outside this
+Status 2026-10-20, branch `release/coders-cafe-2026-10-13`: six local commits
+ahead of `origin` (`0b9f06f` analytics, `ddbef68` bill print, `2ba65ee`
+payments / QR tokens / recipes, `8e3b8fb` and `582c7c6` documentation, `107e849`
+site-demo QR token) plus the documentation commit that adds this text; **none
+pushed**. **Ready for the local investor demo. Not ready for SBI UAT or
+Production.** Every item below needs a person or organisation outside this
 codebase. Nothing here has been sent, deployed, migrated or published.
 
+**Online guest payments are unavailable** until the real SBI adapter is
+implemented from SBI's specification, passes SBI UAT and the owner approves
+activation (A). Until then guest QR ordering is refused and guests order
+through the staff; the local UPI emulator and `mock` provider are for a
+disposable local demo only and are refused in Production.
+
+| Verified locally (tests, E2E against the local UPI emulator, local databases) | Not verified, needs Production / external parties |
+| --- | --- |
+| Counter POS, KDS, back office, bill content and ESC/POS layouts; kitchen gate, late-payment hold, payment recovery logic; QR CLI and token audit; the nine migrations on a copy of the local database | SBI (A); recovery scheduler on Vercel (B); legacy Razorpay audit (C); Production database, backup and migrations (D); owner policy (E); real recipes (F); the physical printer (G); a release build (H); Production QR token rotation and new cards (I) |
+
 Details live in the linked documents; this page is the order to do them in.
+`docs/sbi-upi-integration.md` §6–7 gives the dependency order and who owns each step.
 
 | # | Item | Owner / external party | Blocks |
 | --- | --- | --- | --- |
@@ -18,6 +31,7 @@ Details live in the linked documents; this page is the order to do them in.
 | F | Real recipes | Coders' Cafe kitchen | Stock and food-cost figures |
 | G | Physical bill printer | Owner / counter staff | Printed bills at go-live |
 | H | Release candidate | Owner (approval), then build PC | Desktop distribution |
+| I | Table QR token rotation + new printed cards | Owner (written approval, closed window) | Real guests scanning table QRs |
 
 ## A. SBI direct UPI — `docs/sbi-upi-integration.md`
 
@@ -40,8 +54,9 @@ Ask SBI (the ready-to-send list is §2 of that document) for:
       responses.
 - [ ] Refund process (API or manual) and the daily MIS / settlement report format.
 
-Then: write the adapter against the specification, run the nine UAT scenarios
-in §5, and only after they pass follow the activation checklist in §6.
+Then: write the adapter against the specification, check it against the
+acceptance matrix (§3.1), run the UAT scenarios in §5, and only after SBI signs
+off follow the activation plan and checklist in §6.
 
 ## B. Payment-recovery scheduler — `docs/payment-safety.md` §3
 
@@ -107,7 +122,12 @@ additive, applied in this order:
 - [ ] Validate: one counter cash order, its bill, the KOT, and the dashboard totals.
 - [ ] Rollback: redeploy the previous build (it ignores the new columns and
       tables). Do not reverse migrations 1–7 (they hold business records and an
-      audit guarantee). Only 8–9 have a documented down-script, after a fresh backup.
+      audit guarantee). There are no down-migration files; only 8–9 have a
+      documented manual reversal (SQL in `docs/payment-safety.md` §7, step 6),
+      to be used only after a fresh backup.
+- These migrations exist in the repository and were applied to a copy of the
+  local database; that says nothing about Production. Only `migrate status`
+  on Production shows what is applied there.
 
 ## E. Late-payment policy — **owner approval required**
 
@@ -181,23 +201,35 @@ published.** After the owner approves and commits the review work:
 - [ ] Installers are unsigned (code signing not configured): decide before
       distributing to anyone outside the restaurant.
 
-## Before committing the review work
+## I. Table QR tokens — `docs/qr-token-rotation.md`
 
-- [ ] Decide on `artifacts/coders-cafe-qr/` (untracked, 2026-10-15; T01–T10
-      PNGs, a print-sheet PDF, `verification.json`). **Confirmed 2026-10-20
-      by decoding every PNG:** all ten point to
-      `https://restora-beta-six.vercel.app/t/<table token>`, the live
-      Production site, so scanning one orders against Production. Keep them out
-      of commits and out of any investor-demo package unless that is intended.
-      They are not deleted.
-- [ ] Know that the Coders' Cafe table tokens are derived from the table code
-      (`cafeTableToken` in `prisma/coders-cafe/seed.ts`), so the demo database,
-      Production and anyone reading the source share them. Before real guests
-      use printed QRs, rotate Production's table tokens and print from those.
-- For an isolated local demo QR, read from the demo database and **always pass
-  an explicit local address** (local mode otherwise takes `PUBLIC_BASE_URL`,
-  and it does not refuse a public URL):
-  `$env:DATABASE_URL="file:./investor-demo-2026-10-20.db"; npm run qr:tables -- --base-url http://<this-PC's-LAN-IP>:3000`
-  It only reads the tables, writes to the git-ignored `artifacts/table-qr/local/`,
-  and labels the sheet *LOCAL TEST — NOT FOR CUSTOMER PRINTING*. Never use
+- `artifacts/coders-cafe-qr/` (git-ignored; T01–T10 PNGs, a print-sheet PDF,
+  `verification.json`): **confirmed 2026-10-20 by decoding every PNG**, all ten
+  point to `https://restora-beta-six.vercel.app/t/<table token>`, the live
+  Production site, so scanning one orders against Production. Keep them out of
+  any investor-demo package unless that is intended. They are not deleted.
+- New tokens are random (`src/server/qr/tableToken.ts`), but Production and the
+  investor-demo database still hold the **legacy** tokens derived from the table
+  code (`legacyCafeTableToken` in `prisma/coders-cafe/seed.ts`), which anyone
+  reading the source can compute. They are not rotated by any code change.
+- **Do not print, hand out or put on tables any existing Production QR** (from
+  `artifacts/coders-cafe-qr/` or Tables → Download QR) until the audit below
+  is clean or the approved rotation is done.
+- [ ] Read-only audit: `npm run qr:audit` on a read-only Production connection
+      (prints classes, never tokens; exit 2 while any legacy token remains).
+- [ ] Written approval and a closed window; verified backup first.
+- [ ] Rotate T01–T10 (Tables → **Rotate**), generate new labels with
+      `npm run qr:tables -- --mode production --base-url https://<public host>`,
+      verify each new label with a phone on mobile data (correct table) and that
+      an old card shows "This QR code isn't working".
+- [ ] Replace the printed cards; destroy the old ones.
+- Every `npm run qr:tables` run needs an explicit `--base-url`; the CLI refuses
+  to run without one.
+- For an isolated local demo QR, read from the demo database and pass an
+  explicit local address (`--base-url` is required on every run;
+  `PUBLIC_BASE_URL` is never used):
+  `$env:DATABASE_URL="file:./investor-demo-2026-10-20.db"; npm run qr:tables -- --base-url http://<this-PC's-LAN-IP>:3000 --purpose investor-demo`
+  It only reads the tables, writes to the git-ignored `artifacts/table-qr/`,
+  and labels the sheet *LOCAL INVESTOR DEMO — NOT FOR CUSTOMER USE* and
+  *LOCAL TEST — NOT FOR CUSTOMER PRINTING*. Never use
   `scripts/qr/demo-assets.ts` for the demo: its only allowed origin is Production.

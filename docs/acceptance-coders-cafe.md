@@ -4,7 +4,10 @@
 > the Razorpay emulator to the direct-bank UPI QR emulator
 > (`tests/support/upiBankEmulator.ts`) when Razorpay was retired for new payments.
 > The evidence recorded below is from the **2026-10-12 Razorpay-emulator run** and
-> is kept as history; re-run `npm run e2e:acceptance` for current evidence.
+> is kept as history; re-run `npm run e2e:acceptance` for current evidence. The
+> Razorpay files it names cannot be run: `tests/support/razorpayEmulator.ts` and
+> `tests/domain/coders-cafe-razorpay.test.ts` were removed on 2026-10-20, and
+> `e2e/razorpay-sandbox.spec.ts` was never committed.
 
 _Run of 2026-10-12 on a fresh database, on the branch merged with `main` (`a80caa9`) (`prisma/e2e-acceptance.db`, rebuilt from the committed migrations for every run), production build, SQLite. Command: `npm run build && npm run e2e:acceptance`. Result: **7 tests passed, 31 of 31 recorded steps PASS** (steps 1-30 and the final sweep). The suite is `e2e/acceptance/acceptance.spec.ts`; it is also a CI step, and CI uploads the full evidence (every observation, screenshots) as the artifact `acceptance-evidence-coders-cafe`._
 

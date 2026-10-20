@@ -1,6 +1,6 @@
 # Online payment safety, kitchen gate, recovery and the direct-bank UPI checkout
 
-Status (2026-10-20, branch `release/coders-cafe-2026-10-13`, uncommitted):
+Status (2026-10-20, branch `release/coders-cafe-2026-10-13`, committed locally in `2ba65ee`, not pushed):
 
 | Item | State |
 | --- | --- |
@@ -198,7 +198,9 @@ late payment is held for staff rather than refunded automatically.
    asked once more, then the guest can get a new QR.
 5. A signed bank callback (`POST /api/webhooks/payment/<provider>`) only
    triggers `verifyPayment`, which asks the bank itself; duplicates are
-   idempotent.
+   idempotent. Today every `sbi_upi` callback is refused (401, nothing
+   recorded) until the adapter exists; of the direct-bank adapters, only the
+   local emulator's callbacks can be authenticated.
 
 ## 6. Production safeguards
 
@@ -238,8 +240,11 @@ re-asked automatically when the bank is back.
 
 **Rollback:** redeploy the previous build. Do **not** set
 `PAYMENT_PROVIDER=razorpay` to "restore" online payment: Razorpay is retired and
-the code refuses it for new checkouts. The migrations below only add columns
-and an index; the previous build ignores them, so no down-migration is needed.
+the code refuses it for new checkouts. Every migration listed below is
+additive (columns, tables, indexes, triggers); the previous build ignores them,
+so a rollback needs no schema reversal. The repository has **no down-migration
+files**; the only documented reversal is the manual SQL in step 6 below, for
+this release's own two migrations.
 
 ### Production migration procedure (not run — needs the owner's approval)
 
@@ -264,7 +269,10 @@ checked: no dropped table or column, and no NOT NULL column without a default,
 so the `a80caa9` code still runs on the migrated schema (`a80caa9` never
 updates or deletes `AuditLog` / `InventoryLedger` rows, so the triggers do not
 break it). The same nine applied cleanly to a copy of the local `dev.db` with
-every table's row count unchanged (SQLite, 2026-10-20). Vercel has no
+every table's row count unchanged (SQLite, 2026-10-20). **None has been applied
+to Production by this work**: a migration being in the repository, or applied
+to a local copy, does not mean it is applied to Production; only step 3's
+`migrate status` against Production shows that. Vercel has no
 Production-scoped `DATABASE_URL` record (observed 2026-10-19), so a new
 Production deploy would start without a database until the owner sets one.
 

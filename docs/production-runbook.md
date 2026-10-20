@@ -72,8 +72,16 @@ online payment is unavailable, QR ordering is refused and guests order through t
    Settings → Integrations → Payment · sbi_upi. Callbacks of an unbound merchant are refused.
 3. Configure the pending-payment recovery scheduler (`/api/cron/payments` every minute,
    `docs/payment-safety.md` §3) and confirm `GUEST_FULFILMENT_WINDOW_MINUTES` with the owner.
-4. Tables → QR per table → **Download QR (SVG)** and print. The code points at
-   `PUBLIC_BASE_URL`; check one with a phone on mobile data (not the restaurant Wi-Fi).
+4. **Before printing or distributing any table QR**, audit the tokens: a database seeded
+   before 2026-10-20 (Coders' Cafe Production included) holds legacy, guessable tokens.
+   Run `npm run qr:audit` on a read-only connection; while it exits 2, do not print or hand
+   out the existing codes (including `artifacts/coders-cafe-qr/`). Rotate only with the
+   owner's written approval, in a closed window, after a verified backup
+   (`docs/qr-token-rotation.md`).
+5. Only then: Tables → QR per table → **Download QR (SVG)** (or `npm run qr:tables -- --mode
+   production --base-url https://<public host>`; `--base-url` is required) and print. Check
+   every new label with a phone on mobile data (not the restaurant Wi-Fi), confirm an old
+   card shows "This QR code isn't working", and replace the cards on the tables.
 
 ### 1.5 Backups (before the first customer)
 Backup host cron (daily, quiet hour) as `restora_backup`:

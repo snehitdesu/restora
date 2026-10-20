@@ -1,5 +1,41 @@
 # Production readiness — Aharos
 
+## Current position (2026-10-20) — not ready for Production
+
+**Branch `release/coders-cafe-2026-10-13` is ready for a local investor demo
+only. It is not ready for SBI UAT or for a Production deployment.** Counter POS,
+KDS and back-office workflows are verified locally (unit / integration tests and
+browser E2E on local databases), but nothing on this branch has been deployed
+or verified in Production. Production, as last observed, runs `main` `a80caa9`.
+
+Open blockers, all outside the codebase (order and owners:
+`docs/owner-go-live-checklist.md`):
+
+- **Online guest payment does not exist yet.** The SBI adapter (`sbi_upi`) is a
+  stub that refuses every call; guest QR ordering is therefore refused. It needs
+  SBI's specification, onboarding, UAT and sign-off
+  (`docs/sbi-upi-integration.md`). The local UPI emulator and `mock` provider are
+  for a disposable local demo only and are refused in Production.
+- **Production database:** no Production `DATABASE_URL` on record; backup not
+  proven; this branch carries nine migrations newer than `a80caa9`'s schema,
+  none applied to Production by this work (`docs/payment-safety.md` §7).
+- **Production table QR tokens** are the legacy, derivable ones: audit and an
+  owner-approved rotation, then new printed cards, before guests use them
+  (`docs/qr-token-rotation.md`).
+- **Payment-recovery scheduler** on Vercel not configured or proven
+  (`docs/payment-safety.md` §3).
+- **Owner decisions:** the late-payment window (10 minutes is a proposed default,
+  not approved), the recovery scheduler / Vercel plan, the release.
+- **Legacy Razorpay** read-only audit blocked (`docs/payments-razorpay.md`).
+- **Physical bill printer** not verified (`docs/physical-printer-test.md`).
+
+The sections below are dated history. In particular, the 2026-10-01 verdict
+("ready for a controlled production deployment once the MUST items are done")
+predates the retirement of Razorpay and the SBI requirement, and is **not** the
+current status.
+
+---
+
 _Audit of 2026-10-01 (production verification & hardening pass). Every "verified"
 item below was executed, not inferred; see PROJECT_STATUS.md for exact results._
 
@@ -44,7 +80,7 @@ See `docs/system-audit.md` (defects D1–D12, gap register, test counts). In sho
 - **Preview-only `RAZORPAY_WEBHOOK_SECRET` — origin established (investigated 2026-10-19):** Vercel record `oslMduoXKrXWRoiw`, type Sensitive, target **Preview only**, git branch **`release/coders-cafe-2026-10-13` only**, created 2026-10-19 05:38:06 UTC by the project owner's CLI token and never edited since. It was created by the Cloud Sync test session after the owner chose "Add placeholder (Recommended)" when that session asked how to fix the Preview's boot failure (`PAYMENT_PROVIDER=razorpay` is shared with Preview, but the webhook secret existed only for Production, so startup validation refused to boot). The value is 32 random bytes generated in that session and never printed or stored; no one holds it, so no Razorpay webhook can be configured with it. Consumer: `RazorpayPaymentProvider.verifyWebhook` (`src/integrations/payment/index.ts`) behind `POST /api/webhooks/payment/razorpay`, after the per-tenant binding in `src/server/services/webhookTenant.ts` (a tenant's own webhook secret, when set, takes precedence). Effect: on that branch's Previews every unsigned or foreign-signed Razorpay delivery is 401 — Preview webhooks are deliberately inert (the Preview is also behind Vercel Authentication, so Razorpay could not reach it anyway). The shared `RAZORPAY_KEY_ID` is a test key (the Preview logs the "TEST key" configuration warning). Production's own record (`LlIIEOFhjXOkXGfv`, Production only, 2026-10-10) is separate and was not touched. No rotation was needed; if a test-mode webhook is ever pointed at a Preview, replace this placeholder with the secret set in the Razorpay test dashboard. Signature, replay, tenant isolation and failure behaviour re-verified locally: `tests/domain/webhook-tenant.test.ts`, `tests/domain/webhooks-reconciliation.test.ts`, `tests/integrations/razorpay.test.ts`, `tests/api/integrations-routes.test.ts` (49/49).
 - **Decided (2026-10-19) — kitchen display idle exemption kept, and narrowed:** a kitchen screen must stay visible during service, so the KDS ticket poll (`GET /api/kitchen/kots`) keeps the session alive — but only for a kitchen-only account (every role `KITCHEN`), decided server-side. A manager, owner, cashier or mixed-role account watching the KDS gets no exemption (previously any account's KDS poll counted as activity), and the campaign detail page's 8 s refresh is now background polling too. Details and tests: `docs/security.md` → *Kitchen display idle exemption*. Deployment note: sign kitchen screens in with a dedicated KITCHEN-only account.
 
-## Verdict
+## Verdict of the 2026-10-01 audit (historical — superseded by "Current position" above)
 
 **Ready for a controlled production deployment once the MUST items below are done.**
 The application itself (auth, RBAC, tenant/outlet isolation, workflows, POS/KDS,
