@@ -206,6 +206,8 @@ export const REPORTS: Record<string, AnyReport> = {
       { key: "issueQty", header: "Issued (qty)", value: (r) => r.issueQty }, { key: "wastageQty", header: "Wasted (qty)", value: (r) => r.wastageQty },
       { key: "consumedValue", header: "Consumed value", value: (r) => r.consumedValue }, { key: "wastageValue", header: "Wastage value", value: (r) => r.wastageValue },
       { key: "wastagePct", header: "Wastage %", value: (r) => r.wastagePct },
+      // "No": some of that stock moved with no cost at the outlet, so the value above understates it.
+      { key: "valuesComplete", header: "Values complete", value: (r) => (r.consumedValueComplete && r.wastageValueComplete ? "Yes" : "No") },
     ]),
 
   STOCK_AGEING: define({

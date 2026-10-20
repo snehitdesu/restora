@@ -741,7 +741,13 @@ const USAGE_TYPES = ["SALE_CONSUMPTION", "PRODUCTION_CONSUMPTION", "ISSUE"];
 export async function materialConsumption(db: PrismaClient, ctx: AccessContext, filter: AnalyticsFilter = {}) {
   const ids = authorizedOutletIds(ctx, filter);
   if (!ids.length) return [];
-  const grouped = await db.inventoryLedger.groupBy({ by: ["materialId", "txnType"], where: ledgerWhere(ctx, filter, ids, [...USAGE_TYPES, ...WASTE_TYPES]), _sum: { qty: true, amount: true } });
+  const where = ledgerWhere(ctx, filter, ids, [...USAGE_TYPES, ...WASTE_TYPES]);
+  const [grouped, zeroValued] = await Promise.all([
+    db.inventoryLedger.groupBy({ by: ["materialId", "txnType"], where, _sum: { qty: true, amount: true } }),
+    // Stock that moved while the material had no cost at the outlet is recorded at ₹0: its value is unknown, not nil.
+    db.inventoryLedger.groupBy({ by: ["materialId", "txnType"], where: { ...where, amount: 0, qty: { not: 0 } }, _count: { _all: true } }),
+  ]);
+  const uncosted = new Set(zeroValued.map((g) => `${g.materialId}:${WASTE_TYPES.includes(g.txnType) ? "wastage" : "used"}`));
   const acc = new Map<string, Record<"saleQty" | "saleValue" | "productionQty" | "productionValue" | "issueQty" | "issueValue" | "wastageQty" | "wastageValue", Dec>>();
   const zero = () => ({ saleQty: D(0), saleValue: D(0), productionQty: D(0), productionValue: D(0), issueQty: D(0), issueValue: D(0), wastageQty: D(0), wastageValue: D(0) });
   for (const g of grouped) {
@@ -759,6 +765,8 @@ export async function materialConsumption(db: PrismaClient, ctx: AccessContext, 
         materialId, material: names.get(materialId)?.name ?? materialId, unit: names.get(materialId)?.unit ?? "",
         saleQty: num(a.saleQty), productionQty: num(a.productionQty), issueQty: num(a.issueQty), wastageQty: num(a.wastageQty),
         consumedValue: m2(usedValue), wastageValue: m2(a.wastageValue),
+        // False when some of that stock moved with no cost at the outlet: the value is then a part (or none) of the real one.
+        consumedValueComplete: !uncosted.has(`${materialId}:used`), wastageValueComplete: !uncosted.has(`${materialId}:wastage`),
         wastagePct: pct(a.wastageValue, usedValue.plus(a.wastageValue)),
       };
     })
@@ -901,7 +909,7 @@ export async function stockAgeing(db: PrismaClient, ctx: AccessContext, filter: 
       const status = usedQty.isZero() ? "DEAD" : cover && cover.gt(STOCK_AGEING_RULES.slowCoverDays) ? "SLOW" : "OK";
       return {
         outletId: s.outletId, outlet: codes.get(s.outletId) ?? s.outletId, materialId: s.materialId, material: names.get(s.materialId)?.name ?? s.materialId, unit: names.get(s.materialId)?.unit ?? "",
-        onHand: num(onHand.toDecimalPlaces(4)), value: m2(onHand.times(costs.get(k) ?? D(0))), usedQty: num(usedQty.toDecimalPlaces(4)),
+        onHand: num(onHand.toDecimalPlaces(4)), value: m2(onHand.times(costs.get(k) ?? D(0))), valueKnown: (costs.get(k) ?? D(0)).gt(0), usedQty: num(usedQty.toDecimalPlaces(4)),
         lastUsedAt: lastMap.get(k) ?? null, daysOfCover: cover ? num(cover.toDecimalPlaces(1)) : null, status, lookbackDays: lookback,
       };
     })

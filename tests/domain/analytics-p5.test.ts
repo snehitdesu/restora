@@ -243,12 +243,14 @@ describe("isolation", () => {
 describe("inventory analytics", () => {
   it("consumption, wastage %, movement, slow / dead and negative stock come from the ledger", async () => {
     const cons = await materialConsumption(prisma, mgrA, { outletId: A });
-    expect(cons.find((r) => r.materialId === rice)).toMatchObject({ saleQty: 2, wastageQty: 1, consumedValue: 100, wastageValue: 50, wastagePct: 33.33 });
+    expect(cons.find((r) => r.materialId === rice)).toMatchObject({ saleQty: 2, wastageQty: 1, consumedValue: 100, wastageValue: 50, wastagePct: 33.33, consumedValueComplete: true, wastageValueComplete: true });
+    // Salt was used at no cost (never received): its ₹0 is an unknown value, flagged rather than reported as nil.
+    expect(cons.find((r) => r.materialId === salt)).toMatchObject({ saleQty: 1, consumedValue: 0, consumedValueComplete: false, wastageValueComplete: true });
     const moves = await inventoryMovement(prisma, mgrA, { outletId: A });
     expect(moves.find((m) => m.txnType === "PURCHASE_RECEIPT")).toMatchObject({ entries: 2, inValue: 1750, outValue: 0 });
     expect(moves.find((m) => m.txnType === "WASTAGE")).toMatchObject({ entries: 1, outValue: 50 });
     const ageing = await stockAgeing(prisma, mgrA, { outletId: A });
-    expect(ageing.find((r) => r.materialId === oil)).toMatchObject({ status: "DEAD", onHand: 25, value: 1250, usedQty: 0, daysOfCover: null });
+    expect(ageing.find((r) => r.materialId === oil)).toMatchObject({ status: "DEAD", onHand: 25, value: 1250, valueKnown: true, usedQty: 0, daysOfCover: null });
     expect(ageing.find((r) => r.materialId === rice)).toMatchObject({ status: "SLOW", onHand: 7, usedQty: 2, daysOfCover: 105 }); // 7 / (2/30)
     expect(ageing.some((r) => r.materialId === salt)).toBe(false); // nothing on hand
     expect(await negativeStockReport(prisma, mgrA, { outletId: A })).toEqual([expect.objectContaining({ materialId: salt, material: "Salt", quantity: -1 })]);
