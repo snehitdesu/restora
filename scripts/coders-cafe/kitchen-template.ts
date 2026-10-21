@@ -60,6 +60,24 @@ write(
   CODERS_CAFE_MENU.flatMap((c) => c.items.flatMap((i) => (i.sizes ?? []).map((s) => [i.name, s.name, s.price, 1, "", ""]))),
 );
 
+// One row per draft recipe, in menu order: the sign-off tracker from estimate to approved version.
+const sizes = new Map(CODERS_CAFE_MENU.flatMap((c) => c.items.map((i) => [i.name, (i.sizes ?? []).map((s) => s.name)] as const)));
+const menuOrder = CODERS_CAFE_MENU.flatMap((c) => c.items.map((i) => i.name));
+write(
+  "recipe-signoff.csv",
+  ["Category", "Menu item", "DRAFT ingredient lines", "Sizes needing a factor", "Ingredients with DRAFT allergens (NOT VERIFIED)", "Lines weighed + recipe-lines.csv filled (Y/N)", "Size factors filled (Y / N / none)", "Allergen evidence for every ingredient (Y/N)", "Entered in RESTORA + Confirm quantities (Y/N)", "Approved in RESTORA by (name)", "Date approved"],
+  [...DRAFT_RECIPES]
+    .sort((a, b) => menuOrder.indexOf(a.item) - menuOrder.indexOf(b.item))
+    .map((r) => [
+      category.get(r.item),
+      r.item,
+      r.lines.length,
+      sizes.get(r.item)?.join("; ") || "none",
+      r.lines.map(([sku]) => ingredient.get(sku)!).filter((i) => i.allergens?.length).map((i) => i.name).join("; "),
+      "", "", "", "", "", "",
+    ]),
+);
+
 write(
   "not-covered.csv",
   ["Menu item", "Why there is no draft", "Contents (pieces / sides / drink)", "Checked by (name)"],

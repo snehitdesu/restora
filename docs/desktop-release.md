@@ -20,6 +20,11 @@ from Windows, and an Intel DMG cannot be produced on Apple Silicon). CI builds b
 `.github/workflows/ci.yml` job `desktop-macos` (arm64 + x64 runners) runs the
 desktop E2E, `desktop:verify` and the DMG build and uploads each DMG.
 
+_Update 2026-10-21:_ item (1) below is resolved in CI: run 39492234842 on
+`e7fedf8` built both DMGs (arm64 and x64; desktop E2E 9/9, `desktop:verify`
+24/24 each), unsigned and not published. Item (2) (Developer ID signing and
+notarization) is still open, and nobody has installed a DMG on a real Mac.
+
 Not yet done for macOS: **(1)** no macOS package has been produced yet. Every
 `desktop-macos` run up to 6bca43c built the payload and passed the desktop E2E on
 both arches, then failed at "Package: RESTORA.app" with `<repo> not a file`: the

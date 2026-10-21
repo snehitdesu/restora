@@ -57,6 +57,18 @@ by `tests/desktop/backup.test.ts`, `upgrade-restore.test.ts`, `migrator.test.ts`
 PostgreSQL dump / restore: `scripts/ops/backup-drill.mjs` (documented in
 `docs/production-runbook.md`); not re-run in this pass.
 
+**Re-run 2026-10-21 on the current schema (commit `e7fedf8`): PASSED 10/10 in
+127 s.** Disposable local PostgreSQL 16.14 cluster, fresh database
+`restora_drill` built with `npm run db:pg:deploy` (all 21 PostgreSQL
+migrations, latest `20261025100000_recipe_estimates`), then the demo seed and
+the Coders' Cafe seed (122 tables, 2,159 rows). Encrypted backup 0.37 MB;
+tampered file, wrong key and overwrite without `--confirm-overwrite` all
+refused; source dropped and restored; every table's count + md5 identical to
+the pre-backup fingerprint; business invariants identical. Not exercised: the
+role/grant re-apply step (`--roles-file`, needs real role passwords), a
+production-sized data set, and any Production backup — Production's database
+and backups are still unverified.
+
 ## 5. Plan for the ORIGINAL `prisma/dev.db` — executed 2026-10-13
 
 Approved by the user and executed on 2026-10-13 (record below). The steps:

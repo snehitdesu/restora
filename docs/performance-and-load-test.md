@@ -235,3 +235,42 @@ Invariants afterwards: 3,146 QR orders = 3,143 acknowledged + 3 duplicate-test o
 - The hosted Vercel demo (no URL or credentials in the repository; no traffic was sent to it).
 - The packaged desktop app under load.
 - Multi-instance web deployments.
+
+---
+
+## Staging load-test plan (prepared 2026-10-21, not run)
+
+All numbers above are from one laptop. Before claiming capacity for the real
+hosting, run this on a **staging** copy of it. Never against Production: the
+harness creates users, `load-…` QR tables, printers and orders, and samples
+`pg_stat_*` through an admin connection.
+
+1. **Environment.** A staging deployment on the same hosting plan and region
+   as Production, with its **own** PostgreSQL database of the same tier
+   (restored from a Production backup per `docs/production-migration-preflight.md`
+   step 3, or seeded), `ALLOW_MOCK_PROVIDERS=true` (staging only; payments are
+   simulated), and Deployment Protection either bypassed for the load host
+   or the test run from inside the protection boundary.
+2. **Tools.** `scripts/ops/load-test.mjs` needs Node and the `psql` client on
+   the load machine (`LOAD_BASE`, `LOAD_DATABASE_URL` = admin URL of the
+   staging database, `LOAD_METRICS_TOKEN`). Run it from a machine near the
+   hosting region, not over a home uplink.
+3. **Profiles.** First `--conc 0.25` (realistic: a full café), then the
+   default, then `--scale 2` only if the first two are clean. Stop at the first
+   stage with 5xx above 0.1 % or p95 above 2 s on guest reads.
+4. **Watch.** Function errors / timeouts and cold starts in the hosting logs;
+   database connections against the pool limit (the harness counts only
+   sessions of the `restora_app` role from `scripts/ops/pg-roles.sql`; with a
+   single provider role it reports 0, so read the provider's connection graph); lock waits and deadlocks (the
+   harness reports them); `restora_db_serialization_conflicts_total` in
+   `/api/health/metrics`.
+5. **Pass criteria (proposal, owner to confirm).** At the realistic profile:
+   0 server errors, guest menu p95 ≤ 500 ms, order placement p95 ≤ 1.5 s,
+   KDS list p95 ≤ 500 ms; afterwards the harness invariants hold (no
+   acknowledged order missing, no order without a KOT, no duplicate KOT number
+   or idempotency key).
+6. **Afterwards.** Drop the staging database (it holds `load-` tables and test
+   users); record hosting plan, region, database tier, profile, results.
+
+Untestable without hardware / people: real phones on the café Wi-Fi (see
+`docs/real-phone-qr-test.md`) and the packaged desktop app under load.

@@ -15,6 +15,17 @@ invoice, stock movement or KOT (`tests/domain/bill-printing.test.ts`,
 
 RESTORA prints in two ways. Test the one the restaurant will use.
 
+## Before the test (check once, 10 minutes)
+
+- [ ] Which printer, exactly (make, model, 58 or 80 mm), and how it connects:
+      Ethernet / Wi-Fi (method A) or USB to a Windows PC (method B only;
+      RESTORA has no USB ESC/POS driver).
+- [ ] For method A: the manual says it accepts raw TCP on port 9100.
+- [ ] Paper roll loaded; the RESTORA server / desktop PC and the printer on the
+      same network (method A).
+- [ ] An OWNER or MANAGER login (Printers & drawer is an admin screen).
+- [ ] Time to cancel / refund the test order afterwards (step A.9).
+
 ## A. Network ESC/POS receipt printer (recommended for the counter)
 
 Needs an Ethernet / Wi-Fi thermal printer that accepts raw ESC/POS on TCP port
@@ -57,5 +68,19 @@ Needs an Ethernet / Wi-Fi thermal printer that accepts raw ESC/POS on TCP port
    paper came out, so the page only says the dialog closed. Cancelling the
    dialog and printing again is safe.
 
-Record the result (printer model, width, which method, date, who checked) in
-the restaurant's go-live checklist.
+## Record (copy into the go-live checklist, item G)
+
+| Field | Value |
+| --- | --- |
+| Date / who checked | |
+| Printer make + model, paper width | |
+| Method (A network / B browser), IP + port for A | |
+| A.4 Check reachable | pass / fail |
+| A.5 Test slip printed and cut | pass / fail |
+| A.6 Bill content complete (name, address, items, sizes / add-ons, GST, ₹ total, Paid, invoice number, nothing cut off) | pass / fail + photo of the slip |
+| A.7 Second send refused; reprint audited | pass / fail |
+| A.8 Cable out → *Print failed*; Retry works | pass / fail |
+| Test order cancelled / refunded | yes / no |
+
+A fail on A.6 (missing or cut text) usually means the wrong *Characters /
+line*: try 32 for 58 mm, 42 then 48 for 80 mm, and test again.

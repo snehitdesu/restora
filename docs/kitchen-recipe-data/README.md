@@ -14,6 +14,12 @@ rows.
 | `ingredients.csv` | ingredient (54) | The allergens **with evidence** (label photo or supplier sheet), brand / supplier, pack size and the price actually paid. |
 | `size-factors.csv` | larger size of a dish (24) | How much more a Medium / Large uses than the base size. Today RESTORA counts every size as 1× the base recipe. |
 | `not-covered.csv` | dish with no draft (3 combos) | What the combo actually contains. |
+| `recipe-signoff.csv` | draft recipe (61), in menu order | Nothing new: a tracker. Tick each step as it is done (lines weighed, size factors, allergen evidence, entered + *Confirm quantities*, approved by whom and when). A recipe is finished only when its last two columns are filled. |
+
+Suggested order: work one category at a time from `recipe-signoff.csv`; for
+each dish weigh the lines in `recipe-lines.csv`, then its sizes in
+`size-factors.csv`; collect allergen evidence and paid prices per ingredient
+in `ingredients.csv` once (ingredients are shared across dishes).
 
 Rules for whoever fills these in:
 

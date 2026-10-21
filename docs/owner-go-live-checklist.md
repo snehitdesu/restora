@@ -1,10 +1,11 @@
 # RESTORA — owner go-live checklist (Coders' Cafe)
 
-Status 2026-10-20, branch `release/coders-cafe-2026-10-13`: six local commits
-ahead of `origin` (`0b9f06f` analytics, `ddbef68` bill print, `2ba65ee`
-payments / QR tokens / recipes, `8e3b8fb` and `582c7c6` documentation, `107e849`
-site-demo QR token) plus the documentation commit that adds this text; **none
-pushed**. **Ready for the local investor demo. Not ready for SBI UAT or
+Status 2026-10-21, branch `release/coders-cafe-2026-10-13`: `origin` is at
+`e7fedf8`, which contains the 2026-10-20 review commits listed in the earlier
+version of this line. Two local commits on top, **not pushed** (owner approval
+needed): `44ece0d` QR tooling and the readiness documentation
+(`docs/launch-readiness-2026-10-21.md` §6).
+**Ready for the local investor demo. Not ready for SBI UAT or
 Production.** Every item below needs a person or organisation outside this
 codebase. Nothing here has been sent, deployed, migrated or published.
 
@@ -128,6 +129,9 @@ additive, applied in this order:
 - These migrations exist in the repository and were applied to a copy of the
   local database; that says nothing about Production. Only `migrate status`
   on Production shows what is applied there.
+- Step-by-step preflight with stop conditions, including the backup trap
+  (take the pre-upgrade backup from a checkout of `a80caa9`):
+  `docs/production-migration-preflight.md`.
 
 ## E. Late-payment policy — **owner approval required**
 
@@ -148,6 +152,7 @@ and are excluded from stock consumption and food cost. Missing ingredient
 costs show *Cost unavailable*, never ₹0.00. Keep them as drafts until the
 kitchen supplies:
 
+- [ ] Track progress per dish in `recipe-signoff.csv` (61 rows, menu order).
 - [ ] Real quantity and unit per base-size portion for each of the 429
       ingredient lines (`recipe-lines.csv`), plus missing ingredients and yield.
 - [ ] Portion yields and Medium / Large consumption factors for the 24 sized
@@ -181,7 +186,8 @@ With the actual intended receipt printer:
 7. Unplug the network cable and send → must say *Print failed*; reconnect, Retry.
 8. Cancel or refund the test order.
 9. If using browser printing instead: method B in the document.
-- [ ] Record printer model, width, method, date and who checked.
+- [ ] Record printer model, width, method, date and who checked (record
+      table at the end of `docs/physical-printer-test.md`).
 
 ## H. Release — `docs/desktop-release.md` "One version, one binary"
 
@@ -217,12 +223,18 @@ published.** After the owner approves and commits the review work:
   is clean or the approved rotation is done.
 - [ ] Read-only audit: `npm run qr:audit` on a read-only Production connection
       (prints classes, never tokens; exit 2 while any legacy token remains).
+      Rotate **every** table it flags: databases seeded before 2026-10-05 also
+      hold `<outlet>-<table>` tokens (26 in `prisma/dev.db`).
 - [ ] Written approval and a closed window; verified backup first.
 - [ ] Rotate T01–T10 (Tables → **Rotate**), generate new labels with
       `npm run qr:tables -- --mode production --base-url https://<public host>`,
       verify each new label with a phone on mobile data (correct table) and that
       an old card shows "This QR code isn't working".
-- [ ] Replace the printed cards; destroy the old ones.
+- [ ] Replace the printed cards; destroy the old ones. `qr:tables --mode
+      production` refuses while T01–T10 still hold legacy tokens, so cards
+      cannot be printed before rotating.
+- [ ] Real phones: `docs/real-phone-qr-test.md` stage 1 (now) and stage 2
+      (after SBI UAT).
 - Every `npm run qr:tables` run needs an explicit `--base-url`; the CLI refuses
   to run without one.
 - For an isolated local demo QR, read from the demo database and pass an
