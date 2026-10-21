@@ -5,8 +5,10 @@
  *
  * For every table in DATABASE_URL it prints organization, outlet, table code
  * and one class, never the token itself:
- *   legacy-derivable  the hash of public constants the demo seed stored before
- *                     2026-10-20 (anyone with the source can compute it)
+ *   legacy-derivable  computable by anyone with the source: the Coders' Cafe
+ *                     hash of public constants the seed stored before
+ *                     2026-10-20, or the demo seed's "<outlet>-<table>" value
+ *                     stored before 2026-10-05
  *   random            24-character base64url, the shape newTableQrToken issues
  *   nonstandard       any other stored value (hand-set, load-test, fixture)
  *   none              no QR issued (revoked or never issued)
@@ -21,9 +23,10 @@ import { legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
 
 export type TokenClass = "legacy-derivable" | "random" | "nonstandard" | "none";
 
-export function classifyTableToken(code: string, token: string | null): TokenClass {
+export function classifyTableToken(code: string, token: string | null, outletCode?: string): TokenClass {
   if (!token) return "none";
   if (token === legacyCafeTableToken(code)) return "legacy-derivable";
+  if (outletCode && token === `${outletCode}-${code}`) return "legacy-derivable";
   if (/^[A-Za-z0-9_-]{24}$/.test(token)) return "random";
   return "nonstandard";
 }
@@ -38,7 +41,7 @@ export async function auditTableTokens(db: PrismaClient): Promise<TokenAuditRow[
   const byId = new Map(outlets.map((o) => [o.id, o]));
   return tables.map((t) => {
     const o = byId.get(t.outletId);
-    return { organization: o?.organization.name ?? "?", outlet: o?.code ?? "?", code: t.code, class: classifyTableToken(t.code, t.qrToken) };
+    return { organization: o?.organization.name ?? "?", outlet: o?.code ?? "?", code: t.code, class: classifyTableToken(t.code, t.qrToken, o?.code) };
   });
 }
 

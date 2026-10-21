@@ -31,7 +31,7 @@ import {
   writeTableQrFiles,
 } from "@/server/qr/tableLabels";
 import { loadCafeTableRows, runQrGenerate } from "../../scripts/qr/generate-table-qrs";
-import { findCafe } from "../../prisma/coders-cafe/seed";
+import { findCafe, legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
 
 const RUN = Date.now().toString(36);
 const PUBLIC = "https://menus.example.com";
@@ -335,6 +335,29 @@ describe("table QR URL validation", () => {
     };
     await expect(runQrGenerate(["--mode", "production", "--base-url", "http://localhost:3000", "--out", out], db as never)).rejects.toThrow(/public https/);
     expect(fs.existsSync(out)).toBe(false);
+  });
+
+  it("refuses production labels while any table still holds a derivable legacy token; local sheets still work", async () => {
+    const rows = CAFE_TABLE_CODES.map((code, i) => ({ code, qrToken: i === 3 ? legacyCafeTableToken(code) : i === 6 ? `CC01-${code}` : tokenFor(code) }));
+    const db = {
+      organization: { findFirst: () => Promise.resolve({ id: "org" }) },
+      outlet: { findFirst: () => Promise.resolve({ id: "outlet" }) },
+      restaurantTable: { findMany: () => Promise.resolve(rows) },
+    };
+    const out = `artifacts/table-qr/refuse-legacy-${RUN}`;
+    try {
+      await expect(runQrGenerate(["--mode", "production", "--base-url", PUBLIC, "--out", out], db as never)).rejects.toThrow(/Tables T04, T07 still hold.*rotate/i);
+      expect(fs.existsSync(out)).toBe(false);
+      for (const argv of [["--base-url", "http://192.168.1.20:3000", "--purpose", "local-test"], ["--base-url", "http://localhost:3000"]]) {
+        const local = await runQrGenerate([...argv, "--out", out], db as never);
+        if (local.help) throw new Error("expected a generated sheet");
+        expect(local.pack.printReady).toBe(false);
+        expect(local.pack.labels).toHaveLength(CAFE_TABLE_CODES.length);
+        expect(fs.existsSync(`${out}/NOT-FOR-CUSTOMER-PRINTING.txt`)).toBe(true);
+      }
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
   });
 });
 

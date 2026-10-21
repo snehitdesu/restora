@@ -10,13 +10,14 @@
  * marked NOT FOR CUSTOMER PRINTING. With --purpose, --base-url must be
  * localhost, loopback, or a private LAN address.
  * Production mode refuses localhost, private addresses, and any URL that is not public https, and it writes nothing
- * when the URL is refused. Tokens are not created or rotated here.
+ * when the URL is refused or any table still holds a derivable legacy token (rotate those first,
+ * docs/qr-token-rotation.md). Tokens are not created or rotated here.
  */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/server/db/client";
-import { CAFE, findCafe } from "../../prisma/coders-cafe/seed";
+import { CAFE, findCafe, legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
 import {
   CAFE_TABLE_CODES,
   QR_CLI_HELP,
@@ -48,6 +49,11 @@ export async function runQrGenerate(argv: string[], db: PrismaClient): Promise<{
   const problem = qrBaseUrlProblem(opts.baseUrl, opts.mode) ?? (opts.purpose ? qrPurposeBaseUrlProblem(opts.baseUrl) : null);
   if (problem) throw new TableQrError(problem);
   const rows = await loadCafeTableRows(db);
+  if (opts.mode === "production") {
+    // The same two derivable patterns qr:audit reports (scripts/qr/audit-table-tokens.ts).
+    const legacy = rows.filter((r) => r.qrToken === legacyCafeTableToken(r.code) || r.qrToken === `${CAFE.outletCode}-${r.code}`).map((r) => r.code);
+    if (legacy.length) throw new TableQrError(`Tables ${legacy.join(", ")} still hold a derivable legacy QR token. Rotate them first (docs/qr-token-rotation.md). No QR codes were generated.`);
+  }
   const pack = buildTableQrPack({
     mode: opts.mode,
     baseUrl: opts.baseUrl,

@@ -112,4 +112,17 @@ describe("qr:audit classification", () => {
     expect(rows.find((r) => r.outlet === outlet.code)).toMatchObject({ code: "T01", class: "legacy-derivable" });
     expect(JSON.stringify(rows)).not.toContain(legacy);
   });
+
+  it("flags the pre-2026-10-05 demo seed's <outlet>-<table> token as derivable too", async () => {
+    const { classifyTableToken, auditTableTokens } = await import("../../scripts/qr/audit-table-tokens");
+    expect(classifyTableToken("G1", "HYDCEN-G1", "HYDCEN")).toBe("legacy-derivable");
+    expect(classifyTableToken("G1", "HYDJUB-G1", "HYDCEN")).toBe("nonstandard");
+    expect(classifyTableToken("G1", "HYDCEN-G1")).toBe("nonstandard");
+    const { outlet, table } = await outletWithTable("g");
+    const old = `${outlet.code}-T01`;
+    await prisma.restaurantTable.update({ where: { id: table.id }, data: { qrToken: old } });
+    const rows = await auditTableTokens(prisma);
+    expect(rows.find((r) => r.outlet === outlet.code)).toMatchObject({ code: "T01", class: "legacy-derivable" });
+    expect(JSON.stringify(rows)).not.toContain(old);
+  });
 });
