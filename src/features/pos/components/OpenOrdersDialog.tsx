@@ -7,6 +7,9 @@ import { fulfilmentStage, FULFILMENT_LABEL } from "@/domain/orderProgress";
 import { Dialog } from "@/components/ui/Dialog";
 import { Badge } from "@/components/ui/Badge";
 import { LoadingState, ErrorState, EmptyState } from "@/components/ui/States";
+import type { TableDTO } from "@/features/pos/types";
+import { NO_TABLE_YET } from "@/features/kitchen/kds";
+import { QrTablesPanel } from "./QrTablesPanel";
 
 export type OpenOrder = { id: string; channel: string; source: string; status: string; total: string | number; createdAt: string; tableId: string | null; table?: { code: string } | null; customer?: { name: string } | null; kots?: Array<{ status: string }>; holdLabel?: string | null; heldAt?: string | null; heldForReview?: boolean };
 
@@ -31,6 +34,8 @@ const heldMinutes = (o: Pick<OpenOrder, "heldAt">, now = Date.now()) => (o.heldA
 const where = (o: OpenOrder, tableCode: (id: string | null) => string | null) => {
   const table = o.table?.code ?? tableCode(o.tableId);
   if (table) return `Table ${table}`;
+  // The restaurant's common QR carries no table: staff assign one (QR tables tab).
+  if (o.source === "QR") return `QR · ${NO_TABLE_YET}`;
   return o.channel === "DINE_IN" ? "Table ?" : o.channel.replace("_", " ").toLowerCase();
 };
 
@@ -40,14 +45,15 @@ const where = (o: OpenOrder, tableCode: (id: string | null) => string | null) =>
  * counter and not sent (GET /api/orders?held=true), oldest first, with the name they were
  * saved under. "Recent" = the latest orders in any state, to reopen a bill / reprint a receipt.
  */
-export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { outletId: string; tableCode: (id: string | null) => string | null; onOpen: (orderId: string) => void; onClose: () => void }) {
-  const [tab, setTab] = useState<"open" | "held" | "recent">("open");
+export function OpenOrdersDialog({ outletId, tableCode, tables = [], onOpen, onClose }: { outletId: string; tableCode: (id: string | null) => string | null; tables?: TableDTO[]; onOpen: (orderId: string) => void; onClose: () => void }) {
+  const [tab, setTab] = useState<"open" | "held" | "recent" | "qr">("open");
   const [qrOnly, setQrOnly] = useState(false);
   const [orders, setOrders] = useState<OpenOrder[] | null>(null);
   const [error, setError] = useState<unknown>(null);
   const load = useCallback(async () => {
     setError(null);
     setOrders(null);
+    if (tab === "qr") return;
     try {
       setOrders((await api<{ items: OpenOrder[] }>("/api/orders", { query: { outletId, active: tab === "open" ? "true" : undefined, held: tab === "held" ? "true" : undefined, take: tab === "recent" ? 30 : 100 } })).items);
     } catch (e) {
@@ -63,18 +69,20 @@ export function OpenOrdersDialog({ outletId, tableCode, onOpen, onClose }: { out
   const sorted = shown && tab === "open" ? [...shown.filter(isPaidLateQr), ...shown.filter(isIncomingQr).reverse(), ...shown.filter((o) => !first(o))] : shown;
 
   return (
-    <Dialog open onClose={onClose} title="Open orders" description={tab === "open" ? "Orders not yet paid or cancelled" : tab === "held" ? "Bills saved without sending them to the kitchen — pick one up where you left it" : "Latest orders — open a bill or reprint a receipt"} size="lg">
+    <Dialog open onClose={onClose} title="Open orders" description={tab === "qr" ? "Guest QR orders and where to take them — assign a table to orders from the restaurant QR" : tab === "open" ? "Orders not yet paid or cancelled" : tab === "held" ? "Bills saved without sending them to the kitchen — pick one up where you left it" : "Latest orders — open a bill or reprint a receipt"} size="lg">
       <div role="tablist" aria-label="Order lists" className="mb-3 flex gap-2">
-        {(["open", "held", "recent"] as const).map((t) => (
+        {(["open", "held", "recent", "qr"] as const).map((t) => (
           <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)} className={`h-9 rounded-md border px-3 text-sm font-medium ${tab === t ? "border-brand-600 bg-brand-50" : "border-ink-300 hover:bg-ink-100"}`}>
-            {t === "open" ? "Open" : t === "held" ? "Held" : "Recent"}
+            {t === "open" ? "Open" : t === "held" ? "Held" : t === "recent" ? "Recent" : "QR tables"}
           </button>
         ))}
-        <button type="button" aria-pressed={qrOnly} onClick={() => setQrOnly((v) => !v)} className={`ml-auto h-9 rounded-md border px-3 text-sm font-medium ${qrOnly ? "border-brand-600 bg-brand-50" : "border-ink-300 hover:bg-ink-100"}`}>
+        {tab !== "qr" && <button type="button" aria-pressed={qrOnly} onClick={() => setQrOnly((v) => !v)} className={`ml-auto h-9 rounded-md border px-3 text-sm font-medium ${qrOnly ? "border-brand-600 bg-brand-50" : "border-ink-300 hover:bg-ink-100"}`}>
           QR orders only
-        </button>
+        </button>}
       </div>
-      {error ? (
+      {tab === "qr" ? (
+        <QrTablesPanel outletId={outletId} tables={tables} />
+      ) : error ? (
         <ErrorState error={error} onRetry={load} compact />
       ) : !sorted ? (
         <LoadingState />

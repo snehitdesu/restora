@@ -153,6 +153,51 @@ function QrDialog({ table, onClose, onDone }: { table: TableRow; onClose: () => 
   );
 }
 
+/**
+ * The restaurant's common QR: one code for every table (docs/common-qr-ordering.md).
+ * Guests who scan it order without choosing a table; staff assign the table from
+ * POS → Open orders → QR tables. Table QR codes keep working alongside it.
+ */
+type CommonQr = { outletId: string; qrToken: string | null; guestUrl: string | null };
+
+function CommonQrCard({ outletId }: { outletId: string }) {
+  const { outlet } = useShell();
+  const q = useQuery<CommonQr>(`/api/master/outlets/${outletId}/common-qr`);
+  const qr = q.data;
+  const link = qr ? tableGuestLink(qr, typeof window === "undefined" ? "" : window.location.origin) : null;
+  const name = outlet?.name ?? "Restaurant";
+  return (
+    <section aria-label="Restaurant QR" className="mb-4 rounded-xl border border-ink-200 bg-paper p-4 shadow-card">
+      <h2 className="text-sm font-semibold text-ink-900">Restaurant QR (any table)</h2>
+      <p className="mt-1 text-xs text-ink-600">One code for every table. Guests sit anywhere and order without choosing a table; assign their table in POS → Open orders → QR tables. Table QR codes keep working.</p>
+      {link ? (
+        <div className="mt-3 flex flex-wrap items-start gap-4">
+          <QrCode value={link.url} label={`Restaurant QR code for ${name}`} className="h-40 w-40 rounded-md border border-ink-200 bg-white p-1" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <a href={link.url} target="_blank" rel="noopener" className="block break-all text-sm font-medium text-brand-700 hover:underline" aria-label="Restaurant guest ordering link">{link.url}</a>
+            {!link.publicAddress && <p role="note" className="rounded-md border border-ink-200 bg-ink-50 px-3 py-2 text-xs text-ink-700">This code points at the address this screen is open at. Open it at the restaurant&apos;s public web address (or set PUBLIC_BASE_URL) before printing.</p>}
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => downloadQr(qrSvgDocument(link.url, `${name} · scan to order`), "restaurant-qr.svg")}>Download QR (SVG)</Button>
+              <ActionButton variant="danger" action={() => api(`/api/master/outlets/${outletId}/common-qr`, { method: "POST" })} success="Restaurant QR rotated" onDone={q.reload}
+                confirm={{ title: "Rotate the restaurant QR?", message: "Every printed restaurant QR stops working immediately; reprint them all with the new code. Table QR codes are not affected.", danger: true, confirmLabel: "Rotate" }}>
+                Rotate
+              </ActionButton>
+              <ActionButton variant="secondary" action={() => api(`/api/master/outlets/${outletId}/common-qr/revoke`, { method: "POST" })} success="Restaurant QR disabled" onDone={q.reload}
+                confirm={{ title: "Disable the restaurant QR?", message: "Printed restaurant QR codes stop working immediately. Issuing it again creates a new code (the old prints never work again). Table QR codes are not affected.", danger: true, confirmLabel: "Disable" }}>
+                Disable
+              </ActionButton>
+            </div>
+          </div>
+        </div>
+      ) : qr ? (
+        <div className="mt-3">
+          <ActionButton variant="primary" action={() => api(`/api/master/outlets/${outletId}/common-qr`, { method: "POST" })} success="Restaurant QR issued" onDone={q.reload}>Issue restaurant QR</ActionButton>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function TablesScreen() {
   const { outletId, outlet, can } = useShell();
   const manage = can("outlet.manage");
@@ -218,6 +263,8 @@ export function TablesScreen() {
             ]} />
         </section>
       )}
+
+      {manage && outletId && <CommonQrCard outletId={outletId} />}
 
       <FilterBar>
         <SelectFilter label="Floor" value={floorFilter} onChange={setFloorFilter} options={[...floorOptions.map((f) => ({ value: f.id, label: f.name })), { value: "none", label: "No floor" }]} />

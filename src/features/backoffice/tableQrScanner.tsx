@@ -36,7 +36,7 @@ import {
 
 // Mirrors server/qr/scan.ts QrScanResult (the API's JSON shape).
 type Environment = { qrOrigin: string | null; appOrigin: string; matchesApp: boolean | null };
-type TableFacts = { table: { code: string }; outletName: string; restaurantName: string; tokenHint: string; environment: Environment };
+type TableFacts = { table: { code: string } | null; outletName: string; restaurantName: string; tokenHint: string; environment: Environment };
 export type ScanResult =
   | ({ status: "valid"; guestUrl: string } & TableFacts)
   | ({ status: "inactive"; message: string } & TableFacts)
@@ -382,10 +382,10 @@ function Outcome({ check, onScanAnother }: { check: Check; onScanAnother: () => 
   if (r.status === "valid") {
     const link = safeGuestLink(r);
     return (
-      <OutcomeShell tone="ok" title="Valid RESTORA table QR" testId="scan-valid" badge={<Badge tone="ok">Works here</Badge>}>
+      <OutcomeShell tone="ok" title={r.table ? "Valid RESTORA table QR" : "Valid RESTORA restaurant QR (any table)"} testId="scan-valid" badge={<Badge tone="ok">Works here</Badge>}>
         <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
           <dt className="text-ink-500">Table</dt>
-          <dd className="font-display text-2xl font-semibold leading-none text-ink-900" data-testid="scan-table">{r.table.code}</dd>
+          <dd className="font-display text-2xl font-semibold leading-none text-ink-900" data-testid="scan-table">{r.table ? r.table.code : "Any table — staff assign it"}</dd>
           <dt className="text-ink-500">Restaurant</dt>
           <dd className="text-ink-900">{r.restaurantName}</dd>
           <dt className="text-ink-500">Outlet</dt>
@@ -414,7 +414,7 @@ function Outcome({ check, onScanAnother }: { check: Check; onScanAnother: () => 
   }
   if (r.status === "inactive") {
     return (
-      <OutcomeShell tone="warn" title={`Table ${r.table.code} — QR switched off`} testId="scan-inactive" badge={<Badge tone="warn">Inactive</Badge>}>
+      <OutcomeShell tone="warn" title={r.table ? `Table ${r.table.code} — QR switched off` : "Restaurant QR — switched off"} testId="scan-inactive" badge={<Badge tone="warn">Inactive</Badge>}>
         <p>{r.message}</p>
         <p className="mt-2 text-ink-700">{r.restaurantName} · {r.outletName}</p>
         <EnvironmentNote env={r.environment} />

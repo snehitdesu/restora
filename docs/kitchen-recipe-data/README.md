@@ -44,3 +44,20 @@ How the answers get into RESTORA (by the owner or manager, not automatically):
 - The 3 combos and the 10 unreadable menu-board entries
   (`prisma/coders-cafe/menu.ts`, `UNRESOLVED`) stay out of RESTORA until the
   owner provides their real contents, names and prices.
+
+## Chef review report (2026-10-21, from `prisma/coders-cafe/recipes.ts` and these sheets)
+
+Checked read-only by script; regenerating the sheets gave byte-identical files;
+no fill-in column in any sheet is pre-filled; no recipe is approved.
+
+| Group | Dishes / rows | What it means for the chef |
+| --- | --- | --- |
+| **Ready for review** (complete draft, nothing approved) | 61 dishes, 429 lines | Every dish of the 64 on the menu is either drafted (61) or listed in `not-covered.csv` (3). Every line names a known ingredient with a positive quantity in that ingredient's unit (g / ml / pc). All 429 quantities are RESTORA estimates. **None is complete**: each needs the kitchen's weighed figures. |
+| **Missing prices** | all 54 ingredients | The source holds no price for any ingredient. Every recipe cost reads *Cost unavailable* until goods receipts exist; no cost total is computed from missing prices. |
+| **Missing quantities / units** | 0 lines | None missing. Check the 4 lines that use **half an egg** (`CC-EGG` 0.5 pc): Popcorn Chicken, Chicken Nuggets, Chicken Cheese Balls, Chicken Strips (3 Pc). Is the egg wash really per portion, or per batch? |
+| **Yield / portion ambiguities** | 24 sizes; 1 dish | `size-factors.csv`: RESTORA counts every Medium / Large as 1× the base recipe, so larger sizes under-consume stock until a factor is entered. Chicken Popcorn + Fries Bucket: the "Large Popcorn + Med Fries" weights are estimates. |
+| **Potential costing inconsistencies** | 24 sizes | Once prices exist, a Medium / Large shows the base size's cost (factor 1×) until its factor is set. Largest single lines worth a check: Crunchy Chicken (3 Pc) bone-in chicken 300 g; 200–240 g chicken in four dishes. |
+| **Chef / owner decisions** | 3 combos + 3 assumptions | Contents of Epic Savings 9 Pcs Fried, All Chicken Box and Boneless Hot Crispy Meal for 2. Assumed by RESTORA, to confirm: penne for Veg Creamy Alfredo Pasta; chicken for Creamy Alfredo Spaghetti; one recipe for both Peri Peri / Lemon Garlic Fries flavours. |
+
+A dish is chef-approved only when both last columns of `recipe-signoff.csv` are
+filled **and** the version is approved in RESTORA; neither has happened for any dish.

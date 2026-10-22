@@ -97,6 +97,26 @@ describe("guest token lookup", () => {
     await rotateTableQr(owner, table.id);
     expect((await lookupTableToken(legacyCafeTableToken("T01"))).status).toBe("not_found");
   });
+
+  it("each token resolves only its own table, outlet and organization", async () => {
+    const a = await outletWithTable("h");
+    const b = await outletWithTable("i");
+    const ta = (await rotateTableQr(a.owner, a.table.id)).qrToken!;
+    const tb = (await rotateTableQr(b.owner, b.table.id)).qrToken!;
+    const ga = await resolveTable(ta);
+    const gb = await resolveTable(tb);
+    expect([ga.table?.id, ga.outlet.id, ga.ctx.organizationId]).toEqual([a.table.id, a.outlet.id, a.org.id]);
+    expect([gb.table?.id, gb.outlet.id, gb.ctx.organizationId]).toEqual([b.table.id, b.outlet.id, b.org.id]);
+    expect(ga.ctx.outletIds).toEqual([a.outlet.id]);
+  });
+
+  it("a table whose organization does not own its outlet (inconsistent data) is not_found, not served", async () => {
+    const a = await outletWithTable("j");
+    const other = await prisma.organization.create({ data: { name: `QR token k ${RUN}` } });
+    const token = newTableQrToken();
+    await prisma.restaurantTable.create({ data: { organizationId: other.id, outletId: a.outlet.id, code: "T99", qrToken: token } });
+    expect((await lookupTableToken(token)).status).toBe("not_found");
+  });
 });
 
 describe("qr:audit classification", () => {
@@ -124,5 +144,15 @@ describe("qr:audit classification", () => {
     const rows = await auditTableTokens(prisma);
     expect(rows.find((r) => r.outlet === outlet.code)).toMatchObject({ code: "T01", class: "legacy-derivable" });
     expect(JSON.stringify(rows)).not.toContain(old);
+  });
+
+  it("exit code: 0 only when tables exist and none is derivable; an empty database is not a clean result", async () => {
+    const { auditExitCode } = await import("../../scripts/qr/audit-table-tokens");
+    const row = (c: "legacy-derivable" | "random" | "nonstandard" | "none") => ({ organization: "o", outlet: "x", code: "T01", class: c });
+    expect(auditExitCode([row("random"), row("none")])).toBe(0);
+    expect(auditExitCode([row("random"), row("legacy-derivable")])).toBe(2);
+    expect(auditExitCode([row("nonstandard")])).toBe(2);
+    // Wrong DATABASE_URL (an empty or fresh database): nothing was audited, so it must not read as "clean".
+    expect(auditExitCode([])).toBe(3);
   });
 });

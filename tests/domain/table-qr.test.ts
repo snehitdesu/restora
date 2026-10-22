@@ -557,7 +557,7 @@ describe("table token mapping and checkout protections", () => {
 
     for (const code of CAFE_TABLE_CODES) {
       const token = tokens.get(code)!;
-      expect((await resolveTable(token)).table.code).toBe(code);
+      expect((await resolveTable(token)).table?.code).toBe(code);
       const menu = await guestMenu(token);
       expect(menu.table).toEqual({ code });
       expect(menu.menu.map((item) => item.id)).toEqual([itemId]);
@@ -565,7 +565,7 @@ describe("table token mapping and checkout protections", () => {
       expect(JSON.stringify(menu)).not.toContain(outletId);
       expect(JSON.stringify(menu)).not.toContain(orgId);
     }
-    expect((await resolveTable(tokens.get("T01")!)).table.code).not.toBe("T02");
+    expect((await resolveTable(tokens.get("T01")!)).table?.code).not.toBe("T02");
 
     for (const bad of ["", "T01", "x", "../../etc", "a".repeat(80), "unknown-token-123"]) {
       await expect(resolveTable(bad)).rejects.toBeInstanceOf(NotFoundError);
@@ -620,7 +620,7 @@ describe("table token mapping and checkout protections", () => {
     const view = await getGuestOrder(placed.orderId, placed.accessKey);
     expect(view).toMatchObject({ status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE" });
     const stored = await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId }, include: { kots: true, payments: true } });
-    expect(stored).toMatchObject({ status: "OPEN", source: "QR", channel: "QR", outletId, tableId: (await resolveTable(token)).table.id });
+    expect(stored).toMatchObject({ status: "OPEN", source: "QR", channel: "QR", outletId, tableId: (await resolveTable(token)).table!.id });
     expect(stored.kots).toHaveLength(0);
     expect(stored.payments).toHaveLength(0);
     await expect(confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: "forged", gateway: { status: "captured" } })).rejects.toBeInstanceOf(NotFoundError);

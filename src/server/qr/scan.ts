@@ -33,7 +33,8 @@ export type QrScanEnvironment = {
   matchesApp: boolean | null;
 };
 
-type TableFacts = { table: { code: string }; outletName: string; restaurantName: string; tokenHint: string; environment: QrScanEnvironment };
+/** table null: the restaurant's common QR (one code for every table). */
+type TableFacts = { table: { code: string } | null; outletName: string; restaurantName: string; tokenHint: string; environment: QrScanEnvironment };
 
 export type QrScanResult =
   | ({ status: "valid"; guestUrl: string } & TableFacts)
@@ -87,12 +88,12 @@ export async function scanTableQr(ctx: AccessContext, body: unknown, opts: { req
   const found = await lookupTableToken(parsed.token, db);
   if (found.status === "not_found") return notFound;
 
-  const t = found.status === "ok" ? { organizationId: found.guest.ctx.organizationId, outletId: found.guest.outlet.id } : found.table;
+  const t = found.status === "ok" ? { organizationId: found.guest.ctx.organizationId, outletId: found.guest.outlet.id } : found.scope;
   if (!mayViewTableAt(ctx, t)) return notFound;
 
   if (found.status === "inactive") {
-    return { status: "inactive", table: { code: found.table.code }, outletName: found.outletName, restaurantName: found.restaurantName, tokenHint, environment, message: QR_SCAN_MESSAGES.inactive };
+    return { status: "inactive", table: found.table ? { code: found.table.code } : null, outletName: found.outletName, restaurantName: found.restaurantName, tokenHint, environment, message: QR_SCAN_MESSAGES.inactive };
   }
   const g = found.guest;
-  return { status: "valid", table: { code: g.table.code }, outletName: g.outlet.name, restaurantName: g.restaurantName, tokenHint, environment, guestUrl: guestTableUrl(appOrigin, parsed.token) };
+  return { status: "valid", table: g.table ? { code: g.table.code } : null, outletName: g.outlet.name, restaurantName: g.restaurantName, tokenHint, environment, guestUrl: guestTableUrl(appOrigin, parsed.token) };
 }

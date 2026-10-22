@@ -318,7 +318,7 @@ export function PosScreen({ outletId, perms }: { outletId: string; perms: PosPer
       {dialog === "customer" && (
         <CustomerPicker current={cart.customer} canCreate={perms.customerManage} onSelect={(c) => { dispatch({ type: "setCustomer", customer: c }); setDialog(null); }} onClose={() => setDialog(null)} />
       )}
-      {dialog === "orders" && <OpenOrdersDialog outletId={outletId} tableCode={tableCode} onOpen={openOrder} onClose={() => setDialog(null)} />}
+      {dialog === "orders" && <OpenOrdersDialog outletId={outletId} tableCode={tableCode} tables={tables} onOpen={openOrder} onClose={() => setDialog(null)} />}
       {dialog === "cancel" && (
         <Dialog
           open

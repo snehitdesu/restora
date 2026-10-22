@@ -28,7 +28,8 @@ export type GuestMenuData = {
     currency: string;
     hours?: { open: string | null; close: string | null; label: string | null } | null;
   };
-  table: { code: string };
+  /** null: the restaurant's common QR — the guest sits anywhere; staff assign the table. */
+  table: { code: string } | null;
   ordering?: { open: boolean; message: string | null };
   menu: MenuItemDTO[];
   payment: { online: boolean; testMode: boolean; mode?: string | null };
@@ -342,4 +343,9 @@ export function useServerQuote(opts: { phone?: string } = {}) {
   const forLine = (index: number): QuoteLine | null => current?.lines.find((l) => l.index === index) ?? null;
   const unavailable = current ? current.lines.filter((l): l is Extract<QuoteLine, { ok: false }> => !l.ok) : [];
   return { quote: current, loading: loading || (cart.lines.length > 0 && !current && !error), error, repriced, dismissRepriced, forLine, unavailable, recheck: runQuote };
+}
+
+/** Where the guest is ordering from: their table (table QR) or "Sit anywhere" (the restaurant's common QR). */
+export function guestSeat(table: { code: string } | null): string {
+  return table ? `Table ${table.code}` : "Sit anywhere";
 }

@@ -140,6 +140,13 @@ describe("printing and reprinting", () => {
     expect(again).toMatchObject({ duplicate: false, reason: "Guest asked for a copy" });
     expect(again.id).not.toBe(printed.id);
 
+    // The paper itself tells the two copies apart: only the reprint carries the marker.
+    const [firstContent, reprintContent] = await Promise.all(
+      [printed.id, again.id].map(async (id) => (await prisma.printJob.findUniqueOrThrow({ where: { id }, select: { content: true } })).content)
+    );
+    expect(firstContent).not.toMatch(/REPRINT/);
+    expect(reprintContent).toMatch(/\*\*\* REPRINT \*\*\*/);
+
     expect(await sideEffects()).toEqual(before);
     const after = await getOrderBill(prisma, sys, o.id);
     expect(after).toEqual(first); // same invoice number, totals and payments: a reprint is identical

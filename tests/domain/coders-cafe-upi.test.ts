@@ -107,7 +107,7 @@ describe("Coders' Cafe dataset", () => {
   it("is the board menu: every category, item, price and size, priced by the server", async () => {
     const menu = await guestMenu(table07);
     expect(menu.restaurant.name).toBe("Coders' Cafe");
-    expect(menu.table.code).toBe("T07");
+    expect(menu.table?.code).toBe("T07");
     expect(menu.menu).toHaveLength(menuItemCount());
     for (const cat of CODERS_CAFE_MENU) {
       for (const it of cat.items) {
@@ -283,7 +283,7 @@ describe("Coders' Cafe isolation and table QR control", () => {
     await revokeTableQr(manager, t03.id);
     await expect(guestMenu(t03.token)).rejects.toThrow(/not valid/);
     await expect(placeGuestOrder(t03.token, { items: [{ menuItemId: item("Classic Fries").id, qty: 1 }] }, key())).rejects.toThrow(/not valid/);
-    expect((await guestMenu(table07)).table.code).toBe("T07");
+    expect((await guestMenu(table07)).table?.code).toBe("T07");
     expect(await prisma.auditLog.count({ where: { entityType: "RestaurantTable", entityId: t03.id, action: "UPDATE" } })).toBeGreaterThanOrEqual(1);
   });
 });

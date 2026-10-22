@@ -16,7 +16,8 @@ import {
   canTransition,
 } from "@/constants/enums";
 import { prisma } from "@/server/db/client";
-import { runInTx } from "@/server/services/_workflow";
+import { lockInTx, runInTx } from "@/server/services/_workflow";
+import { upsertCustomerByPhone } from "@/server/services/crm";
 import { createHash, randomUUID } from "node:crypto";
 import { type AccessContext, assertOutletAccess, ValidationError, NotFoundError, ConflictError } from "@/server/db/scope";
 import { assertOutletInOrg } from "@/server/db/outletGuard";
@@ -777,14 +778,23 @@ export async function placeOrder(
   db: Client = prisma,
   // knownNew: the caller looked the key up in this request and found no order, so the lookup is not repeated
   // (a concurrent original still resolves through the unique-key conflict below).
-  opts: { afterCreate?: PlacedOrderHook; knownNew?: boolean } = {},
+  // customer: link the order to the CRM record for this phone, found or created INSIDE the order's transaction,
+  // so an order refused there leaves no customer record behind (instead of input.customerId).
+  opts: { afterCreate?: PlacedOrderHook; knownNew?: boolean; customer?: { name: string; phone: string } } = {},
 ) {
   const data = placeSchema.parse(input);
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "order.create", data.outletId);
   const { items, submit, ...orderInput } = data;
   if (submit && (data.hold || data.holdLabel)) throw new ValidationError("A held bill is not sent to the kitchen; resume it first");
-  const hash = data.idempotencyKey ? requestHashOf(data as never) : null;
+  if (opts.customer && data.customerId) throw new ValidationError("Give either a customer or a customer phone, not both");
+  const phone = opts.customer?.phone.trim();
+  // The request hash covers the customer id exactly as when the caller passed one. Before the transaction it is
+  // read only: a replay's customer was created with its original order, and a phone with no record yet cannot
+  // match an earlier order's hash.
+  const knownCustomerId = async () => (phone ? (await db.customer.findUnique({ where: { organizationId_phone: { organizationId: ctx.organizationId, phone } }, select: { id: true } }))?.id : data.customerId);
+  const hashFor = (customerId: string | undefined) => (data.idempotencyKey ? requestHashOf({ ...data, customerId } as never) : null);
+  let hash = hashFor(phone ? await knownCustomerId() : data.customerId);
   const replay = async () => {
     const prior = await db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: data.idempotencyKey! } }, include: placedInclude });
     if (!prior) return null;
@@ -797,7 +807,15 @@ export async function placeOrder(
   }
   try {
     return await runInTx(db, async (tx) => {
-      const order = await createOrderTx(ctx, orderInput, hash, tx);
+      let customerId = orderInput.customerId;
+      if (opts.customer) {
+        // One phone's first orders arriving together would both find no record and both insert it (READ COMMITTED):
+        // the phone's lock makes them look one at a time, so the second finds the first's record.
+        await lockInTx(tx, `customer-phone:${ctx.organizationId}:${phone}`);
+        customerId = (await upsertCustomerByPhone(ctx, { name: opts.customer.name, phone: phone! }, tx)).id;
+        hash = hashFor(customerId);
+      }
+      const order = await createOrderTx(ctx, { ...orderInput, customerId }, hash, tx);
       for (const item of items) await addOrderItem(ctx, order.id, item as AddItemInput, tx, { order, recompute: false });
       if (items.length) await recomputeTotals(tx, order.id);
       if (submit) await submitOrder(ctx, order.id, tx);
@@ -807,6 +825,8 @@ export async function placeOrder(
     }, NEW_ORDER_TX);
   } catch (e) {
     if (data.idempotencyKey && (e as { code?: string })?.code === "P2002") {
+      // The customer this attempt created rolled back with it; the winner's committed record is the one to compare.
+      if (phone) hash = hashFor(await knownCustomerId());
       const prior = await replay();
       if (prior) return prior;
     }

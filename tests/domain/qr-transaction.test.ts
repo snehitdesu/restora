@@ -98,7 +98,7 @@ const twoBiryanis = () => ({ items: [{ menuItemId: biryani, variantId: large, mo
 describe("QR table resolution and guest menu", () => {
   it("resolves the table's own outlet and serves its menu at outlet prices, without admin fields", async () => {
     const m = await guestMenu(token);
-    expect(m.table.code).toBe("T1");
+    expect(m.table?.code).toBe("T1");
     expect(m.restaurant.outletName).toBe("QR Central");
     const p = m.menu.find((i) => i.id === paneer)!;
     expect(p.price).toBe(275); // outlet override, not the org's 250
@@ -184,7 +184,7 @@ describe("placing a guest order", () => {
       { menuItemId: naan, variantId: large, qty: 1 }, // another item's variant
     ];
     for (const item of bad) await expect(placeGuestOrder(token3, { items: [item] }, key())).rejects.toBeInstanceOf(ValidationError);
-    expect(await prisma.order.count({ where: { tableId: (await resolveTable(token3)).table.id } })).toBe(0);
+    expect(await prisma.order.count({ where: { tableId: (await resolveTable(token3)).table!.id } })).toBe(0);
   });
 
   it("cannot order another tenant's dish or reach another tenant's order", async () => {

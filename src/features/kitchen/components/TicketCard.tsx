@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { KdsTicket } from "@/features/kitchen/kds";
-import { NO_EXPECTATIONS, canCancel, primaryAction, ticketLabel, ticketLateness, type PrepExpectations } from "@/features/kitchen/kds";
+import { NO_EXPECTATIONS, canCancel, needsTable, primaryAction, ticketLabel, ticketLateness, type PrepExpectations } from "@/features/kitchen/kds";
 import type { KOTStatus } from "@/constants/enums";
 import { formatElapsed, formatQty, shortRef } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
@@ -25,6 +25,7 @@ export function TicketCard({ ticket, now, pending, canUpdate, onAction, expectat
         <div>
           <p className="text-lg font-bold leading-tight">KOT {ticket.number}</p>
           <p className="text-sm font-semibold text-ink-700">{ticketLabel(ticket)}{ticket.order?.covers ? ` · ${ticket.order.covers} pax` : ""}</p>
+          {needsTable(ticket) && <p data-testid="kot-no-table" className="mt-1 inline-block rounded-md bg-warn-50 px-1.5 py-0.5 text-xs font-bold uppercase tracking-wide text-warn-700">No table yet — ask the counter</p>}
           <p className="font-mono text-xs text-ink-500">Order #{shortRef(ticket.orderId)}{ticket.station ? ` · ${ticket.station.name}` : ""}</p>
         </div>
         <div className="flex flex-col items-end gap-1">

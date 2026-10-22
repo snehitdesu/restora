@@ -107,10 +107,19 @@ export function lateSummary(tickets: KdsTicket[], now: number, ex: PrepExpectati
   return { late, due };
 }
 
+/** Shown wherever a common-QR order has no table yet (KDS, POS). */
+export const NO_TABLE_YET = "no table yet";
+
+/** A guest QR order that staff have not given a table: shown apart on the KDS so nobody guesses where it goes. */
+export function needsTable(t: KdsTicket): boolean {
+  return Boolean(t.order && t.order.channel === "QR" && !t.order.table);
+}
+
 export function ticketLabel(t: KdsTicket): string {
   if (!t.order) return "Order";
   if (t.order.channel === "DINE_IN") return t.order.table ? `Table ${t.order.table.code}` : "Dine-in";
-  // A guest's QR order is a dine-in order placed from the table's QR code.
-  if (t.order.channel === "QR") return t.order.table ? `Table ${t.order.table.code} · QR` : "QR order";
+  // A guest's QR order: from a table's own QR code, or from the restaurant's common QR, which
+  // carries no table until staff assign one (never guessed from another order).
+  if (t.order.channel === "QR") return t.order.table ? `Table ${t.order.table.code} · QR` : `QR · ${NO_TABLE_YET}`;
   return t.order.channel.replace("_", " ").toLowerCase().replace(/^\w/, (c) => c.toUpperCase());
 }

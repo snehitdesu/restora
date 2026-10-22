@@ -65,7 +65,7 @@ backups), `BACKUP_RETENTION_DAILY/WEEKLY/MONTHLY`, `PG_BIN_DIR`.
 | Endpoint | Meaning | Auth |
 |---|---|---|
 | `GET /api/health/live` | process + event loop answer (no I/O) — liveness probe | none |
-| `GET /api/health/ready` | not draining, DB answers within `READINESS_DB_TIMEOUT_MS`, schema contains this build's newest migration (`EXPECTED_MIGRATION`, currently `20261021100000_append_only_rate_limit`) with nothing failed/half-applied — readiness probe | none |
+| `GET /api/health/ready` | not draining, DB answers within `READINESS_DB_TIMEOUT_MS`, schema contains this build's newest migration (`EXPECTED_MIGRATION`, currently `20261025100000_recipe_estimates`) with nothing failed/half-applied — readiness probe | none |
 | `GET /api/health` | legacy combined check (200 / 503) | none |
 | `GET /api/health/metrics` | Prometheus text | `Bearer METRICS_TOKEN` |
 

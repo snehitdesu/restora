@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject
 import { needsConfiguration } from "@/features/pos/modifiers";
 import type { MenuItemDTO } from "@/features/pos/types";
 import { toNumber } from "@/lib/format";
-import { GUEST_MAX_QTY, useStorefront, type GuestMenuData } from "@/features/guest/storefront";
+import { GUEST_MAX_QTY, guestSeat, useStorefront, type GuestMenuData } from "@/features/guest/storefront";
 import { CartBar, MyOrdersSheet, OfflineBanner, TopBar } from "@/features/guest/components/Chrome";
 import { Alert, ItemThumb, Stepper, VegMark, formatMenuPrice } from "@/features/guest/components/Bits";
 import { SfIcon } from "@/features/guest/components/SfIcon";
@@ -86,7 +86,7 @@ export function GuestMenuScreen() {
           </span>
           {brand.strap && <span className="sf-footer-strap">{brand.strap}</span>}
           <p className="sf-foot">
-            Menu prices are before GST; GST is added in your cart. Ordering for Table {data.table.code}.
+            Menu prices are before GST; GST is added in your cart. {data.table ? `Ordering for Table ${data.table.code}.` : "Sit anywhere: the staff bring your order to you."}
           </p>
         </footer>
       </main>
@@ -104,7 +104,7 @@ function Hero({ data, onOrder, heroRef, immersive }: { data: GuestMenuData; onOr
     <div className="sf-hero-card">
       <span className="sf-hero-kicker">
         {brand.codeAccents ? "</> " : ""}
-        {data.restaurant.name} · Table {data.table.code}
+        {data.restaurant.name} · {guestSeat(data.table)}
       </span>
       <h1 id="hero-title" className="sf-hero-title">
         {brand.tagline.map((l) => (

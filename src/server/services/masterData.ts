@@ -24,7 +24,7 @@ import { prisma } from "@/server/db/client";
 import { type AccessContext, assertOutletAccess, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
 import { assertCan, can, type Permission } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
-import { issueTableQrToken } from "@/server/qr/tableToken";
+import { issueOutletQrToken, issueTableQrToken } from "@/server/qr/tableToken";
 import { type Client, type Tx, runInTx, assertTransition } from "@/server/services/_workflow";
 import { isValidTimeZone } from "@/domain/time";
 import { D, money, type Decimalish } from "@/domain/money";
@@ -520,6 +520,54 @@ export async function revokeTableQr(ctx: AccessContext, tableId: string, db: Cli
     const updated = await tx.restaurantTable.update({ where: { id: tableId }, data: { qrToken: null } });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "RestaurantTable", entityId: tableId, outletId: t.outletId, before: { qrIssued: Boolean(t.qrToken) }, after: { qrIssued: false, qrRevoked: true } });
     return updated;
+  });
+}
+
+// ------------------------------------------------------------------ the restaurant's common QR
+
+/**
+ * The outlet's common QR (one code for every table; docs/common-qr-ordering.md).
+ * Guests who scan it order without a table; staff assign the table later.
+ * Same token rules and namespace as table codes; managed by outlet managers.
+ */
+async function loadOutletForQr(tx: Tx, ctx: AccessContext, outletId: string) {
+  const o = await tx.outlet.findUnique({ where: { id: outletId }, select: { id: true, organizationId: true, guestQrToken: true } });
+  if (!o || o.organizationId !== ctx.organizationId) throw new NotFoundError("Outlet not found");
+  assertOutletAccess(ctx, o.id);
+  assertOutletManager(ctx, o.id);
+  return o;
+}
+
+const commonQrView = (outletId: string, token: string | null) => {
+  const base = guestBaseUrl();
+  return { outletId, qrToken: token, guestUrl: token && base ? `${base}/t/${encodeURIComponent(token)}` : null };
+};
+
+export async function getOutletCommonQr(ctx: AccessContext, outletId: string, db: Client = prisma) {
+  return runInTx(db, async (tx) => {
+    const o = await loadOutletForQr(tx, ctx, outletId);
+    return commonQrView(o.id, o.guestQrToken);
+  });
+}
+
+/** Issue (or rotate) the outlet's common QR; the previous code stops working immediately. */
+export async function rotateOutletCommonQr(ctx: AccessContext, outletId: string, db: Client = prisma) {
+  return runInTx(db, async (tx) => {
+    const o = await loadOutletForQr(tx, ctx, outletId);
+    const guestQrToken = await issueOutletQrToken(tx);
+    await tx.outlet.update({ where: { id: o.id }, data: { guestQrToken } });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Outlet", entityId: o.id, outletId: o.id, before: { commonQrIssued: Boolean(o.guestQrToken) }, after: { commonQrRotated: true } });
+    return commonQrView(o.id, guestQrToken);
+  });
+}
+
+/** Withdraw the common QR: the printed code stops working at once; table QR codes are unaffected. */
+export async function revokeOutletCommonQr(ctx: AccessContext, outletId: string, db: Client = prisma) {
+  return runInTx(db, async (tx) => {
+    const o = await loadOutletForQr(tx, ctx, outletId);
+    await tx.outlet.update({ where: { id: o.id }, data: { guestQrToken: null } });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Outlet", entityId: o.id, outletId: o.id, before: { commonQrIssued: Boolean(o.guestQrToken) }, after: { commonQrIssued: false, commonQrRevoked: true } });
+    return commonQrView(o.id, null);
   });
 }
 

@@ -204,7 +204,7 @@ test.describe("growth (Group 6)", () => {
     await g.getByRole("radio", { name: "5 stars" }).click();
     await g.getByLabel(/Anything you'd like to add/).fill("Lovely chai");
     await g.getByRole("button", { name: "Send" }).click();
-    await expect(g.getByText("Thank you!")).toBeVisible();
+    await expect(g.getByRole("heading", { name: "Thank you!" })).toBeVisible(); // the rating's thank-you (the payment banner also says "Thank you!")
     await expect(g.getByRole("link", { name: "Share it on the review page" })).toHaveAttribute("href", REVIEW_URL);
     await g.reload();
     await expect(g.getByText("Paid ✓")).toBeVisible();

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { formatMoney } from "@/lib/format";
 import { needsConfiguration } from "@/features/pos/modifiers";
-import { GUEST_MAX_QTY, useServerQuote, useStorefront, type Quote } from "@/features/guest/storefront";
+import { GUEST_MAX_QTY, guestSeat, useServerQuote, useStorefront, type Quote } from "@/features/guest/storefront";
 import { OfflineBanner, TopBar } from "@/features/guest/components/Chrome";
 import { Alert, Spinner, Stepper } from "@/features/guest/components/Bits";
 import { CouponBox } from "@/features/guest/components/GuestOffers";
@@ -70,7 +70,7 @@ export function GuestCartScreen() {
           <div>
             <h1 className="sf-page-title">Your order</h1>
             <p className="sf-page-sub">
-              Table {data.table.code} · {count} {count === 1 ? "item" : "items"}
+              {guestSeat(data.table)} · {count} {count === 1 ? "item" : "items"}
             </p>
           </div>
         </div>

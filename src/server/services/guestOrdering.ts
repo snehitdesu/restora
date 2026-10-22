@@ -38,12 +38,11 @@ import { writeAudit } from "@/server/audit/log";
 import { createNotificationTx } from "@/server/services/notifications";
 import { listMenu, priceMenuSelection } from "@/server/services/menu";
 import { calculateOrderTotals, placeOrder } from "@/server/services/orders";
-import { upsertCustomerByPhone } from "@/server/services/crm";
 import { applyCouponTx, previewCoupon } from "@/server/services/coupons";
 import { attachReferralTx } from "@/server/services/referrals";
 import { setConsent } from "@/server/services/consent";
 import { submitOrderFeedback, type GuestFeedbackResult } from "@/server/services/feedbackLoop";
-import { runInTx } from "@/server/services/_workflow";
+import { lockInTx, runInTx } from "@/server/services/_workflow";
 import type { Tx } from "@/server/services/_workflow";
 import { formatClock, formatHours, hasHours, isOpenAt } from "@/domain/openingHours";
 import { guestTracker, type GuestTracker } from "@/domain/orderProgress";
@@ -54,6 +53,7 @@ import { getOrderInvoices } from "@/server/services/invoicing";
 import { getCheckoutProvider, type IntegrationMode, type PaymentProvider } from "@/integrations/payment";
 import { IntegrationError } from "@/integrations/http";
 import { ProviderUnavailableError } from "@/integrations/policy";
+import { enforceRateLimit, RATE_POLICIES } from "@/server/api/rateLimit";
 import { D, money, num } from "@/domain/money";
 import { MAX_SPLIT_PARTS, MIN_SPLIT_PARTS, splitShare } from "@/domain/billSplit";
 import { FULFILMENT_LABEL, GUEST_AWAITING_PAYMENT_LABEL, GUEST_HELD_FOR_REVIEW_LABEL } from "@/domain/orderProgress";
@@ -91,7 +91,12 @@ const BAD_QR = "This table QR code is not valid. Please ask the staff for help."
 
 export type GuestTable = {
   ctx: AccessContext;
-  table: { id: string; code: string };
+  /**
+   * The table whose QR was scanned; null for the restaurant's common QR
+   * (Outlet.guestQrToken): the guest sits anywhere and staff assign the table
+   * later (orderOps.setOrderTable). Never filled in from anything else.
+   */
+  table: { id: string; code: string } | null;
   outlet: { id: string; organizationId: string; name: string; address: string | null; phone: string | null; currency: string; timezone: string; openTime: string | null; closeTime: string | null };
   restaurantName: string;
 };
@@ -103,24 +108,31 @@ export type GuestTable = {
  */
 export type TableTokenLookup =
   | { status: "not_found" }
-  | { status: "inactive"; table: { id: string; code: string; organizationId: string; outletId: string }; outletName: string; restaurantName: string }
+  | { status: "inactive"; table: { id: string; code: string } | null; scope: { organizationId: string; outletId: string }; outletName: string; restaurantName: string }
   | { status: "ok"; guest: GuestTable };
 
+const OUTLET_FOR_GUESTS = { id: true, organizationId: true, name: true, address: true, phone: true, currency: true, timezone: true, openTime: true, closeTime: true, active: true, organization: { select: { name: true, legalName: true, active: true } } } as const;
+
+/**
+ * A guest token is either a table's QR (RestaurantTable.qrToken) or the
+ * restaurant's common QR (Outlet.guestQrToken). Both are random, both are
+ * resolved only here, and the outlet / organization always come from the
+ * database row the token belongs to — never from the request.
+ */
 export async function lookupTableToken(token: string, db: PrismaClient = prisma): Promise<TableTokenLookup> {
   if (!isGuestTableToken(token)) return { status: "not_found" };
   const table = await db.restaurantTable.findUnique({ where: { qrToken: token }, select: { id: true, code: true, organizationId: true, outletId: true } });
-  if (!table) return { status: "not_found" };
-  const outlet = await db.outlet.findUnique({
-    where: { id: table.outletId },
-    select: { id: true, organizationId: true, name: true, address: true, phone: true, currency: true, timezone: true, openTime: true, closeTime: true, active: true, organization: { select: { name: true, legalName: true, active: true } } },
-  });
-  if (!outlet || outlet.organizationId !== table.organizationId) return { status: "not_found" };
+  const outlet = table
+    ? await db.outlet.findUnique({ where: { id: table.outletId }, select: OUTLET_FOR_GUESTS })
+    : await db.outlet.findUnique({ where: { guestQrToken: token }, select: OUTLET_FOR_GUESTS });
+  if (!outlet || (table && outlet.organizationId !== table.organizationId)) return { status: "not_found" };
   const restaurantName = outlet.organization.legalName || outlet.organization.name;
-  if (!outlet.active || !outlet.organization.active) return { status: "inactive", table, outletName: outlet.name, restaurantName };
+  const atTable = table ? { id: table.id, code: table.code } : null;
+  if (!outlet.active || !outlet.organization.active) return { status: "inactive", table: atTable, scope: { organizationId: outlet.organizationId, outletId: outlet.id }, outletName: outlet.name, restaurantName };
   const { active: _a, organization: _org, ...o } = outlet;
   void _a;
   void _org;
-  return { status: "ok", guest: { ctx: systemContext(outlet.organizationId, [outlet.id]), table: { id: table.id, code: table.code }, outlet: o, restaurantName } };
+  return { status: "ok", guest: { ctx: systemContext(outlet.organizationId, [outlet.id]), table: atTable, outlet: o, restaurantName } };
 }
 
 export async function resolveTable(token: string, db: PrismaClient = prisma): Promise<GuestTable> {
@@ -209,7 +221,8 @@ export async function guestMenuFor(t: GuestTable, db: PrismaClient = prisma) {
       // Only what the restaurant has entered in RESTORA (Admin → Outlets); null = not configured.
       hours: hasHours(t.outlet) ? { open: t.outlet.openTime, close: t.outlet.closeTime, label: formatHours(t.outlet) } : null,
     },
-    table: { code: t.table.code },
+    // null = the common QR: no table is chosen by the guest (staff assign one).
+    table: t.table ? { code: t.table.code } : null,
     ordering: orderingStatus(t),
     menu,
     payment: await guestPaymentOptions(),
@@ -424,6 +437,42 @@ export const MAX_WAITING_GUEST_ORDERS = 3;
  * anything else, and an invalid value here falls back to the default.
  */
 export const MAX_UNPAID_GUEST_ORDERS = 6;
+const TABLE_WAITING_FULL = "Several orders from this table are waiting for payment. Please pay for one of them, or ask the staff.";
+const tableUnpaidFull = (cap: number) => `This table already has ${cap} unpaid orders. Please pay for them, or ask the staff, before ordering more.`;
+
+/** Serializes a table's two limit counts in the order's transaction (held until it ends), like lockCommonQrCap. */
+export function lockTableQrCaps(tx: Tx, tableId: string): Promise<void> {
+  return lockInTx(tx, `table-qr-cap:${tableId}`);
+}
+
+/** What a table's two limits count: its guest QR orders waiting for payment, and those not settled yet. */
+export async function tableQrLoad(tx: Tx, organizationId: string, tableId: string): Promise<{ waiting: number; unsettled: number }> {
+  const atTable = { organizationId, tableId, source: "QR" };
+  const waiting = await tx.order.count({ where: { ...atTable, status: "OPEN" } });
+  const unsettled = await tx.order.count({ where: { ...atTable, status: { in: UNSETTLED_STATUSES } } });
+  return { waiting, unsettled };
+}
+
+/**
+ * Common QR (no table): orders waiting for their online payment, restaurant-wide,
+ * placed in the last COMMON_QR_WAITING_WINDOW_MS. An abuse guard for a code that
+ * every table shares: it bounds the unpaid orders staff see piling up; abandoned
+ * ones stop counting once older than the window (they can no longer go to the
+ * kitchen anyway, kitchenGate.ts).
+ */
+export const MAX_WAITING_COMMON_QR_ORDERS = 30;
+export const COMMON_QR_WAITING_WINDOW_MS = 15 * 60_000;
+const COMMON_QR_BUSY = "Many orders are waiting for payment right now. Please try again in a few minutes, or ask the staff.";
+
+/** Serializes the cap's in-transaction count per outlet (held until the order's transaction ends). */
+export function lockCommonQrCap(tx: Tx, outletId: string): Promise<void> {
+  return lockInTx(tx, `common-qr-cap:${outletId}`);
+}
+
+/** Unpaid common-QR orders of an outlet placed within the window (the cap's count). */
+function commonWaitingWhere(organizationId: string, outletId: string) {
+  return { organizationId, outletId, source: "QR", tableId: null, status: "OPEN", createdAt: { gte: new Date(Date.now() - COMMON_QR_WAITING_WINDOW_MS) } };
+}
 
 export function maxUnpaidGuestOrders(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.GUEST_MAX_UNPAID_ORDERS_PER_TABLE);
@@ -437,26 +486,32 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
   const key = idemKey.parse(idempotencyKey);
   const data = guestOrderSchema.parse(input);
   const t = await resolveTable(token, db);
+  const table = t.table;
+  // Orders per table QR (as before); per device on the common QR, which every table shares,
+  // so one phone cannot use up the restaurant's allowance (the router also limits writes per IP).
+  await enforceRateLimit(RATE_POLICIES.guestOrderPerTable, table ? token : `${token}:${meta.ip ?? "unknown"}`);
   // No order reaches the kitchen before its online payment is verified (kitchenGate.ts): paying at the counter is not offered.
   if (data.paymentMethod === "CASH") throw new ValidationError(PAY_ONLINE_ONLY);
-  // Namespaced per table: a key can only ever replay an order of this table.
-  const scopedKey = `qr:${t.table.id}:${key}`;
+  // Namespaced per table (or per outlet for the common QR): a key can only ever replay an order placed through the same code.
+  const scopedKey = table ? `qr:${table.id}:${key}` : `qr:outlet:${t.outlet.id}:${key}`;
   const placedUnderKey = () => db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: t.ctx.organizationId, idempotencyKey: scopedKey } }, select: { id: true } });
   // A new order is checked first; a replay of a placed one skips straight to placeOrder's replay.
   const checkNewOrder = async () => {
-    const atTable = { organizationId: t.ctx.organizationId, tableId: t.table.id, source: "QR" };
     // Independent reads: the limits and every line's price, at once.
-    const [waiting, unpaid, lines] = await Promise.all([
-      db.order.count({ where: { ...atTable, status: "OPEN" } }),
-      db.order.count({ where: { ...atTable, status: { in: UNSETTLED_STATUSES } } }),
+    const atTable = table ? { organizationId: t.ctx.organizationId, tableId: table.id, source: "QR" } : null;
+    const [waiting, unpaid, commonWaiting, lines] = await Promise.all([
+      atTable ? db.order.count({ where: { ...atTable, status: "OPEN" } }) : 0,
+      atTable ? db.order.count({ where: { ...atTable, status: { in: UNSETTLED_STATUSES } } }) : 0,
+      atTable ? 0 : db.order.count({ where: commonWaitingWhere(t.ctx.organizationId, t.outlet.id) }),
       priceGuestLines(db, t, data.items),
     ]);
     // The order can only ever be paid online: without a usable gateway it would wait forever. A recent
     // "down" answer is asked again before refusing (the gateway may be back); a recent "up" one is trusted.
     if (!(await guestPaymentOptions()).online && !(await guestPaymentOptions({ fresh: true })).online) throw new ValidationError(ONLINE_PAYMENT_UNAVAILABLE);
-    if (waiting >= MAX_WAITING_GUEST_ORDERS) throw new ValidationError("Several orders from this table are waiting for payment. Please pay for one of them, or ask the staff.");
+    if (waiting >= MAX_WAITING_GUEST_ORDERS) throw new ValidationError(TABLE_WAITING_FULL);
     const unpaidCap = maxUnpaidGuestOrders();
-    if (unpaid >= unpaidCap) throw new ValidationError(`This table already has ${unpaidCap} unpaid orders. Please pay for them, or ask the staff, before ordering more.`);
+    if (unpaid >= unpaidCap) throw new ValidationError(tableUnpaidFull(unpaidCap));
+    if (commonWaiting >= MAX_WAITING_COMMON_QR_ORDERS) throw new ValidationError(COMMON_QR_BUSY);
     const ordering = orderingStatus(t);
     if (!ordering.open) throw new ValidationError(ordering.message!);
     // Every line is checked (and priced) before anything is created, so a sold-out
@@ -488,13 +543,15 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
   const guestName = data.customer?.name || undefined;
   // A phone links the order to the restaurant's CRM (find-or-create; a known customer's
   // name is never changed). The guest's response never reveals whether the number was known.
-  const customerId = data.customer?.phone ? (await upsertCustomerByPhone(t.ctx, { name: guestName ?? "Guest", phone: data.customer.phone }, db)).id : undefined;
+  // The record is found or created in the order's own transaction (placeOrder), so a refused
+  // order leaves none behind.
+  const customer = data.customer?.phone ? { name: guestName ?? "Guest", phone: data.customer.phone } : undefined;
   const order = await placeOrder(t.ctx, {
     outletId: t.outlet.id,
     channel: "QR",
     source: "QR",
-    tableId: t.table.id,
-    customerId,
+    // Common QR: no table until staff assign one (never inferred, never defaulted).
+    tableId: table?.id,
     covers: 1,
     notes: data.notes || undefined,
     idempotencyKey: scopedKey,
@@ -503,19 +560,37 @@ export async function placeGuestOrder(token: string, input: unknown, idempotency
     submit: false,
   }, db, {
     knownNew,
+    customer,
     // Inside the order's transaction (queued with every other SQLite write):
     // the audit row and the staff alert exist exactly when the order does. A
     // separate transaction afterwards could time out under load and answer 500
     // for an order that had already been placed and sent to the kitchen.
     afterCreate: async (tx, placed) => {
-      await writeAudit(tx, t.ctx, { action: "CREATE", entityType: "Order", entityId: placed.id, outletId: t.outlet.id, after: { via: "guest-qr", table: t.table.code, total: money(placed.total).toString(), ...(guestName ? { guestName } : {}), ...(data.paymentMethod ? { paymentMethod: data.paymentMethod } : {}) }, ip: meta.ip, userAgent: meta.userAgent?.slice(0, 200) });
+      // The common-QR cap again, inside the order's transaction and counting this order. New orders run
+      // READ COMMITTED (orders.ts NEW_ORDER_TX), so concurrent submissions that all passed the early check
+      // would each count only what had committed: the outlet's cap lock makes them count one at a time
+      // (the winners commit, the rest roll back with nothing left behind).
+      if (!table) {
+        await lockCommonQrCap(tx, t.outlet.id);
+        if ((await tx.order.count({ where: commonWaitingWhere(t.ctx.organizationId, t.outlet.id) })) > MAX_WAITING_COMMON_QR_ORDERS) throw new ValidationError(COMMON_QR_BUSY);
+      } else {
+        // The same for a table's two limits (checkNewOrder ran before the transaction): the table's lock
+        // makes concurrent submissions through one table QR count one at a time, each counting itself.
+        await lockTableQrCaps(tx, table.id);
+        const atTable = { organizationId: t.ctx.organizationId, tableId: table.id, source: "QR" };
+        if ((await tx.order.count({ where: { ...atTable, status: "OPEN" } })) > MAX_WAITING_GUEST_ORDERS) throw new ValidationError(TABLE_WAITING_FULL);
+        const unpaidCap = maxUnpaidGuestOrders();
+        if ((await tx.order.count({ where: { ...atTable, status: { in: UNSETTLED_STATUSES } } })) > unpaidCap) throw new ValidationError(tableUnpaidFull(unpaidCap));
+      }
+      await writeAudit(tx, t.ctx, { action: "CREATE", entityType: "Order", entityId: placed.id, outletId: t.outlet.id, after: { via: table ? "guest-qr" : "guest-qr-common", table: table?.code ?? null, total: money(placed.total).toString(), ...(guestName ? { guestName } : {}), ...(data.paymentMethod ? { paymentMethod: data.paymentMethod } : {}) }, ip: meta.ip, userAgent: meta.userAgent?.slice(0, 200) });
       // Staff (POS / captain alert centre) learn about the order in-app.
-      await createNotificationTx(tx, t.ctx, { outletId: t.outlet.id, type: "NEW_ORDER", title: `New QR order · table ${t.table.code}`, body: [`${orderRef(placed.id)} · ₹${money(placed.total).toFixed(2)} — waiting for the guest's online payment`, guestName].filter(Boolean).join(" · ") });
+      await createNotificationTx(tx, t.ctx, { outletId: t.outlet.id, type: "NEW_ORDER", title: table ? `New QR order · table ${table.code}` : "New QR order · no table yet", body: [`${orderRef(placed.id)} · ₹${money(placed.total).toFixed(2)} — waiting for the guest's online payment`, guestName].filter(Boolean).join(" · ") });
     },
   });
   // Coupon, referral and consent ride on the order but never fail it: each reports its own outcome.
   let coupon: { applied: boolean; code?: string; discount?: string; message?: string } | undefined;
   let referral: { attached: boolean; message?: string } | undefined;
+  const customerId = order.customerId ?? undefined;
   if (!order.replayed) {
     if (data.couponCode) {
       try {

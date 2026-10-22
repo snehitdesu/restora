@@ -8,7 +8,7 @@ import {
   createMaterial, updateMaterial, listMaterials, getMaterial,
   createVendor, updateVendor, setVendorStatus, listVendors, getVendor, linkVendorMaterial,
   createOutlet, updateOutlet, listOutlets,
-  createFloor, createTable, updateTable, setTableStatus, rotateTableQr, revokeTableQr, listTables,
+  createFloor, createTable, updateTable, setTableStatus, rotateTableQr, revokeTableQr, getOutletCommonQr, rotateOutletCommonQr, revokeOutletCommonQr, listTables,
 } from "@/server/services/masterData";
 import {
   getOrganization, updateOrganization, listDepartments, createDepartment, updateDepartment,
@@ -75,6 +75,10 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
   { method: "POST", path: "tables/:id/status", handler: ({ ctx, params, body }) => setTableStatus(ctx, params.id, z.object({ status: z.string() }).parse(body).status) },
   { method: "POST", path: "tables/:id/qr", handler: ({ ctx, params }) => rotateTableQr(ctx, params.id) },
   { method: "POST", path: "tables/:id/qr/revoke", handler: ({ ctx, params }) => revokeTableQr(ctx, params.id) },
+  // The restaurant's common QR (one code for every table; docs/common-qr-ordering.md).
+  { method: "GET", path: "outlets/:id/common-qr", handler: ({ ctx, params }) => getOutletCommonQr(ctx, params.id) },
+  { method: "POST", path: "outlets/:id/common-qr", handler: ({ ctx, params }) => rotateOutletCommonQr(ctx, params.id) },
+  { method: "POST", path: "outlets/:id/common-qr/revoke", handler: ({ ctx, params }) => revokeOutletCommonQr(ctx, params.id) },
   // staff QR scanner: read-only check of what a scanned table QR opens (POST so the token never sits in a URL or access log)
   { method: "POST", path: "table-qr/scan", rateLimit: RATE_POLICIES.qrScanPerUser, handler: ({ ctx, body, req }) => scanTableQr(ctx, body, { requestOrigin: req.nextUrl.origin }) },
 ]);

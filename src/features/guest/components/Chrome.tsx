@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { request } from "@/lib/api/client";
 import { formatMoney } from "@/lib/format";
 import { orderUrl, rememberedOrders, type RememberedOrder } from "@/features/guest/session";
-import { useStorefront } from "@/features/guest/storefront";
+import { guestSeat, useStorefront } from "@/features/guest/storefront";
 import { Sheet } from "@/features/guest/components/Sheet";
 import { SfIcon } from "@/features/guest/components/SfIcon";
 import { ItemSheet } from "@/features/guest/components/ItemSheet";
@@ -56,9 +56,9 @@ export function TopBar({ onMyOrders }: { onMyOrders?: () => void }) {
           <Link href={`${base}#about`}>About &amp; contact</Link>
         </nav>
         <div className="sf-top-actions">
-          <span className="sf-chip" aria-label={`Table ${data.table.code}`}>
+          <span className="sf-chip" aria-label={guestSeat(data.table)}>
             <span className="sf-chip-dot" aria-hidden="true" />
-            {data.table.code}
+            {data.table ? data.table.code : "Sit anywhere"}
           </span>
           {mine > 0 && onMyOrders && (
             <button type="button" className="sf-icon-btn" onClick={onMyOrders} aria-label={`My orders (${mine})`}>

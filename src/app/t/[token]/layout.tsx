@@ -37,8 +37,8 @@ type Props = { params: Promise<{ token: string }>; children: ReactNode };
 export async function generateMetadata({ params }: Omit<Props, "children">): Promise<Metadata> {
   const t = await table((await params).token);
   return {
-    title: t ? `${t.restaurantName} · Table ${t.table.code}` : "Table QR",
-    description: t ? `Order from Table ${t.table.code} at ${t.restaurantName}.` : undefined,
+    title: t ? `${t.restaurantName} · ${t.table ? `Table ${t.table.code}` : "Menu"}` : "Table QR",
+    description: t ? (t.table ? `Order from Table ${t.table.code} at ${t.restaurantName}.` : `Order at ${t.restaurantName}: sit anywhere, staff bring your order.`) : undefined,
     robots: { index: false, follow: false },
     referrer: "no-referrer",
   };

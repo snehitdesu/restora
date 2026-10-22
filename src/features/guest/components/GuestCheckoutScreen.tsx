@@ -8,7 +8,7 @@ import { cartFingerprint, toOrderItems } from "@/features/pos/cart";
 import { createSubmitGuard } from "@/features/pos/submitGuard";
 import { clearSubmission, loadReferral, markSubmissionPending, orderUrl, pendingSubmission, rememberOrder, saveCart, saveCoupon, saveNotice, saveReferral, settleSubmission, submissionKey, type PendingSubmission } from "@/features/guest/session";
 import { ORDER_ATTEMPT_TIMEOUT_MS, submitWithReconcile, type SubmitOutcome, type SubmitPhase } from "@/features/guest/orderSubmit";
-import { useServerQuote, useStorefront } from "@/features/guest/storefront";
+import { guestSeat, useServerQuote, useStorefront } from "@/features/guest/storefront";
 import { OfflineBanner, TopBar } from "@/features/guest/components/Chrome";
 import { Totals } from "@/features/guest/components/GuestCartScreen";
 import { CouponBox, ReferralAndOffers } from "@/features/guest/components/GuestOffers";
@@ -194,11 +194,12 @@ export function GuestCheckoutScreen({ navigate = (url: string) => window.locatio
         </div>
 
         <section className="sf-card sf-table-card" aria-label="Your table">
-          <span className="sf-tno" aria-hidden="true">{data.table.code}</span>
+          {data.table && <span className="sf-tno" aria-hidden="true">{data.table.code}</span>}
           <div>
             <p className="sf-card-title">Ordering from</p>
-            <p style={{ fontWeight: 700, fontSize: 18 }}>Table {data.table.code}</p>
+            <p style={{ fontWeight: 700, fontSize: 18 }}>{guestSeat(data.table)}</p>
             <p className="sf-page-sub">{data.restaurant.name}</p>
+            {!data.table && <p className="sf-page-sub" data-testid="sit-anywhere-hint">No need to pick a table: the staff bring your order to you. You can say where you are sitting in the note, if you like.</p>}
           </div>
         </section>
 

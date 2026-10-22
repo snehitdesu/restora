@@ -52,11 +52,26 @@ rotation. Do not run a demo seed or a `--reset` against Production.
 2. **Back up.** Take and verify a backup by following
    `docs/production-runbook.md` §4 (Restore / disaster recovery).
 3. **Record the starting state (read-only).** If you have a read-only
-   connection to the database:
+   connection to the database, first switch the checkout's Prisma client to
+   PostgreSQL (a normal checkout has the SQLite client, and then the audit
+   fails with "the URL must start with the protocol `file:`"):
+   `node scripts/pg-schema.mjs && npx prisma generate --schema prisma/postgres/schema.prisma`
+   then:
    `DATABASE_URL=<prod, read-only> npm run qr:audit`
+   (and afterwards `node scripts/ensure-sqlite-client.mjs` to get the SQLite
+   client back for local work). Verified 2026-10-21 on a disposable database
+   with `a80caa9`'s schema: classes printed, no tokens, exit 2 for a legacy
+   token, exit 3 for an empty database.
    This prints organization, outlet, table and class, never the token.
+   **Check the organization and outlet names are Production's** (Coders'
+   Cafe and its outlet): a different non-empty database (a local copy, a
+   Preview database) also audits "successfully", and exit 3 only catches an
+   empty one.
    Expected before rotation: `legacy-derivable` for T01–T10 (and for any
-   demo-group tables Production holds), exit code 2. Any `nonstandard` row is
+   demo-group tables Production holds), exit code 2. Exit code 3 ("No tables
+   found") means the connection reached an empty or wrong database: stop and
+   fix `DATABASE_URL`; it is never a clean result (since 2026-10-21; before,
+   an empty database exited 0). Any `nonstandard` row is
    a hand-set or test value (for example a `load-` token left by
    `scripts/ops/load-test.mjs`): rotate it too, or **Disable** it if the table
    should not exist. Without database access, note which tables have a QR on
@@ -67,7 +82,7 @@ rotation. Do not run a demo seed or a `--reset` against Production.
    taking QR orders.
 5. **Generate the new labels.**
    `npm run qr:tables -- --mode production --base-url https://<public host>`
-   with `DATABASE_URL` set to Production. `--base-url` is required on every
+   with `DATABASE_URL` set to Production (PostgreSQL client, as in step 3). `--base-url` is required on every
    `qr:tables` run; `PUBLIC_BASE_URL` is never used as a fallback. This only reads the database. It
    writes to the git-ignored `artifacts/table-qr/production/`. Since
    2026-10-21 production mode **refuses** (exit 1, nothing written) while any
@@ -93,6 +108,23 @@ rotation. Do not run a demo seed or a `--reset` against Production.
 
 ## Replacing the cards without disrupting service
 
+- **What a derivable token allows on `a80caa9` (code review 2026-10-21, not
+  tested on Production):** a QR order is created `OPEN`, waiting for staff to
+  accept it (at most 3 waiting per table; 20 orders per table per 10 minutes;
+  60 writes per IP per minute, counted per server instance). But a **verified
+  online payment** on such an order sends it to the kitchen, issues the next
+  invoice number and consumes stock **without staff acceptance**
+  (`a80caa9:src/server/services/payment.ts`, "prepaid"). Production was seen
+  on 2026-10-13 with Razorpay in SANDBOX mode, where Razorpay's public test
+  cards complete a payment: if that is still so, anyone who computes a token
+  from this public repository can put real tickets in the kitchen and real
+  invoice numbers in the books without paying. Interim options without a
+  deployment: rotate (removes remote guessing; a printed card still works for
+  whoever holds it), or **Disable** the QR of every table until new cards are
+  out (stops QR ordering). **Do not redeploy Production to change its
+  environment** (e.g. to remove the Razorpay keys): as of 2026-10-19 it has no
+  `DATABASE_URL` record, so a new Production build would start without a
+  database.
 - **Production today still runs build `a80caa9`, which accepts QR orders paid
   at the counter** (`paymentMethod: "CASH"`). A rotation there ends the page of
   any guest mid-visit, so it needs the closed window below. On a build of this
@@ -113,6 +145,42 @@ rotation. Do not run a demo seed or a `--reset` against Production.
 - If the window must end half-way, the tables already rotated stay rotated;
   continue later with the rest. Re-run `npm run qr:audit` to see what is left.
 
+## Owner choice for Production today (build `a80caa9`)
+
+Both are done on Production's **Tables** screen by an OWNER / MANAGER of the
+outlet, with written approval. Neither needs a deployment, a migration or
+database access. Read from the `a80caa9` code (`src/features/backoffice/tables.tsx`,
+`src/server/services/masterData.ts`); not exercised on Production.
+
+| | A. Controlled rotation with replacement cards | B. Temporarily disable QR ordering |
+| --- | --- | --- |
+| What it does | **Rotate** gives each table a new 144-bit random token; the old one is dead at once | **Disable QR ordering** removes each table's token; the card shows "This QR code isn't working" |
+| Guests | Mid-visit guests at a rotated table lose their page; afterwards guests order as before from the new cards | No QR ordering at all; guests order with the staff |
+| Kitchen / staff | No change in the KDS / POS flow; someone must swap cards and test each with a phone | Every order comes through staff (POS); no QR alerts. Existing orders are unaffected |
+| Closes the hole? | Yes for remote guessing (new tokens are random); a printed card still works for whoever holds it, as with any QR menu | Yes, completely, while disabled |
+| Prerequisites | Closed window; no open QR orders / unpaid guest checkouts; card printer + stock tested; one person rotating, one scanning. **Open the backoffice at the public address `https://restora-beta-six.vercel.app`**: with `PUBLIC_BASE_URL` unset (as on 2026-10-14) the QR encodes the address the screen is open at, and a `…-snehitdesus-projects.vercel.app` deployment URL is behind Vercel sign-in, so guests could not open it. Scan every new card before it goes out | Approval only; minutes per table; a "please order with the staff" sign per table |
+| Rollback | None to the old tokens (deliberately). A wrong card: rotate that table again and reprint | Re-enabling = **issuing a new token** (the Rotate / Issue button), i.e. option A for that table with new cards. The old cards never work again |
+| Evidence | Decision table below; with read-only access, `qr:audit` / the audit SQL (`docs/production-readonly-audit.md`) exit 0 afterwards | Each table shows "No QR code is issued"; one old card scanned shows the error |
+
+Recommendation: **A** if guests order by QR at the café today (it keeps QR
+ordering and removes the guessable tokens); **B** now if Production is only
+used as an investor demo, or if cards cannot be printed and tested within a
+day. B followed by A later is fine; A then B is pointless.
+
+Not affected by either: the online-payment bypass described below (a verified
+payment sends a QR order to the kitchen without staff) remains for any valid
+token, which is why the tokens must not be guessable.
+
+## Decision points and evidence to keep
+
+| When | Stop / go rule | Evidence to file (no tokens, no label images) |
+| --- | --- | --- |
+| Before the window | Go only with the owner's written approval, a verified backup (step 2) and no open QR orders / unpaid guest checkouts | Approval message; backup file name + manifest sha256 + restore check result; screenshot of the empty Orders queue |
+| After step 3 | Exit 2 = go (the scope is the flagged rows). Exit 0 = nothing to rotate, stop. Exit 1 or 3 = stop, fix the connection | Audit output (classes only) and its exit code |
+| During step 4 | A **Rotate** error on a table: stop rotating, keep the tables already done, retry that table once; still failing = end the window (see above) | List of rotated table codes and times |
+| After step 6 | Every new card shows the right restaurant + table, one old card shows "This QR code isn't working", audit exit 0. Any wrong mapping: rotate that table again and reprint; never restore a token | Audit output + exit 0; tick list per table (new scan OK, old scan refused); audit-log rows per table |
+| Afterwards | The backup from step 2 now holds the dead legacy tokens: label it so, never restore it into service unless a disaster forces it (then repeat this checklist) | Backup label |
+
 ## Local rehearsal (2026-10-21, no Production access)
 
 Run on byte copies in a scratch folder; `prisma/dev.db` (SHA-256 prefix
@@ -127,6 +195,7 @@ only to copy them and are unchanged. Tokens were never printed.
 | Rotate T01–T10 | `rotateTableQr` (the service behind Tables → **Rotate**) as the Coders' Cafe owner | 10/10 old tokens answer `not_found`; 10/10 new tokens resolve to the same table code; 10 audit rows `{"qrRotated":true}` by the owner, none containing a token; order count unchanged |
 | Audit after | `npm run qr:audit` | 10 `random`, exit 0 |
 | Labels after | same `qr:tables` command | `printReady: true`, 10 SVG + `labels.html` + `manifest.json` (deleted afterwards) |
+| Audit / labels, wrong database (later pass) | `DATABASE_URL=file:<missing file>`; then a freshly migrated empty database | missing file: both refuse, exit 1, nothing written; empty database: audit "No tables found", exit 3 |
 
 Not rehearsed: a phone scan of printed cards (needs the public host and a
 phone) and a click on the Tables screen's **Rotate** button. The service is

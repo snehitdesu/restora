@@ -25,6 +25,7 @@ import { calculateOrderTotals, recomputeTotals, releaseTableTx, getOrder } from 
 import { nextKotNumber } from "@/server/services/kot";
 import { assertNoTableConflict, lockSlots, releaseSlots } from "@/server/services/reservations";
 import { requestHashOf } from "@/server/services/idempotency";
+import { lockTableQrCaps, MAX_WAITING_GUEST_ORDERS, maxUnpaidGuestOrders, tableQrLoad } from "@/server/services/guestOrdering";
 
 type Tx = Prisma.TransactionClient;
 type Client = PrismaClient | Tx;
@@ -68,11 +69,13 @@ const transferSchema = z.object({ tableId: z.string().min(1) });
  * because they belong to the order. The old table is released, the new one shows the order's state (occupied, or bill
  * requested), and a party seated from a reservation takes the reservation with it.
  */
-export async function transferOrderTable(ctx: AccessContext, orderId: string, input: z.input<typeof transferSchema>, db: Client = prisma) {
+export async function transferOrderTable(ctx: AccessContext, orderId: string, input: z.input<typeof transferSchema>, db: Client = prisma, opts: { fromTableId?: string } = {}) {
   const { tableId } = transferSchema.parse(input);
   const result = await orderTx(db, orderId, async (tx) => {
     const order = await loadRunning(tx, ctx, orderId);
     if (!order.tableId) throw new ValidationError("This order is not at a table");
+    // setOrderTable with the caller's view: the order must still be at the table they saw.
+    if (opts.fromTableId !== undefined && order.tableId !== opts.fromTableId) throw new ConflictError(TABLE_CHANGED);
     if (order.tableId === tableId) return { unchanged: true, fromTable: order.table!.code, toTable: order.table!.code };
     const target = await tx.restaurantTable.findUnique({ where: { id: tableId } });
     if (!target || target.organizationId !== ctx.organizationId || target.outletId !== order.outletId) throw new ValidationError("Table not in this outlet");
@@ -99,6 +102,129 @@ export async function transferOrderTable(ctx: AccessContext, orderId: string, in
     return { unchanged: false, fromTable: order.table!.code, toTable: target.code };
   });
   return { ...result, order: await full(db, ctx, orderId) };
+}
+
+// ------------------------------------------------------------------ assign / change the table (common QR orders)
+
+/**
+ * Staff set the table of an order. Built for orders placed from the restaurant's
+ * common QR, which arrive with no table (the guest sits anywhere and never picks
+ * one; docs/common-qr-ordering.md); it is never inferred or defaulted.
+ *
+ * - A running order already at a table: the normal move (transferOrderTable and its rules).
+ * - A running order with no table: assigned. The table may already have running
+ *   orders (one group ordering from several phones); a table being cleaned may not.
+ *   The table shows occupied, as when staff open an order at it.
+ * - A prepaid QR order (PAID once its online payment verified, then cooked) whose
+ *   food is not all served yet: only where to take it is recorded (set or changed);
+ *   table statuses are left alone, as payment already released the table.
+ * Finished, cancelled and refunded orders are refused. Concurrent changes: the
+ * first one wins, the other gets a conflict.
+ *
+ * A table's guest limits (guestOrdering: MAX_WAITING_GUEST_ORDERS waiting for
+ * payment, maxUnpaidGuestOrders() unsettled) bound what guests pile up through
+ * its QR; seating a guest QR order counts toward them. Staff may go past them,
+ * but only deliberately: without `overrideGuestLimits` such an assignment is
+ * refused with the numbers (TableGuestLimitError); with it, it goes through and
+ * the audit row records the override and who made it. The limits themselves
+ * are unchanged: the table's QR keeps refusing guests while it is over them.
+ */
+export class TableGuestLimitError extends ConflictError {
+  details: TableGuestLimitFacts;
+  constructor(facts: TableGuestLimitFacts) {
+    super(`With this order table ${facts.table} has ${facts.waiting} QR orders waiting for payment (guest limit ${facts.waitingLimit}) and ${facts.unsettled} unsettled (limit ${facts.unsettledLimit}). Its QR will refuse new guest orders until some are paid.`);
+    this.name = "TableGuestLimit";
+    this.details = facts;
+  }
+}
+export type TableGuestLimitFacts = { table: string; waiting: number; waitingLimit: number; unsettled: number; unsettledLimit: number };
+
+const TABLE_CHANGED = "This order's table was just changed by someone else; reload it";
+
+/**
+ * fromTableId: the table the caller saw on the order (null = none). When sent, the change applies only if the order
+ * is still there, so a second person working from a stale screen gets a conflict instead of silently moving an
+ * order a colleague has just seated. Omitted: no such check (earlier callers).
+ */
+const setTableSchema = transferSchema.extend({ overrideGuestLimits: z.boolean().optional(), fromTableId: z.string().min(1).nullable().optional() });
+
+export async function setOrderTable(ctx: AccessContext, orderId: string, input: z.input<typeof setTableSchema>, db: Client = prisma) {
+  const { tableId, overrideGuestLimits, fromTableId } = setTableSchema.parse(input);
+  const peek = await db.order.findUnique({ where: { id: orderId }, select: { organizationId: true, tableId: true, status: true } });
+  if (peek && peek.organizationId === ctx.organizationId && peek.tableId && !CLOSED.includes(peek.status)) {
+    if (fromTableId === null) throw new ConflictError("This order was just given a table by someone else; reload it");
+    return transferOrderTable(ctx, orderId, { tableId }, db, fromTableId === undefined ? {} : { fromTableId });
+  }
+  const result = await orderTx(db, orderId, async (tx) => {
+    const order = await tx.order.findUnique({ where: { id: orderId }, include: { table: { select: { id: true, code: true } } } });
+    if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
+    assertOutletAccess(ctx, order.outletId);
+    assertCan(ctx, "order.modify", order.outletId);
+    const prepaid = order.status === "PAID";
+    if (order.status === "CANCELLED" || order.status === "REFUNDED") throw new ValidationError(`The order is ${order.status.toLowerCase()}`);
+    if (fromTableId !== undefined && order.tableId !== fromTableId) throw new ConflictError(TABLE_CHANGED);
+    if (prepaid) {
+      const toServe = order.source === "QR" ? await tx.kot.count({ where: { orderId, status: { notIn: ["SERVED", "CANCELLED"] } } }) : 0;
+      if (!toServe) throw new ValidationError("This order is finished; its table can no longer be changed");
+    } else if (order.tableId) {
+      throw new ConflictError("This order was just given a table by someone else; reload it");
+    }
+    if (order.tableId === tableId) return { unchanged: true, fromTable: order.table?.code ?? null, toTable: order.table?.code ?? null };
+    const target = await tx.restaurantTable.findUnique({ where: { id: tableId } });
+    if (!target || target.organizationId !== ctx.organizationId || target.outletId !== order.outletId) throw new ValidationError("Table not in this outlet");
+    if (target.status === "CLEANING") throw new ValidationError(`Table ${target.code} is being cleaned`);
+    if (!prepaid) {
+      const running = await tx.order.count({ where: { tableId, status: { notIn: CLOSED } } });
+      if (!running) await assertNoTableConflict(tx, ctx, tableId, new Date());
+    }
+    // Compare-and-set on the table seen above: a concurrent assignment cannot be overwritten silently.
+    const changed = await tx.order.updateMany({ where: { id: orderId, tableId: order.tableId }, data: { tableId } });
+    if (changed.count !== 1) throw new ConflictError(TABLE_CHANGED);
+    if (!prepaid && target.status !== "BILL_REQUESTED") {
+      await tx.restaurantTable.update({ where: { id: tableId }, data: { status: order.status === "BILLED" ? "BILL_REQUESTED" : "OCCUPIED" } });
+    }
+    // The table's guest limits, counted with this order on it. Taken after the table row (as a guest order's
+    // transaction does: createOrderTx marks the table, then its afterCreate takes this lock), so the two never wait
+    // on each other in opposite order; concurrent assignments and guest orders at the table count one at a time.
+    let guestLimitOverride: Omit<TableGuestLimitFacts, "table"> | undefined;
+    if (!prepaid && order.source === "QR") {
+      await lockTableQrCaps(tx, tableId);
+      const load = await tableQrLoad(tx, ctx.organizationId, tableId);
+      const facts = { waiting: load.waiting, waitingLimit: MAX_WAITING_GUEST_ORDERS, unsettled: load.unsettled, unsettledLimit: maxUnpaidGuestOrders() };
+      if (facts.waiting > facts.waitingLimit || facts.unsettled > facts.unsettledLimit) {
+        if (!overrideGuestLimits) throw new TableGuestLimitError({ table: target.code, ...facts });
+        guestLimitOverride = facts;
+      }
+    }
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Order", entityId: orderId, outletId: order.outletId, before: { tableId: order.tableId, table: order.table?.code ?? null }, after: { tableId, table: target.code, tableAssigned: true, ...(prepaid ? { prepaid: true } : {}), ...(guestLimitOverride ? { guestLimitOverride } : {}) } });
+    return { unchanged: false, fromTable: order.table?.code ?? null, toTable: target.code };
+  });
+  return { ...result, order: await full(db, ctx, orderId) };
+}
+
+/**
+ * Guest QR orders staff may still need to seat: not cancelled / refunded, and
+ * either not paid yet or paid with food not all served (a prepaid order is PAID
+ * while it cooks). Orders with no table come first. Read-only; `order.view`.
+ */
+export async function listQrOrdersForTables(ctx: AccessContext, input: { outletId?: unknown }, db: PrismaClient = prisma) {
+  const outletId = z.string().min(1).parse(input.outletId);
+  assertOutletAccess(ctx, outletId);
+  assertCan(ctx, "order.view", outletId);
+  const since = new Date(Date.now() - 12 * 60 * 60_000);
+  const rows = await db.order.findMany({
+    where: {
+      organizationId: ctx.organizationId, outletId, source: "QR", createdAt: { gte: since },
+      OR: [
+        { status: { notIn: ["PAID", "CANCELLED", "REFUNDED"] } },
+        { status: "PAID", kots: { some: { status: { notIn: ["SERVED", "CANCELLED"] } } } },
+      ],
+    },
+    orderBy: { createdAt: "asc" },
+    take: 100,
+    select: { id: true, status: true, total: true, createdAt: true, notes: true, tableId: true, table: { select: { code: true } }, customer: { select: { name: true } }, kots: { select: { status: true } } },
+  });
+  return rows.sort((a, b) => Number(Boolean(a.tableId)) - Number(Boolean(b.tableId)));
 }
 
 // ------------------------------------------------------------------ merge

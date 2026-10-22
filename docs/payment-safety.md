@@ -255,6 +255,7 @@ New in this release (both histories, `prisma/migrations` and
 | --- | --- |
 | `20261024100000_upi_checkout` | `Payment.checkoutData`, `checkoutExpiresAt`, `recheckedAt` (nullable) + index `Payment(status, createdAt)` |
 | `20261025100000_recipe_estimates` | `RecipeVersion.estimated BOOLEAN NOT NULL DEFAULT false` |
+| `20261026100000_outlet_common_qr` | `Outlet.guestQrToken` (nullable) + unique index (the restaurant common QR, `docs/common-qr-ordering.md`; added 2026-10-21 after the record below) |
 
 **Production is further behind than this release (checked 2026-10-20).** The
 live Production build is `main` `a80caa9`, whose newest PostgreSQL migration is
@@ -286,7 +287,7 @@ Production deploy would start without a database until the owner sets one.
    from earlier releases deploy first, in order, by the same command).
 4. Schema first: `npm run db:pg:deploy` (= `prisma migrate deploy`; never
    `db push` / `migrate reset`). The new build's readiness check reports
-   `pending` until `20261025100000_recipe_estimates` is applied
+   `pending` until `20261026100000_outlet_common_qr` is applied
    (`EXPECTED_MIGRATION`), so deploy the schema before the code.
 5. Deploy the build; check `/api/health` readiness is `ok`; place one test
    order on the counter (cash) and view its bill.

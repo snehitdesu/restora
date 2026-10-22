@@ -73,6 +73,9 @@ model Outlet {
   closeTime      String? // "23:30"
   // Invoice number series prefix (≤ 4 chars), e.g. "HYD" -> HYD/2627/00001.
   invoiceSeries  String?
+  // The restaurant's common QR (one code for every table): a random token like
+  // RestaurantTable.qrToken, never derived from the outlet. Null = not issued.
+  guestQrToken   String?      @unique
   active         Boolean      @default(true)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt

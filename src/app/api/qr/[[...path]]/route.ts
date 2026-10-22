@@ -8,16 +8,17 @@ import { NotFoundError } from "@/server/db/scope";
 
 export const runtime = "nodejs";
 
-// Anonymous guest QR ordering. Tenant context comes only from the table token
+// Anonymous guest QR ordering. Tenant context comes only from the guest token (a table's QR or the
+// restaurant's common QR, resolved by guestOrdering.lookupTableToken)
 // (server-side lookup); an order is reachable only with its access key, sent in
 // the x-order-key header (never in the URL, so it stays out of access logs).
 export const { GET, POST } = createGuestRouter([
   { method: "GET", path: "t/:token", handler: ({ params }) => guestMenu(params.token) },
   // Read-only: the cart priced by the server (availability, variants, add-ons, GST). Creates nothing.
   { method: "POST", path: "t/:token/quote", ipPolicy: RATE_POLICIES.guestQuotePerIp, handler: ({ params, body }) => quoteGuestCart(params.token, body) },
+  // Orders per table code / per device on the common QR: enforced in placeGuestOrder, which knows which kind of code it is.
   {
     method: "POST", path: "t/:token/orders",
-    limits: [{ policy: RATE_POLICIES.guestOrderPerTable, key: ({ params }) => params.token }],
     handler: ({ params, body, req, ip }) => placeGuestOrder(params.token, body, req.headers.get("idempotency-key"), { ip, userAgent: req.headers.get("user-agent") ?? undefined }),
   },
   { method: "GET", path: "orders/:id", handler: ({ params, req }) => getGuestOrder(params.id, req.headers.get("x-order-key")) },

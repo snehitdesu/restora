@@ -98,7 +98,7 @@ Trigger status today (from `vercel.json` and the 2026-10-19/20 checks):
 ## D. Production database rollout — `docs/payment-safety.md` §7
 
 Production runs `main` `a80caa9`; its newest migration is
-`20261016100000_integrations_control_room`. This branch adds **nine**, all
+`20261016100000_integrations_control_room`. This branch adds **ten**, all
 additive, applied in this order:
 
 1. `20261017100000_growth_crm`
@@ -110,6 +110,7 @@ additive, applied in this order:
 7. `20261023100000_owner_recovery`
 8. `20261024100000_upi_checkout`
 9. `20261025100000_recipe_estimates`
+10. `20261026100000_outlet_common_qr` (restaurant common QR: one nullable column + unique index on `Outlet`)
 
 - [ ] Supply Production's `DATABASE_URL` source (Vercel has no
       Production-scoped record as of 2026-10-19) and confirm it is not shared
@@ -119,7 +120,7 @@ additive, applied in this order:
 - [ ] Read-only check: `npx prisma migrate status --schema prisma/postgres/schema.prisma`.
 - [ ] Schema before code: `npm run db:pg:deploy` (never `db push` or `migrate reset`).
 - [ ] Deploy the build; `/api/health` readiness must be `ok` (it reports
-      `pending` until `20261025100000_recipe_estimates` is applied).
+      `pending` until `20261026100000_outlet_common_qr` is applied).
 - [ ] Validate: one counter cash order, its bill, the KOT, and the dashboard totals.
 - [ ] Rollback: redeploy the previous build (it ignores the new columns and
       tables). Do not reverse migrations 1–7 (they hold business records and an
@@ -130,7 +131,8 @@ additive, applied in this order:
   local database; that says nothing about Production. Only `migrate status`
   on Production shows what is applied there.
 - Step-by-step preflight with stop conditions, including the backup trap
-  (take the pre-upgrade backup from a checkout of `a80caa9`):
+  (verify the pre-upgrade backup with
+  `--expect-migration 20261016100000_integrations_control_room`):
   `docs/production-migration-preflight.md`.
 
 ## E. Late-payment policy — **owner approval required**
@@ -164,6 +166,11 @@ kitchen supplies:
 - [ ] Contents of the 3 combos (`not-covered.csv`) and the 10 unreadable
       menu-board entries.
 - [ ] A named person signs off each recipe; then Confirm quantities → Approve.
+
+The separate **RESTORA Demo Café** sample dataset (`docs/demo-cafe-data.md`,
+`npm run db:seed:demo-cafe`) is for demonstrations only, in its own
+organization: its menu, prices, recipes and ingredient rates are SAMPLE data
+and are never a substitute for the items above.
 
 ## G. Physical bill printing — `docs/physical-printer-test.md`
 

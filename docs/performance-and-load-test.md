@@ -274,3 +274,28 @@ harness creates users, `load-…` QR tables, printers and orders, and samples
 
 Untestable without hardware / people: real phones on the café Wi-Fi (see
 `docs/real-phone-qr-test.md`) and the packaged desktop app under load.
+
+### Common restaurant QR (added 2026-10-21; not run anywhere but the local tests)
+
+The common QR (`docs/common-qr-ordering.md`) puts every table's orders behind
+one code, so on staging also measure:
+
+- **Burst from one network:** N virtual guests from **one** client IP (the café
+  Wi-Fi) ordering through the common code. Expected: the 21st order in 10
+  minutes from that IP is refused (429). Record at which guest count real
+  ordering would be blocked; this feeds the owner's decision on the limit.
+- **Burst from many networks:** the same from N distinct IPs. Expected: no 429
+  per guest; the outlet's 30-recent-unpaid cap refuses the 31st unpaid order
+  ("Many orders are waiting"), never more (the cap is re-checked inside the
+  order's transaction; locally five simultaneous orders from 29 let exactly
+  one through).
+- **Several instances:** with `RATE_LIMIT_STORE=database`, two or more
+  instances must share one count (locally: two store instances on one
+  database, 40 concurrent hits, none lost — `tests/api/rate-limit-store.test.ts`).
+  With the in-process store each instance counts separately: do not use it on
+  staging or Production.
+- **Staff assignment under load:** 20 concurrent `POST /api/orders/:id/table`
+  on distinct orders, and pairs on the same order. Expected: no 5xx; on a
+  pair, one success and one 409 / 422, the order holding one of the two tables.
+- **Pass criteria:** proposals in item 5 above apply; additionally 0 orders
+  over the cap and 0 lost rate-limit hits. The owner confirms them first.

@@ -61,6 +61,36 @@ Only on a non-Production deployment wired to SBI UAT
    sent to the kitchen.
 5. Two phones at the same table, and two tables at once.
 
+## Coverage matrix: automated vs. real device
+
+Automated = runs in CI / locally on a browser or the server; it proves the logic,
+**not** a real camera, phone browser, network or printer. "Real" = the step above
+that only a person with the device can sign off.
+
+| Case | Automated coverage | Real-device step |
+| --- | --- | --- |
+| Valid QR → right restaurant + table | `tests/domain/table-qr-token.test.ts` (each token resolves only its own table / outlet / organization), `e2e/qr-transaction.spec.ts` | Stage 1.1–1.2, every card |
+| Invalid / malformed / unknown / rotated QR | `tests/domain/table-qr-token.test.ts`, `tests/domain/qr-transaction.test.ts` (one uniform message) | Stage 1.5–1.6 |
+| Wrong outlet / table association | `tests/domain/table-qr-token.test.ts` (inconsistent table/outlet → not found), `tests/domain/qr-transaction.test.ts` (another tenant's dish / order) | Stage 1.2 (a wrong table is stop-ship) |
+| Menu load, item selection, cart | `tests/api/guest-routes.test.ts`, `tests/ui/guest.test.tsx` | Stage 1.3, 1.7 |
+| Order submission, duplicate submission | `tests/domain/qr-transaction.test.ts` (duplicate replays), `tests/db/guest-checkout-concurrency.test.ts` | Stage 2.1 (double-tap Place order once) |
+| Payment initiation / failure / expiry | `tests/domain/qr-payment-gate.test.ts`, `tests/integrations/upi-direct-bank.test.ts` (emulator, not SBI) | Stage 2.1, 2.3 — **SBI UAT only** |
+| Delayed confirmation, recovery | `tests/domain/payment-recovery.test.ts`, `tests/domain/qr-payment-gate.test.ts` (timeouts never settle) | Stage 2.2, 2.4 — needs the scheduler |
+| Kitchen ticket exactly once after payment | `tests/domain/qr-payment-gate.test.ts` (one KOT per station, concurrent confirmations) | Stage 2.1 (KDS) |
+| Receipt content, printer failure, retry, reprint | `tests/domain/bill-printing.test.ts`, `e2e/bill-print.spec.ts` | `docs/physical-printer-test.md` A.4–A.8 |
+
+Environment for stage 2 (none exists yet): a non-Production deployment with its
+own database, `PAYMENT_PROVIDER=sbi_upi` against SBI UAT, `CRON_SECRET` and a
+scheduler calling `/api/cron/payments`, rotated cards printed for that host.
+Never point it at Production's database, and never scan Production cards on
+build `a80caa9` past the checkout screen (it creates real orders).
+
+**Sign-off evidence** (all of it, filed with the go-live checklist): the Record
+table below filled for every card on both phone types and both networks; a
+photo of one card and the screen it opened (no token visible in the photo's
+URL bar, or crop it); for stage 2, the payment's SBI UAT reference and the KOT
+time, side by side; the printer record of `docs/physical-printer-test.md`.
+
 ## Record
 
 | Date | Who | Phone + OS + browser / scanner | Network | Table | Step | Result |

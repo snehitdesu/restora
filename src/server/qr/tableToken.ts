@@ -22,11 +22,23 @@ export function newTableQrToken(): string {
   return randomBytes(TABLE_QR_TOKEN_BYTES).toString("base64url");
 }
 
-/** A random token no table currently holds. `source` is replaceable only so tests can force a collision. */
+/**
+ * A random token no table and no outlet currently holds: table QR tokens and
+ * the restaurant's common QR (Outlet.guestQrToken) share one namespace, since
+ * the guest lookup accepts either. `source` is replaceable only so tests can
+ * force a collision.
+ */
 export async function issueTableQrToken(db: PrismaClient | Prisma.TransactionClient, source: () => string = newTableQrToken): Promise<string> {
   for (let i = 0; i < ISSUE_ATTEMPTS; i++) {
     const token = source();
-    if (!(await db.restaurantTable.findUnique({ where: { qrToken: token }, select: { id: true } }))) return token;
+    const [table, outlet] = await Promise.all([
+      db.restaurantTable.findUnique({ where: { qrToken: token }, select: { id: true } }),
+      db.outlet.findUnique({ where: { guestQrToken: token }, select: { id: true } }),
+    ]);
+    if (!table && !outlet) return token;
   }
   throw new ConflictError("Could not issue a unique table QR token; try again");
 }
+
+/** The common QR token for an outlet: same source and uniqueness rules as a table's. */
+export const issueOutletQrToken = issueTableQrToken;

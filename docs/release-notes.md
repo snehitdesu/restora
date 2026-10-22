@@ -31,6 +31,58 @@ aggregators) are per-organization settings in Integrations; nothing is sent unti
 **Known limitations.** Only mocks and emulators have run for every external provider (`docs/stabilization-report.md` §8.4). Row-level security is not applied.
 The desktop apps are unsigned. 20 audit rows are not built (native apps, offline captain, e-invoice, own ordering website, optional modules).
 
+## DRAFT 1.0.0-rc.2 — changes since Production's build `a80caa9` (2026-10-10)
+
+**Not released, not tagged, version not bumped** (`package.json` still says
+`1.0.0-rc.1`). Written 2026-10-21 from `git log a80caa9..HEAD`; it ships only after
+the owner authorizes rc.2 (`docs/launch-readiness-2026-10-21.md` §7, release gate).
+Everything in the section above is also new relative to `a80caa9`.
+
+**Changed (guest-visible).** Table-QR orders are **online-payment only**: a guest
+cannot choose pay-at-the-counter, and an order reaches the kitchen only after its
+payment is verified. With no live online provider (SBI UPI is not built yet) guest QR
+ordering is refused with "please order with the staff". Production's current build
+`a80caa9` still accepts QR orders paid at the counter. Razorpay is retired for new
+checkouts (kept server-side only to settle and refund older Razorpay payments).
+
+**Added.** SBI UPI adapter **stub** (refuses every call until built from SBI's
+specification), a UPI bank emulator for tests, the authenticated pending-payment
+recovery tick `/api/cron/payments`, a late-payment hold (payments verified more than
+`GUEST_FULFILMENT_WINDOW_MINUTES` after ordering are held for staff; default 10 —
+**pending owner approval**). Cloud Sync for linked desktops and table-QR scanning;
+verified-email password recovery, owner recovery codes and a second trusted owner;
+draft recipes flagged *estimated* (cannot be approved until confirmed).
+
+**Added (2026-10-21, later).** One **restaurant QR** for every table
+(`docs/common-qr-ordering.md`): guests order without choosing a table, staff
+assign it (POS → Open orders → QR tables), the kitchen shows "no table yet"
+until then. Table QR codes keep working. Migration `20261026100000_outlet_common_qr`.
+
+**Security.** Table QR tokens are 144-bit random; the seeds no longer store
+derivable tokens; `qr:audit` reports derivable tokens (exit 2) and an empty database
+(exit 3); production label generation refuses while derivable tokens remain.
+**Existing tokens are not changed by an upgrade** — Production's must be rotated
+(`docs/qr-token-rotation.md`).
+
+**Fixed.** Kitchen-board polls no longer stall SQLite writes; a guest order replay that
+races its original returns that order; a slow guest order is never reported as failed;
+partly refunded payments count when settling; line discounts need `order.discount`;
+the packaged desktop server no longer preloads every route at start-up; unavailable
+costs show as unavailable, never ₹0.00.
+
+**Upgrade notes.** Ten PostgreSQL migrations after `a80caa9`, all additive
+(`20261017100000_growth_crm` … `20261026100000_outlet_common_qr`): schema before code,
+`npm run db:pg:deploy`, following `docs/production-migration-preflight.md` (verify the
+pre-upgrade backup with `--expect-migration 20261016100000_integrations_control_room`).
+Environment: `PAYMENT_PROVIDER` (`sbi_upi` in Production; `mock` / `upi_emulator` are
+refused there), `CRON_SECRET` (also guards `/api/cron/payments`), optional
+`GUEST_FULFILMENT_WINDOW_MINUTES`, `SBI_UPI_ENVIRONMENT`; `.env.example` lists all.
+
+**Known limitations.** No online guest payment exists until SBI UPI is implemented and
+certified. Desktop installers unsigned (Windows) / ad-hoc signed, not notarized (macOS).
+Capacity measured only on a laptop lab. Recipe quantities are estimates; no ingredient
+prices.
+
 ---
 
 # RESTORA 1.0.0-rc.1 — release notes

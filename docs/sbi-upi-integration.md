@@ -237,6 +237,7 @@ needs its evidence before Production activation (§6, stage 7).
 | 13 | UAT and certification | UAT access, required test cases, security review / sign-off | Pass SBI's cases and §5 | §5 plus SBI's own cases | SBI's written UAT sign-off |
 | 14 | Support | Contacts, hours, escalation matrix | Record them in the owner's operating notes (not in this repository) | — | Contacts on record before the pilot |
 | 15 | Health | Health endpoint or availability guidance, if any | `healthCheck` reflecting real SBI availability | Contract test; UAT with SBI unreachable | Unreachable SBI shows "online payment unavailable" in UAT |
+| 16 | Callback freshness (added 2026-10-22) | Whether callbacks carry a signed timestamp / nonce, and the allowed clock skew | If SBI signs a timestamp: refuse callbacks outside SBI's window **before** acting (in addition to the signature check and idempotent apply); never trust an unsigned timestamp. If SBI signs none: rely on the signature + status re-query (row 6), and record that SBI offers no freshness field | Contract tests: stale, future-dated, replayed-within-window; UAT 16 | SBI's written statement of the field and window; UAT 16 record |
 
 ## 4. Configuration names (no values in source control)
 
@@ -278,6 +279,9 @@ rather than skipping silently.
     kitchen automatically.
 15. SBI unreachable → health check false, guest sees "online payment
     unavailable", staff ordering continues.
+16. A correctly signed callback replayed after SBI's freshness window (if SBI
+    signs a timestamp) → refused before any state change; within the window →
+    applied once (scenario 11).
 
 ## 6. Implementation and Production activation plan (dependency order)
 

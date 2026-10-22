@@ -17,6 +17,7 @@
     "db:reset": "prisma migrate reset --force",
     "db:seed": "tsx prisma/seed.ts",
     "db:seed:cafe": "tsx prisma/seed-coders-cafe.ts",
+    "db:seed:demo-cafe": "tsx prisma/seed-demo-cafe.ts",
     "qr:tables": "tsx --env-file=.env scripts/qr/generate-table-qrs.ts",
     "qr:audit": "tsx --env-file=.env scripts/qr/audit-table-tokens.ts",
     "db:studio": "prisma studio",

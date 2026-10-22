@@ -17,7 +17,7 @@ Open blockers, all outside the codebase (order and owners:
   (`docs/sbi-upi-integration.md`). The local UPI emulator and `mock` provider are
   for a disposable local demo only and are refused in Production.
 - **Production database:** no Production `DATABASE_URL` on record; backup not
-  proven; this branch carries nine migrations newer than `a80caa9`'s schema,
+  proven; this branch carries ten migrations newer than `a80caa9`'s schema,
   none applied to Production by this work (`docs/payment-safety.md` §7).
 - **Production table QR tokens** are the legacy, derivable ones: audit and an
   owner-approved rotation, then new printed cards, before guests use them

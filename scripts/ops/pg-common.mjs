@@ -140,6 +140,34 @@ export function expectedMigration(root = process.cwd()) {
   return fs.readdirSync(dir).filter((d) => /^\d{14}_/.test(d)).sort().at(-1) ?? null;
 }
 
+/**
+ * The migration a verified database must contain: `--expect-migration <name>`
+ * when given (e.g. the newest migration of the release Production still runs,
+ * for its pre-upgrade backup or a rollback restore), else this checkout's
+ * newest. The override must be a migration directory of this checkout, so a
+ * typo cannot weaken the check.
+ */
+export function resolveExpectedMigration(override, root = process.cwd()) {
+  if (override === undefined || override === null) return expectedMigration(root);
+  if (typeof override !== "string" || !override.trim()) throw new Error("--expect-migration needs a migration name (a directory of prisma/postgres/migrations)");
+  const name = override.trim();
+  const dir = path.join(root, "prisma", "postgres", "migrations");
+  const known = fs.existsSync(dir) ? fs.readdirSync(dir).filter((d) => /^\d{14}_/.test(d)) : [];
+  if (!known.includes(name)) throw new Error(`--expect-migration ${name} is not a migration of this checkout (prisma/postgres/migrations)`);
+  return name;
+}
+
+/**
+ * False when a backup whose newest applied migration is `latest` cannot
+ * contain `expected` (migration names start with a 14-digit timestamp, so they
+ * sort in order). Lets restore / verify-restore refuse before touching any
+ * database. Unknown on either side → true: the full check still decides.
+ */
+export function backupMeetsExpected(latest, expected) {
+  if (!latest || !expected) return true;
+  return latest >= expected;
+}
+
 /** Best-effort alert (same JSON shape as the app's alerts). */
 export async function sendAlert(key, message, fields = {}) {
   console.error(JSON.stringify({ ts: new Date().toISOString(), level: "error", msg: message, alert: key, ...fields }));

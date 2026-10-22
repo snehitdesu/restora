@@ -120,7 +120,10 @@ Procedure, RPO / RTO and emergency mode: `docs/production-infrastructure.md` §8
 In short: stop writes → choose the recovery point → restore into a **new**
 database (`pg-restore.mjs` / PITR) → `db-verify.mjs` → `pg-roles.sql` → point
 `DATABASE_URL` → readiness → smoke → reconcile the gap (gateway settlements,
-paper bills).
+paper bills). Restoring a backup taken on an older release (the pre-upgrade
+backup in a rollback): pass `--expect-migration <that release's newest
+migration>` to `pg-restore.mjs` / `db-verify.mjs`, otherwise they require this
+checkout's newest migration and report the backup as failed.
 
 ## 5. Monitoring
 | Signal | Source | Act when |
