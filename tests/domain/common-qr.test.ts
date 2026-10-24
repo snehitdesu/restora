@@ -5,6 +5,7 @@
  * unassigned; table QR codes keep working alongside it.
  */
 import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import { PrismaClient } from "@prisma/client";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
 import { type AccessContext, ConflictError, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
@@ -356,19 +357,25 @@ describe("abuse guards on a code every table shares", () => {
     const t = (await rotateOutletCommonQr(sys, o.id)).qrToken!;
     await prisma.order.createMany({ data: Array.from({ length: MAX_WAITING_COMMON_QR_ORDERS - 2 }, () => ({ organizationId: orgId, outletId: o.id, source: "QR", channel: "QR", status: "OPEN" })) });
     const ledgerBefore = await prisma.inventoryLedger.count({ where: { outletId: o.id } });
+    // The lock holder and the barrier query run on their own client: the four blocked submissions each hold
+    // a transaction connection, and on a small runner (2 vCPUs → Prisma's default pool of 5) the holder plus
+    // the barrier query would otherwise be the 5th and 6th connection of the app's pool (P2024 after 10 s).
+    const monitor = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL! } } });
     let release!: () => void;
     const released = new Promise<void>((r) => (release = r));
     let held!: () => void;
     const lockHeld = new Promise<void>((r) => (held = r));
-    const holder = prisma.$transaction(async (tx) => {
+    const holder = monitor.$transaction(async (tx) => {
       await lockCommonQrCap(tx, o.id);
       held();
       await released;
     }, { timeout: 60_000 });
     await lockHeld;
     const submissions = Array.from({ length: 4 }, () => placeGuestOrder(t, { items: [{ menuItemId: dosa, qty: 1 }], paymentMethod: "ONLINE" }, key(), { ip: ip() }));
+    // Settle them from the start, so a failed barrier reports itself, not the refusals as unhandled rejections.
+    const settled = Promise.allSettled(submissions);
     // Barrier: all four are waiting on the cap lock, i.e. each has its order inserted and is about to count.
-    const waiting = () => prisma.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`.then((r) => r[0].n);
+    const waiting = () => monitor.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`.then((r) => r[0].n);
     try {
       const deadline = Date.now() + 10_000;
       while ((await waiting()) < 4 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
@@ -376,8 +383,9 @@ describe("abuse guards on a code every table shares", () => {
     } finally {
       release();
       await holder;
+      await monitor.$disconnect();
     }
-    const results = await Promise.allSettled(submissions);
+    const results = await settled;
     const placed = results.filter((r): r is PromiseFulfilledResult<Awaited<(typeof submissions)[number]>> => r.status === "fulfilled");
     expect(placed).toHaveLength(2);
     for (const r of results) if (r.status === "rejected") expect(String((r.reason as Error).message)).toMatch(/Many orders are waiting/);
