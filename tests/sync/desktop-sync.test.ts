@@ -20,6 +20,8 @@ import { connectCloud, disconnectCloud, syncStatus } from "@/server/sync/link";
 import { createPairing } from "@/server/sync/device";
 import { dismissOperation, listOperations, retryNow, runSyncCycle } from "@/server/sync/runner";
 import { mirrorId } from "@/lib/sync/ids";
+import { parseTableQr } from "@/lib/qr/tableQrUrl";
+import { hostedGuestOrigin, type DesktopGuestQr } from "@/server/sync/guestQr";
 import * as Guest from "@/app/api/qr/[[...path]]/route";
 import * as Orders from "@/app/api/orders/[[...path]]/route";
 import * as Kitchen from "@/app/api/kitchen/[[...path]]/route";
@@ -632,5 +634,102 @@ suite("scope, privacy and the control API (scenarios 10, 20)", () => {
     expect(await ddb.syncOperation.count({ where: { organizationId: desk.orgId, status: "PENDING" } })).toBe(0);
     expect((await cycle()).state).toBe("UNLINKED");
     expect(await prisma.session.count({ where: { userId: syncUser.id, revokedAt: null } })).toBeGreaterThanOrEqual(0);
+  });
+});
+
+suite("table QR codes on a linked desktop", () => {
+  const qrFor = async (session = deskCashier.session) => {
+    const res = await call(CloudApi, "GET", `qr?outletId=${desk.outletId}`, { session });
+    expect(res.status).toBe(200);
+    return res.json.data as DesktopGuestQr;
+  };
+
+  it("unlinked: the Tables screen keeps this computer's own code (local development)", async () => {
+    expect((await status()).state).toBe("UNLINKED");
+    expect(await qrFor()).toEqual({ mode: "LOCAL" });
+  });
+
+  it("linked: the code is the cloud's https address with the cloud table's token, never localhost or the local token", async () => {
+    await connectCloud(await ownerCtx(deskOwner), { baseUrl: CLOUD_ORIGIN, email: syncUser.email, password: PASSWORD, installId: "desk-install-qrqrqrqr" }, prisma, fc.transport);
+    const localToken = (await rotateTableQr(desk.ctx, desk.tableId)).qrToken!;
+    const qr = await qrFor();
+    expect(qr.mode).toBe("CLOUD");
+    if (qr.mode !== "CLOUD") return;
+    expect(qr.origin).toBe(CLOUD_ORIGIN);
+    const url = qr.tables[desk.tableCode];
+    expect(url).toBe(`${CLOUD_ORIGIN}/t/${cloud.qrToken}`);
+    expect(url).toMatch(/^https:\/\//);
+    expect(JSON.stringify(qr)).not.toMatch(/localhost|127\.0\.0\.1/);
+    expect(JSON.stringify(qr)).not.toContain(localToken);
+    // What a phone scanning it gets: this deployment's table link, and the cloud's guest menu for that table.
+    const scanned = parseTableQr(url, { trustedOrigins: [CLOUD_ORIGIN] });
+    expect(scanned).toMatchObject({ ok: true, token: cloud.qrToken });
+    expect((await call(Guest, "GET", `t/${cloud.qrToken}`)).status).toBe(200);
+    // The desktop's own token is a different one (unknown to a real cloud, whose database is separate).
+    expect(localToken).not.toBe(cloud.qrToken);
+  });
+
+  it("uses the cloud's PUBLIC_BASE_URL when it is https, and ignores one that is not", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://order.cafe.test");
+    try {
+      expect(await qrFor()).toMatchObject({ mode: "CLOUD", origin: "https://order.cafe.test", tables: { [desk.tableCode]: `https://order.cafe.test/t/${cloud.qrToken}` } });
+      vi.stubEnv("PUBLIC_BASE_URL", "http://order.cafe.test");
+      expect(await qrFor()).toMatchObject({ mode: "CLOUD", origin: CLOUD_ORIGIN });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.stubEnv("AHAROS_DESKTOP", "1");
+    }
+    expect(hostedGuestOrigin(null, "http://localhost:3000")).toBe("http://localhost:3000");
+    expect(() => hostedGuestOrigin(null, "http://cafe.example")).toThrow(/https/);
+  });
+
+  it("offline or signed out: no code at all rather than a local one, and no token in the answer", async () => {
+    fc.offline = true;
+    const off = await qrFor();
+    fc.offline = false;
+    expect(off).toMatchObject({ mode: "CLOUD_UNAVAILABLE", origin: CLOUD_ORIGIN, message: expect.stringMatching(/could not be reached/) });
+    expect(JSON.stringify(off)).not.toContain(cloud.qrToken!);
+    expect((await call(CloudApi, "GET", `qr?outletId=${desk.outletId}`, {})).status).toBe(401);
+    vi.stubEnv("AHAROS_DESKTOP", "0");
+    expect((await call(CloudApi, "GET", `qr?outletId=${desk.outletId}`, { session: deskCashier.session })).status).toBe(404);
+    vi.stubEnv("AHAROS_DESKTOP", "1");
+  });
+
+  it("an order placed from the scanned code reaches the desktop once, waits for payment, then goes to the kitchen and back", async () => {
+    const qr = await qrFor();
+    if (qr.mode !== "CLOUD") throw new Error("expected the hosted QR");
+    const scanned = parseTableQr(qr.tables[desk.tableCode], { trustedOrigins: [qr.origin] });
+    if (!scanned.ok) throw new Error(scanned.message);
+    const items = [{ menuItemId: cloud.coffee, qty: 1 }];
+    expect((await call(Guest, "POST", `t/${scanned.token}/quote`, { body: { items } })).status).toBe(200);
+    const key = `guest-${RUN}-scan-qr-key`;
+    const a = await call(Guest, "POST", `t/${scanned.token}/orders`, { headers: { "idempotency-key": key }, body: { items } });
+    const b = await call(Guest, "POST", `t/${scanned.token}/orders`, { headers: { "idempotency-key": key }, body: { items } });
+    expect(a.status).toBe(200);
+    expect(b.json.data.orderId).toBe(a.json.data.orderId);
+    const placed = a.json.data as { orderId: string; accessKey: string };
+    await cycle();
+    await cycle();
+    const mirrored = await localOrder(placed.orderId);
+    expect(mirrored).toMatchObject({ status: "OPEN", tableId: desk.tableId, kots: [], payments: [] });
+    expect(await prisma.order.count({ where: { id: localOf(placed.orderId) } })).toBe(1);
+    // Payment gate: not accepted into the kitchen before the guest's online payment is verified.
+    expect((await submit(placed.orderId)).json.data.sync).toMatchObject({ outcome: "CONFLICT" });
+    expect((await cloudOrder(placed.orderId)).kots).toHaveLength(0);
+    const [op] = await listOperations(prisma, desk.orgId, { attention: true });
+    await dismissOperation(prisma, desk.orgId, op.id);
+    const pay = await startGuestPayment(placed.orderId, placed.accessKey, `gp-${RUN}-scan-qr-key`);
+    await confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: pay.paymentId });
+    await cycle();
+    const paid = await localOrder(placed.orderId);
+    expect(paid.status).toBe("PAID");
+    expect(paid.kots).toHaveLength(1);
+    // Stock is consumed once, by the cloud at settlement; the mirror never consumes it again.
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId } })).stockConsumed).toBe(true);
+    expect(paid.stockConsumed).toBe(true);
+    expect(await prisma.inventoryLedger.count({ where: { organizationId: desk.orgId, txnType: "SALE_CONSUMPTION" } })).toBe(0);
+    const cloudKot = (await cloudOrder(placed.orderId)).kots[0];
+    expect((await call(Kitchen, "POST", `kots/${paid.kots[0].id}/status`, { session: deskKitchen.session, body: { status: "ACCEPTED" } })).json.data.sync.state).toBe("CONFIRMED");
+    expect((await prisma.kot.findUniqueOrThrow({ where: { id: cloudKot.id } })).status).toBe("ACCEPTED");
   });
 });

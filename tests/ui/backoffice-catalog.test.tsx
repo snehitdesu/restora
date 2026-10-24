@@ -871,6 +871,77 @@ describe("floors & tables", () => {
     expect(qrSvgPath("https://cafe.example/t/other").d).not.toBe(a.d);
   });
 
+  it("on a desktop linked to the cloud the QR is the hosted restaurant's https link with the cloud table token, never localhost", async () => {
+    const hosted = { mode: "CLOUD", origin: "https://cafe.example", tables: { T1: "https://cafe.example/t/cloud_tok_1" }, commonUrl: "https://cafe.example/t/cloud_common" };
+    state.routes = {
+      "GET /api/master/tables": () => tables, "GET /api/master/floors": () => floors,
+      "GET /api/master/outlets/out-a/common-qr": () => ({ outletId: OUT_A, qrToken: "local_common", guestUrl: null }),
+      "GET /api/cloud/qr": () => hosted,
+    };
+    renderAs(<TablesScreen />, ["outlet.manage", "master.view"], { desktop: true });
+    const card = await screen.findByRole("region", { name: "Restaurant QR" });
+    expect(await within(card).findByLabelText("Restaurant guest ordering link")).toHaveTextContent("https://cafe.example/t/cloud_common");
+    expect(within(card).queryByRole("button", { name: "Rotate" })).not.toBeInTheDocument();
+    expect(gets("/api/cloud/qr")[0].query.get("outletId")).toBe(OUT_A);
+
+    const table = await screen.findByRole("table", { name: "Tables" });
+    await userEvent.click(within(table).getByRole("button", { name: "QR for T1" }));
+    const qr = await screen.findByRole("dialog", { name: "QR — table T1" });
+    const link = await within(qr).findByLabelText("Guest ordering link");
+    expect(link).toHaveTextContent("https://cafe.example/t/cloud_tok_1");
+    expect(link).not.toHaveTextContent(/localhost|\/t\/tok_1$/);
+    expect(within(qr).getByRole("img", { name: "QR code for table T1" })).toBeInTheDocument();
+    expect(within(qr).queryByText(/phones cannot open it/)).not.toBeInTheDocument();
+    // The local token is not the hosted one: rotating or disabling it here would not change the printed code.
+    expect(within(qr).queryByRole("button", { name: "Rotate token" })).not.toBeInTheDocument();
+    expect(within(qr).getByText(/rotate or disable it on the hosted POS/)).toBeInTheDocument();
+  });
+
+  it("a linked desktop shows no code (not a localhost one) when the cloud has none or cannot be reached", async () => {
+    const { hostedGuestLink } = await import("@/features/backoffice/tables");
+    const cloud = { mode: "CLOUD" as const, origin: "https://cafe.example", tables: { T1: "https://cafe.example/t/cloud_tok_1" }, commonUrl: null };
+    expect(hostedGuestLink(undefined, "T1")).toBeNull();
+    expect(hostedGuestLink({ mode: "LOCAL" }, "T1")).toBeNull();
+    expect(hostedGuestLink(cloud, "T1")).toEqual({ url: "https://cafe.example/t/cloud_tok_1", message: null });
+    expect(hostedGuestLink(cloud, "T2")).toEqual({ url: null, message: expect.stringMatching(/Table T2 has no QR code at the hosted restaurant \(https:\/\/cafe\.example\)/) });
+    expect(hostedGuestLink(cloud, null)?.url).toBeNull();
+
+    state.routes = {
+      "GET /api/master/tables": () => tables, "GET /api/master/floors": () => floors,
+      "GET /api/master/outlets/out-a/common-qr": () => ({ outletId: OUT_A, qrToken: "local_common", guestUrl: null }),
+      "GET /api/cloud/qr": () => ({ mode: "CLOUD_UNAVAILABLE", origin: "https://cafe.example", message: "The cloud could not be reached, so the QR codes cannot be shown." }),
+    };
+    renderAs(<TablesScreen />, ["outlet.manage", "master.view"], { desktop: true });
+    const table = await screen.findByRole("table", { name: "Tables" });
+    await userEvent.click(within(table).getByRole("button", { name: "QR for T1" }));
+    const qr = await screen.findByRole("dialog", { name: "QR — table T1" });
+    expect(await within(qr).findByText(/could not be reached/)).toBeInTheDocument();
+    expect(within(qr).queryByRole("img", { name: "QR code for table T1" })).not.toBeInTheDocument();
+    expect(within(qr).queryByLabelText("Guest ordering link")).not.toBeInTheDocument();
+  });
+
+  it("an unlinked desktop keeps the local code on purpose (local development), with the phone warning", async () => {
+    state.routes = {
+      "GET /api/master/tables": () => tables, "GET /api/master/floors": () => floors,
+      "GET /api/master/outlets/out-a/common-qr": () => ({ outletId: OUT_A, qrToken: null, guestUrl: null }),
+      "GET /api/cloud/qr": () => ({ mode: "LOCAL" }),
+    };
+    renderAs(<TablesScreen />, ["outlet.manage", "master.view"], { desktop: true });
+    const table = await screen.findByRole("table", { name: "Tables" });
+    await userEvent.click(within(table).getByRole("button", { name: "QR for T1" }));
+    const qr = await screen.findByRole("dialog", { name: "QR — table T1" });
+    expect(await within(qr).findByLabelText("Guest ordering link")).toHaveTextContent(/^http:\/\/localhost(:\d+)?\/t\/tok_1$/);
+    expect(within(qr).getByRole("note")).toHaveTextContent(/phones cannot open it.*PUBLIC_BASE_URL/);
+    expect(within(qr).getByRole("button", { name: "Rotate token" })).toBeInTheDocument();
+  });
+
+  it("the hosted POS never asks the desktop-only cloud endpoint", async () => {
+    state.routes = { "GET /api/master/tables": () => tables, "GET /api/master/floors": () => floors, "GET /api/master/outlets/out-a/common-qr": () => ({ outletId: OUT_A, qrToken: null, guestUrl: null }) };
+    renderAs(<TablesScreen />, ["outlet.manage", "master.view"]);
+    await screen.findByRole("table", { name: "Tables" });
+    expect(gets("/api/cloud/qr")).toHaveLength(0);
+  });
+
   it("empty and error states", async () => {
     state.routes = { "GET /api/master/tables": () => fail(403, "ForbiddenError", "Missing permission to view tables") };
     renderAs(<TablesScreen />, ["order.view"]);

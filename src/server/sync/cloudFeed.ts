@@ -16,14 +16,15 @@ import { createHash } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { canTransition, KOT_TRANSITIONS, type KOTStatus } from "@/constants/enums";
 import { assertCan, can } from "@/server/auth/rbac";
-import { type AccessContext, assertOutletAccess, NotFoundError, ValidationError } from "@/server/db/scope";
+import { type AccessContext, assertOutletAccess, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
 import { prisma } from "@/server/db/client";
 import { orderRef } from "@/server/services/bill";
 import { submitOrder } from "@/server/services/orders";
 import { updateKOTStatus } from "@/server/services/kot";
 import { runAfterCommit } from "@/server/services/afterCommit";
 import { ONLINE_PAYMENT_REQUIRED } from "@/server/services/kitchenGate";
-import { SYNC_SOURCES, type SyncOpInput, type SyncOpResult, type SyncOutcome, type WireFeed, type WireOrder, type WireOutlet } from "@/lib/sync/wire";
+import { guestBaseUrl } from "@/server/services/masterData";
+import { SYNC_SOURCES, type SyncOpInput, type SyncOpResult, type SyncOutcome, type WireFeed, type WireGuestQr, type WireOrder, type WireOutlet } from "@/lib/sync/wire";
 
 const FINISHED = ["PAID", "CANCELLED", "REFUNDED"] as const;
 const FEED_MAX_TAKE = 100;
@@ -106,6 +107,29 @@ export function toWireOrder(o: OrderRow): WireOrder {
 export async function listSyncOutlets(db: PrismaClient, ctx: AccessContext): Promise<WireOutlet[]> {
   const outlets = await db.outlet.findMany({ where: { organizationId: ctx.organizationId, active: true, id: { in: ctx.outletIds } }, select: { id: true, code: true, name: true }, orderBy: { code: "asc" } });
   return outlets.filter((o) => can(ctx, "order.view", o.id));
+}
+
+// ---------------- guest QR ----------------
+
+/**
+ * The paired outlet's guest QR tokens, so a linked desktop prints codes that open this deployment's guest menu
+ * (its tables' tokens differ from the cloud's). Same visibility as the hosted Tables screen (listTables); the
+ * common QR only for outlet managers, as on the hosted POS.
+ */
+export async function listSyncGuestQr(db: PrismaClient, ctx: AccessContext, outletId: string): Promise<WireGuestQr> {
+  assertOutletAccess(ctx, outletId);
+  if (!can(ctx, "order.view", outletId) && !can(ctx, "reservation.manage", outletId) && !can(ctx, "outlet.manage", outletId)) throw new ForbiddenError("Missing permission to view tables");
+  const [outlet, tables] = await Promise.all([
+    db.outlet.findFirst({ where: { id: outletId, organizationId: ctx.organizationId }, select: { guestQrToken: true } }),
+    db.restaurantTable.findMany({ where: { organizationId: ctx.organizationId, outletId, qrToken: { not: null } }, orderBy: { code: "asc" }, take: 500, select: { code: true, qrToken: true } }),
+  ]);
+  if (!outlet) throw new NotFoundError("Outlet not found");
+  return {
+    outletId,
+    guestBaseUrl: guestBaseUrl(),
+    tables: tables.map((t) => ({ code: t.code, qrToken: t.qrToken! })),
+    commonQrToken: can(ctx, "outlet.manage", outletId) ? outlet.guestQrToken : null,
+  };
 }
 
 // ---------------- feed ----------------

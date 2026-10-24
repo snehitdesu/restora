@@ -8,7 +8,7 @@ vi.mock("next/headers", async () => (await import("./harness")).nextHeadersMock(
 import { NextRequest } from "next/server";
 import { prisma } from "@/server/db/client";
 import { middleware } from "@/middleware";
-import { rotateTableQr } from "@/server/services/masterData";
+import { rotateOutletCommonQr, rotateTableQr } from "@/server/services/masterData";
 import { cancelOrder, placeOrder } from "@/server/services/orders";
 import { getGuestOrder, startGuestPayment, confirmGuestPayment } from "@/server/services/guestOrdering";
 import { guestTracker } from "@/domain/orderProgress";
@@ -19,7 +19,7 @@ import * as Kitchen from "@/app/api/kitchen/[[...path]]/route";
 import * as Payments from "@/app/api/payments/[[...path]]/route";
 import { call, sessionFor } from "../api/routeSupport";
 import { makeStaff, makeWorld, PASSWORD, type World, RUN } from "./harness";
-import type { SyncOpResult, WireFeed, WireOrder } from "@/lib/sync/wire";
+import type { SyncOpResult, WireFeed, WireGuestQr, WireOrder } from "@/lib/sync/wire";
 
 let w: World, other: World;
 let cashier: string, kitchen: string, accountant: string, customerRole: string, foreignOwner: string, otherOutletCashier: string, manager: string;
@@ -382,5 +382,48 @@ describe("device pairing and credentials (scenario 8)", () => {
     const body = JSON.stringify(listed.json);
     expect(body).not.toContain(token);
     expect(body).not.toMatch(/tokenHash|passwordHash/);
+  });
+});
+
+describe("guest QR codes for a linked desktop (/api/sync/qr)", () => {
+  it("gives the paired device this outlet's table tokens by code and the configured public address; they open the guest menu", async () => {
+    const common = (await rotateOutletCommonQr(w.ctx, w.outletId)).qrToken!;
+    const staff = await makeStaff(w, "MANAGER");
+    const token = ((await call(Sync, "POST", "enroll", { body: { email: staff.email, password: PASSWORD } })).json.data as { token: string }).token;
+    const auth = { authorization: `Bearer ${token}` };
+    vi.stubEnv("PUBLIC_BASE_URL", "https://order.cafe.test/");
+    try {
+      const res = await call(Sync, "GET", `qr?outletId=${w.outletId}`, { headers: auth });
+      expect(res.status).toBe(200);
+      const qr = res.json.data as WireGuestQr;
+      expect(qr.guestBaseUrl).toBe("https://order.cafe.test");
+      expect(qr.tables).toContainEqual({ code: w.tableCode, qrToken: w.qrToken });
+      expect(qr.commonQrToken).toBe(common);
+      // Only tables with a live code; each one is this deployment's guest menu.
+      expect(qr.tables.every((t) => typeof t.qrToken === "string")).toBe(true);
+      expect((await call(Guest, "GET", `t/${w.qrToken}`)).status).toBe(200);
+      expect((await call(Guest, "GET", `t/${common}`)).status).toBe(200);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    vi.stubEnv("PUBLIC_BASE_URL", "");
+    try {
+      expect(((await call(Sync, "GET", `qr?outletId=${w.outletId}`, { headers: auth })).json.data as WireGuestQr).guestBaseUrl).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("is scoped like the hosted Tables screen: no other outlet or organization, the common QR for managers only", async () => {
+    const staff = await makeStaff(w, "MANAGER");
+    const token = ((await call(Sync, "POST", "enroll", { body: { email: staff.email, password: PASSWORD } })).json.data as { token: string }).token;
+    expect((await call(Sync, "GET", `qr?outletId=${other.outletId}`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(404);
+    expect((await call(Sync, "GET", `qr?outletId=${w.outletId}`)).status).toBe(401);
+    expect((await call(Sync, "GET", `qr?outletId=${w.outletId}`, { session: foreignOwner })).status).toBe(404);
+    expect((await call(Sync, "GET", `qr?outletId=${w.outletId}`, { session: otherOutletCashier })).status).toBe(403);
+    expect((await call(Sync, "GET", `qr?outletId=${w.outletId}`, { session: customerRole })).status).toBe(403);
+    const asCashier = (await call(Sync, "GET", `qr?outletId=${w.outletId}`, { session: cashier })).json.data as WireGuestQr;
+    expect(asCashier.tables).toContainEqual({ code: w.tableCode, qrToken: w.qrToken });
+    expect(asCashier.commonQrToken).toBeNull();
   });
 });

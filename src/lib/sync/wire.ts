@@ -70,6 +70,8 @@ export type WireOrder = {
 
 export type WireFeed = { orders: WireOrder[]; nextCursor: string | null; hasMore: boolean; serverTime: string };
 export type WireOutlet = { id: string; code: string; name: string };
+/** The paired outlet's guest QR tokens by table code, and the cloud's public address (its PUBLIC_BASE_URL, if set). */
+export type WireGuestQr = { outletId: string; guestBaseUrl: string | null; tables: Array<{ code: string; qrToken: string }>; commonQrToken: string | null };
 
 const opId = z.string().min(8).max(100).regex(/^[\w.:-]+$/);
 /** Who on the desktop took the action: kept on the cloud receipt for traceability, never used for authorization. */

@@ -28,6 +28,7 @@ import { PageHeader, Stat, StatusBadge } from "@/components/ui/Page";
 import { FilterBar, SelectFilter, rangeToQuery } from "@/components/ui/Filters";
 import { ActionButton } from "@/components/ui/Confirm";
 import { QrCode, qrSvgDocument } from "@/components/ui/QrCode";
+import type { DesktopGuestQr } from "@/server/sync/guestQr";
 
 export type FloorRow = { id: string; outletId: string; name: string; sortOrder: number; tableCount: number };
 export type TableRow = { id: string; outletId: string; floorId: string | null; code: string; capacity: number; status: string; qrToken: string | null; floor: { name: string } | null; guestUrl?: string | null };
@@ -104,6 +105,33 @@ export function tableGuestLink(table: Pick<TableRow, "qrToken" | "guestUrl">, or
   return { url: `${origin}/t/${encodeURIComponent(table.qrToken)}`, publicAddress: false };
 }
 
+/**
+ * On a desktop linked to the cloud, guests order on the hosted restaurant: its code (cloud address + cloud token,
+ * by table code) replaces this computer's. null = not linked, the local code applies. `tableCode` null = the
+ * restaurant (common) QR.
+ */
+export function hostedGuestLink(hosted: DesktopGuestQr | undefined, tableCode: string | null): { url: string | null; message: string | null } | null {
+  if (!hosted || hosted.mode === "LOCAL") return null;
+  if (hosted.mode === "CLOUD_UNAVAILABLE") return { url: null, message: hosted.message };
+  const url = tableCode === null ? hosted.commonUrl : (hosted.tables[tableCode] ?? null);
+  if (url) return { url, message: null };
+  return {
+    url: null,
+    message: tableCode === null
+      ? `The hosted restaurant (${hosted.origin}) has no restaurant QR issued, or this cloud account cannot see it.`
+      : `Table ${tableCode} has no QR code at the hosted restaurant (${hosted.origin}). Issue one there for the table with the same code.`,
+  };
+}
+
+/** Desktop only: the hosted restaurant's codes for this outlet (LOCAL when not linked). */
+function useHostedQr(outletId: string) {
+  const { desktop } = useShell();
+  const q = useQuery<DesktopGuestQr>(desktop ? `/api/cloud/qr?outletId=${encodeURIComponent(outletId)}` : null);
+  return { data: q.data, waiting: desktop && q.loading };
+}
+
+const HOSTED_NOTE = "Guests order on the hosted restaurant, so this code is the hosted one: rotate or disable it on the hosted POS (Floors & tables), then reopen this screen.";
+
 function downloadQr(svg: string, filename: string) {
   const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
   const a = document.createElement("a");
@@ -115,11 +143,13 @@ function downloadQr(svg: string, filename: string) {
 
 function QrDialog({ table, onClose, onDone }: { table: TableRow; onClose: () => void; onDone: () => void }) {
   const { outlet } = useShell();
-  const link = tableGuestLink(table, typeof window === "undefined" ? "" : window.location.origin);
+  const hostedQr = useHostedQr(table.outletId);
+  const hosted = hostedGuestLink(hostedQr.data, table.code);
+  const link = hosted ? (hosted.url ? { url: hosted.url, publicAddress: true } : null) : hostedQr.waiting ? null : tableGuestLink(table, typeof window === "undefined" ? "" : window.location.origin);
   const local = link && !link.publicAddress && /\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(link.url);
   return (
     <Dialog open onClose={onClose} title={`QR — table ${table.code}`} footer={<Button onClick={onClose}>Close</Button>}>
-      {link ? (
+      {hostedQr.waiting ? <p className="text-sm text-ink-700">Loading the hosted restaurant&apos;s QR code…</p> : link ? (
         <>
           <div className="flex flex-col items-center gap-2">
             <QrCode value={link.url} label={`QR code for table ${table.code}`} className="h-56 w-56 rounded-md border border-ink-200 bg-white p-1" />
@@ -136,8 +166,9 @@ function QrDialog({ table, onClose, onDone }: { table: TableRow; onClose: () => 
             <Button onClick={() => downloadQr(qrSvgDocument(link.url, `${outlet?.name ?? ""} · Table ${table.code}`.replace(/^ · /, "")), `table-${table.code}-qr.svg`)}>Download QR (SVG)</Button>
           </div>
         </>
-      ) : <p className="text-sm text-ink-700">No QR code is issued for this table: guests cannot order from it by QR.</p>}
-      <div className="mt-4 flex flex-wrap gap-2">
+      ) : hosted ? <p role="note" className="rounded-md border border-warn-100 bg-warn-50 px-3 py-2 text-sm text-warn-700">{hosted.message}</p>
+        : <p className="text-sm text-ink-700">No QR code is issued for this table: guests cannot order from it by QR.</p>}
+      {hosted ? <p className="mt-3 text-xs text-ink-600">{HOSTED_NOTE}</p> : !hostedQr.waiting && <div className="mt-4 flex flex-wrap gap-2">
         <ActionButton variant={table.qrToken ? "danger" : "primary"} action={() => api(`/api/master/tables/${table.id}/qr`, { method: "POST" })} success={table.qrToken ? "QR token rotated" : "QR token issued"} onDone={onDone}
           confirm={table.qrToken ? { title: `Rotate the QR for ${table.code}?`, message: "The printed QR stops working immediately; reprint it with the new token.", danger: true, confirmLabel: "Rotate" } : undefined}>
           {table.qrToken ? "Rotate token" : "Issue token"}
@@ -148,7 +179,7 @@ function QrDialog({ table, onClose, onDone }: { table: TableRow; onClose: () => 
             Disable QR ordering
           </ActionButton>
         )}
-      </div>
+      </div>}
     </Dialog>
   );
 }
@@ -164,7 +195,9 @@ function CommonQrCard({ outletId }: { outletId: string }) {
   const { outlet } = useShell();
   const q = useQuery<CommonQr>(`/api/master/outlets/${outletId}/common-qr`);
   const qr = q.data;
-  const link = qr ? tableGuestLink(qr, typeof window === "undefined" ? "" : window.location.origin) : null;
+  const hostedQr = useHostedQr(outletId);
+  const hosted = hostedGuestLink(hostedQr.data, null);
+  const link = hosted ? (hosted.url ? { url: hosted.url, publicAddress: true } : null) : qr && !hostedQr.waiting ? tableGuestLink(qr, typeof window === "undefined" ? "" : window.location.origin) : null;
   const name = outlet?.name ?? "Restaurant";
   return (
     <section aria-label="Restaurant QR" className="mb-4 rounded-xl border border-ink-200 bg-paper p-4 shadow-card">
@@ -176,8 +209,10 @@ function CommonQrCard({ outletId }: { outletId: string }) {
           <div className="min-w-0 flex-1 space-y-2">
             <a href={link.url} target="_blank" rel="noopener" className="block break-all text-sm font-medium text-brand-700 hover:underline" aria-label="Restaurant guest ordering link">{link.url}</a>
             {!link.publicAddress && <p role="note" className="rounded-md border border-ink-200 bg-ink-50 px-3 py-2 text-xs text-ink-700">This code points at the address this screen is open at. Open it at the restaurant&apos;s public web address (or set PUBLIC_BASE_URL) before printing.</p>}
+            {hosted && <p className="text-xs text-ink-600">{HOSTED_NOTE}</p>}
             <div className="flex flex-wrap gap-2">
               <Button onClick={() => downloadQr(qrSvgDocument(link.url, `${name} · scan to order`), "restaurant-qr.svg")}>Download QR (SVG)</Button>
+              {!hosted && <>
               <ActionButton variant="danger" action={() => api(`/api/master/outlets/${outletId}/common-qr`, { method: "POST" })} success="Restaurant QR rotated" onDone={q.reload}
                 confirm={{ title: "Rotate the restaurant QR?", message: "Every printed restaurant QR stops working immediately; reprint them all with the new code. Table QR codes are not affected.", danger: true, confirmLabel: "Rotate" }}>
                 Rotate
@@ -186,10 +221,13 @@ function CommonQrCard({ outletId }: { outletId: string }) {
                 confirm={{ title: "Disable the restaurant QR?", message: "Printed restaurant QR codes stop working immediately. Issuing it again creates a new code (the old prints never work again). Table QR codes are not affected.", danger: true, confirmLabel: "Disable" }}>
                 Disable
               </ActionButton>
+              </>}
             </div>
           </div>
         </div>
-      ) : qr ? (
+      ) : hosted ? (
+        <p role="note" className="mt-3 rounded-md border border-warn-100 bg-warn-50 px-3 py-2 text-xs text-warn-700">{hosted.message}</p>
+      ) : qr && !hostedQr.waiting ? (
         <div className="mt-3">
           <ActionButton variant="primary" action={() => api(`/api/master/outlets/${outletId}/common-qr`, { method: "POST" })} success="Restaurant QR issued" onDone={q.reload}>Issue restaurant QR</ActionButton>
         </div>

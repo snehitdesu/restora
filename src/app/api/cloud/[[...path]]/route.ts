@@ -6,6 +6,7 @@ import { assertCan } from "@/server/auth/rbac";
 import { NotFoundError } from "@/server/db/scope";
 import { connectCloud, disconnectCloud, syncStatus } from "@/server/sync/link";
 import { dismissOperation, listOperations, retryNow } from "@/server/sync/runner";
+import { desktopGuestQr } from "@/server/sync/guestQr";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,8 @@ function desktopOnly() {
 
 export const { GET, POST } = createRouter([
   { method: "GET", path: "status", handler: ({ ctx }) => { desktopOnly(); return syncStatus(prisma, ctx.organizationId); } },
+  // Table QR codes for the hosted guest menu (cloud address + cloud table tokens); LOCAL when not linked.
+  { method: "GET", path: "qr", handler: ({ ctx, query }) => { desktopOnly(); return desktopGuestQr(prisma, ctx, z.object({ outletId: z.string().min(1) }).parse(query).outletId); } },
   { method: "GET", path: "operations", handler: ({ ctx, query }) => { desktopOnly(); return listOperations(prisma, ctx.organizationId, { attention: query.attention === "1" }); } },
   { method: "POST", path: "connect", rateLimit: RATE_POLICIES.integrationAction, handler: ({ ctx, body }) => { desktopOnly(); return connectCloud(ctx, body as never, prisma); } },
   { method: "POST", path: "disconnect", rateLimit: RATE_POLICIES.integrationAction, handler: ({ ctx, body }) => { desktopOnly(); return disconnectCloud(ctx, prisma, { discardPending: z.object({ discardPending: z.boolean().optional() }).parse(body).discardPending }); } },
