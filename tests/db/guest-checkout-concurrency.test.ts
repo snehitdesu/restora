@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomBytes } from "node:crypto";
+import { PrismaClient } from "@prisma/client";
 import { prisma } from "@/server/db/client";
 import { placeGuestOrder, startGuestPayment, confirmGuestPayment, lockTableQrCaps, MAX_WAITING_GUEST_ORDERS, MAX_UNPAID_GUEST_ORDERS } from "@/server/services/guestOrdering";
 
@@ -292,11 +293,15 @@ describe("a table's limits hold when its QR submits several orders at once", () 
     it.runIf(pg)(`PostgreSQL: ${c.limit} limit — four submissions all past the early check, two short of it: exactly two placed, nothing left by the refused`, async () => {
       const t = await tableWith([c.prior]);
       const ledger = await prisma.inventoryLedger.count({ where: { outletId } });
+      // The lock holder and the barrier query run on their own client: the four blocked submissions each hold
+      // a transaction connection, and on a small runner (2 vCPUs → Prisma's default pool of 5) the holder plus
+      // the barrier query would otherwise be the 5th and 6th connection of the app's pool (P2024 after 10 s).
+      const monitor = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL! } } });
       let release!: () => void;
       const released = new Promise<void>((r) => (release = r));
       let held!: (pid: number) => void;
       const lockHeld = new Promise<number>((r) => (held = r));
-      const holder = prisma.$transaction(async (tx) => {
+      const holder = monitor.$transaction(async (tx) => {
         await lockTableQrCaps(tx, t.tableId);
         held((await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`)[0].pid);
         await released;
@@ -305,7 +310,7 @@ describe("a table's limits hold when its QR submits several orders at once", () 
       const submissions = Array.from({ length: 4 }, () => submit(t.token));
       // Barrier: all four have inserted their orders and are blocked behind the test's lock — the first on the
       // table's limit lock, the others behind it on the table row it marked occupied (createOrderTx).
-      const waiting = () => prisma.$queryRaw<{ n: number }[]>`
+      const waiting = () => monitor.$queryRaw<{ n: number }[]>`
         WITH RECURSIVE blocked(pid) AS (
           SELECT pid FROM pg_stat_activity WHERE ${holderPid}::int = ANY(pg_blocking_pids(pid))
           UNION SELECT s.pid FROM pg_stat_activity s JOIN blocked b ON b.pid = ANY(pg_blocking_pids(s.pid))
@@ -317,6 +322,7 @@ describe("a table's limits hold when its QR submits several orders at once", () 
       } finally {
         release();
         await holder;
+        await monitor.$disconnect();
       }
       const rs = await Promise.allSettled(submissions);
       expect(placedIds(rs)).toHaveLength(2);
