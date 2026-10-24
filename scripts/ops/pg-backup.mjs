@@ -4,7 +4,7 @@
 //
 //   BACKUP_DATABASE_URL=postgresql://restora_backup:...@db/restora \
 //   BACKUP_DIR=/var/backups/restora BACKUP_ENCRYPTION_KEY=<base64 32 bytes> \
-//   node scripts/ops/pg-backup.mjs [--verify-restore postgresql://.../restora_verify]
+//   node scripts/ops/pg-backup.mjs [--verify-restore postgresql://.../restora_verify] [--expect-migration <name>]
 //
 // Steps (a backup only counts as successful when ALL of them pass):
 //   1. pg_dump --format=custom into <name>.partial (never a final name until verified)
@@ -14,7 +14,9 @@
 //   4. encrypt (AES-256-GCM) when BACKUP_ENCRYPTION_KEY is set, then decrypt again
 //      and compare checksums (the key really opens the file)
 //   5. optional --verify-restore <scratch db url>: restore into a scratch database
-//      and run the integrity checks (scripts/ops/db-verify.mjs), comparing row counts
+//      and run the integrity checks (scripts/ops/db-verify.mjs), comparing row counts;
+//      --expect-migration names the migration to require when the source is on an
+//      older release than this checkout (e.g. the pre-upgrade Production backup)
 //   6. atomic rename to the final name, write manifest, apply retention
 //      (GFS: BACKUP_RETENTION_DAILY / _WEEKLY / _MONTHLY, defaults 14 / 8 / 12)
 //   7. update BACKUP_STATUS_FILE (default <BACKUP_DIR>/last-backup.json), which the
@@ -26,12 +28,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { dbName, decryptFile, encryptFile, encryptionKey, expectedMigration, parseArgs, psql, redactUrl, run, sendAlert, sha256File, toolVersion } from "./pg-common.mjs";
+import { backupMeetsExpected, dbName, decryptFile, encryptFile, encryptionKey, parseArgs, psql, redactUrl, resolveExpectedMigration, run, sendAlert, sha256File, toolVersion } from "./pg-common.mjs";
 import { verifyDatabase } from "./db-verify.mjs";
 
 const CORE_TABLES = ["Order", "Payment", "AuditLog", "InventoryLedger", "_prisma_migrations"];
 
-export async function backup({ url, dir, key, verifyRestoreUrl, now = new Date(), label = "" }) {
+export async function backup({ url, dir, key, verifyRestoreUrl, now = new Date(), label = "", expectMigration }) {
+  const expected = resolveExpectedMigration(expectMigration);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const db = dbName(url);
   const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -69,9 +72,10 @@ export async function backup({ url, dir, key, verifyRestoreUrl, now = new Date()
     // 5. optional full restore verification into a scratch database
     let restoreVerified = null;
     if (verifyRestoreUrl) {
+      if (!backupMeetsExpected(latest, expected)) throw new Error(`the source's newest migration is ${latest}, older than the expected ${expected}; the scratch database was not touched. For a database still on an older release (e.g. the pre-upgrade backup), pass --expect-migration ${latest}`);
       if (dbName(verifyRestoreUrl) === db && new URL(verifyRestoreUrl).host === new URL(url).host) throw new Error("--verify-restore must point at a SCRATCH database, not the source");
       await run("pg_restore", ["--no-owner", "--no-privileges", "--clean", "--if-exists", "--exit-on-error", "--single-transaction", "--dbname", dbName(verifyRestoreUrl), plain], { url: verifyRestoreUrl });
-      const v = await verifyDatabase(verifyRestoreUrl);
+      const v = await verifyDatabase(verifyRestoreUrl, { expectMigration: expected });
       const mismatched = Object.entries(exact).filter(([t, n]) => v.info.tables[t]?.count !== n);
       if (!v.ok || mismatched.length) throw new Error(`restore verification failed: ${[...v.problems, ...mismatched.map(([t, n]) => `${t}: ${v.info.tables[t]?.count} restored vs ${n}`)].join("; ")}`);
       restoreVerified = { at: new Date().toISOString(), database: dbName(verifyRestoreUrl) };
@@ -83,7 +87,7 @@ export async function backup({ url, dir, key, verifyRestoreUrl, now = new Date()
     if (finalTmp !== plain) fs.rmSync(plain, { force: true });
     const manifest = {
       format: "restora-backup/1", file: path.basename(file), createdAt: now.toISOString(), durationMs: Date.now() - t0,
-      database: db, serverVersion, pgDump: toolVersion("pg_dump"), latestMigration: latest, expectedMigration: expectedMigration(),
+      database: db, serverVersion, pgDump: toolVersion("pg_dump"), latestMigration: latest, expectedMigration: expected,
       encrypted: Boolean(key), cipher: key ? "aes-256-gcm" : null, sizeBytes: fs.statSync(file).size,
       sha256: await sha256File(file), plainSha256, counts: exact, approximateCounts: counts, restoreVerified,
     };
@@ -150,7 +154,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     if (!dir) throw new Error("set BACKUP_DIR (or --dir)");
     const key = encryptionKey();
     if (!key && process.env.NODE_ENV === "production" && !args["allow-unencrypted"]) throw new Error("BACKUP_ENCRYPTION_KEY is required in production (or pass --allow-unencrypted when the target storage is encrypted)");
-    const m = await backup({ url, dir, key, verifyRestoreUrl: args["verify-restore"], label: typeof args.label === "string" ? args.label : "" });
+    const m = await backup({ url, dir, key, verifyRestoreUrl: args["verify-restore"], label: typeof args.label === "string" ? args.label : "", expectMigration: args["expect-migration"] });
     const deleted = applyRetention(dir, { daily: Number(process.env.BACKUP_RETENTION_DAILY ?? 14), weekly: Number(process.env.BACKUP_RETENTION_WEEKLY ?? 8), monthly: Number(process.env.BACKUP_RETENTION_MONTHLY ?? 12) }, [m.file]);
     writeStatus(statusFile, { lastSuccessAt: m.createdAt, lastFile: m.file, lastSha256: m.sha256, lastSizeBytes: m.sizeBytes, restoreVerified: Boolean(m.restoreVerified) });
     console.log(JSON.stringify({ level: "info", msg: "backup complete", file: m.file, sizeBytes: m.sizeBytes, encrypted: m.encrypted, sha256: m.sha256, counts: m.counts, restoreVerified: Boolean(m.restoreVerified), durationMs: m.durationMs, retentionDeleted: deleted }));

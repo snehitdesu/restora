@@ -12,8 +12,8 @@ export async function POST(req: NextRequest) {
     const body = await readAuthJson(req);
     const ip = clientIp(req);
     await enforceRateLimit(RATE_POLICIES.passwordCompletePerIp, ip);
-    const { email, purpose } = await completePasswordToken(prisma, body as never, { ip, userAgent: req.headers.get("user-agent") ?? undefined });
-    return ok({ email, purpose });
+    const { email, purpose, notice } = await completePasswordToken(prisma, body as never, { ip, userAgent: req.headers.get("user-agent") ?? undefined });
+    return ok({ email, purpose, notice });
   } catch (e) {
     return fail(e);
   }

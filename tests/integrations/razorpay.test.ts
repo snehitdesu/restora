@@ -1,9 +1,10 @@
 /**
  * Razorpay adapter contract (no network): recorded Razorpay response shapes
- * served by a fake fetch. Checkout creation with the server's amount, checkout
- * signature + capture verification, order-status verification, webhook
- * signature + parsing, refunds, settlements, retries / timeout / malformed
- * responses, SANDBOX vs LIVE, and that no credential ever appears in an error.
+ * served by a fake fetch. Razorpay is LEGACY ONLY (retired for new checkouts
+ * 2026-10-20): it can no longer create or reopen a checkout, but it still
+ * verifies older payments (checkout signature + capture, order status),
+ * webhooks, refunds and settlements — with retries / timeout / malformed
+ * responses classified, SANDBOX vs LIVE, and no credential ever in an error.
  */
 import { describe, it, expect } from "vitest";
 import { createHmac } from "node:crypto";
@@ -43,16 +44,15 @@ describe("razorpay adapter", () => {
     expect(new RazorpayPaymentProvider({ keyId: KEY_ID, keySecret: "y" }).mode).toBe("SANDBOX");
     const none = new RazorpayPaymentProvider({ keyId: "", keySecret: "" });
     expect(await none.healthCheck()).toBe(false);
-    await expect(none.createCheckout({ paymentId: "p1", orderId: "o1", amount: 10, currency: "INR" })).rejects.toBeInstanceOf(ProviderUnavailableError);
+    await expect(none.verify({ orderId: "o1", amount: 10, providerRef: "order_A" })).rejects.toBeInstanceOf(ProviderUnavailableError);
   });
 
-  it("creates a checkout for the server's amount in paise, authenticated with the key", async () => {
-    const { p, calls } = provider({ "POST /orders": (c) => ({ json: { id: "order_9A", amount: JSON.parse(c.body!).amount, amount_paid: 0, status: "created" } }) });
-    const s = await p.createCheckout({ paymentId: "pay_local_1", orderId: "ord_local_1", amount: 1081.5, currency: "INR" });
-    expect(s).toMatchObject({ providerRef: "order_9A", checkout: { keyId: KEY_ID, orderId: "order_9A", amount: 108150, mode: "SANDBOX" } });
-    expect(JSON.parse(calls[0].body!)).toMatchObject({ amount: 108150, currency: "INR", notes: { aharos_payment: "pay_local_1", aharos_order: "ord_local_1" } });
+  it("legacy only: cannot create or reopen a checkout; legacy lookups are authenticated with the key", async () => {
+    const { p, calls } = provider({ "GET /orders/order_9A": () => ({ json: { id: "order_9A", amount: 108150, amount_paid: 108150, status: "paid" } }) });
+    expect((p as { createCheckout?: unknown }).createCheckout).toBeUndefined();
+    expect((p as { resumeCheckout?: unknown }).resumeCheckout).toBeUndefined();
+    expect(await p.verify({ orderId: "ord_local_1", amount: 1081.5, providerRef: "order_9A" })).toEqual({ verified: true, providerRef: "order_9A" });
     expect(calls[0].auth).toBe(`Basic ${Buffer.from(`${KEY_ID}:${SECRET}`).toString("base64")}`);
-    expect(JSON.stringify(s)).not.toContain(SECRET);
   });
 
   it("verifies the checkout signature, the payment's order, our order id, the amount and capture", async () => {
@@ -105,29 +105,19 @@ describe("razorpay adapter", () => {
     expect(failed.pending).toBeUndefined();
   });
 
-  it("an emulator base is honoured only where mocks are allowed, and is then reported as MOCK, never SANDBOX / LIVE", () => {
-    const prev = { base: process.env.RAZORPAY_API_BASE, env: process.env.NODE_ENV, allow: process.env.ALLOW_MOCK_PROVIDERS };
+  it("always talks to Razorpay itself: the old test-emulator override (RAZORPAY_API_BASE) is gone", async () => {
+    const prev = process.env.RAZORPAY_API_BASE;
     const env = process.env as Record<string, string | undefined>;
     try {
       env.RAZORPAY_API_BASE = "http://127.0.0.1:9/v1";
-      expect(new RazorpayPaymentProvider({ keyId: "rzp_live_X", keySecret: "y" }).mode).toBe("MOCK");
-      env.NODE_ENV = "production";
-      delete env.ALLOW_MOCK_PROVIDERS;
-      expect(new RazorpayPaymentProvider({ keyId: "rzp_live_X", keySecret: "y" }).mode).toBe("LIVE"); // the override is ignored
+      expect(new RazorpayPaymentProvider({ keyId: "rzp_live_X", keySecret: "y" }).mode).toBe("LIVE");
+      const { p, calls } = provider({ "GET /orders/order_A": () => ({ json: { id: "order_A", amount: 100, amount_paid: 100, status: "paid" } }) });
+      await p.verify({ orderId: "o", amount: 1, providerRef: "order_A" });
+      expect(calls[0].url.startsWith("https://api.razorpay.com/v1/")).toBe(true);
     } finally {
-      env.RAZORPAY_API_BASE = prev.base;
-      if (prev.base === undefined) delete env.RAZORPAY_API_BASE;
-      env.NODE_ENV = prev.env;
-      if (prev.allow === undefined) delete env.ALLOW_MOCK_PROVIDERS;
-      else env.ALLOW_MOCK_PROVIDERS = prev.allow;
+      if (prev === undefined) delete env.RAZORPAY_API_BASE;
+      else env.RAZORPAY_API_BASE = prev;
     }
-  });
-
-  it("resuming a checkout hands the browser public data only", () => {
-    const p = new RazorpayPaymentProvider({ keyId: KEY_ID, keySecret: SECRET });
-    const c = p.resumeCheckout({ providerRef: "order_Z", amount: 462, currency: "INR" });
-    expect(c).toEqual({ provider: "razorpay", mode: "SANDBOX", keyId: KEY_ID, orderId: "order_Z", amount: 46200, currency: "INR" });
-    expect(JSON.stringify(c)).not.toContain(SECRET);
   });
 
   it("retries 5xx / 429 a bounded number of times; 4xx is final; malformed and timeouts are classified", async () => {

@@ -16,7 +16,6 @@
  * used as a base unit cannot be deactivated; a material's base unit cannot
  * change once stock has moved; SKU / codes stay unique. Every mutation audits.
  */
-import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { gstinSchema } from "@/domain/gst";
@@ -25,12 +24,13 @@ import { prisma } from "@/server/db/client";
 import { type AccessContext, assertOutletAccess, ForbiddenError, NotFoundError, ValidationError } from "@/server/db/scope";
 import { assertCan, can, type Permission } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
+import { issueOutletQrToken, issueTableQrToken } from "@/server/qr/tableToken";
 import { type Client, type Tx, runInTx, assertTransition } from "@/server/services/_workflow";
 import { isValidTimeZone } from "@/domain/time";
 import { D, money, type Decimalish } from "@/domain/money";
 import { textContains } from "@/server/db/search";
 
-function assertOrgWide(ctx: AccessContext, permission: Permission) {
+export function assertOrgWide(ctx: AccessContext, permission: Permission) {
   assertCan(ctx, permission);
   if (!ctx.isSuperAdmin && !ctx.isOrgWide) throw new ForbiddenError(`${permission} on organization-wide data needs an org-wide role`);
 }
@@ -137,9 +137,11 @@ export async function createMaterialCategory(ctx: AccessContext, input: { name: 
   });
 }
 
-const materialSchema = z.object({
+export const materialInputSchema = z.object({
   sku: z.string().trim().min(1).max(40),
   name: z.string().trim().min(1).max(120),
+  /** The maker's brand ("Amul"); null clears it. */
+  brand: z.string().trim().min(1).max(60).nullable().optional(),
   baseUnitId: z.string(),
   purchaseUnitId: z.string().optional(),
   categoryId: z.string().optional(),
@@ -168,8 +170,8 @@ async function assertMaterialRefs(tx: Tx, ctx: AccessContext, d: { baseUnitId?: 
   if (d.preferredVendorId) await loadOrg(await tx.vendor.findUnique({ where: { id: d.preferredVendorId } }), ctx, "Vendor");
 }
 
-export async function createMaterial(ctx: AccessContext, input: z.input<typeof materialSchema>, db: Client = prisma) {
-  const data = materialSchema.parse(input);
+export async function createMaterial(ctx: AccessContext, input: z.input<typeof materialInputSchema>, db: Client = prisma) {
+  const data = materialInputSchema.parse(input);
   assertOrgWide(ctx, "master.manage");
   assertParLevel(data.reorderLevel, data.parLevel);
   return runInTx(db, async (tx) => {
@@ -178,13 +180,13 @@ export async function createMaterial(ctx: AccessContext, input: z.input<typeof m
       () => tx.material.create({ data: { organizationId: ctx.organizationId, ...data, taxPct: D(data.taxPct), minStock: D(data.minStock), reorderLevel: D(data.reorderLevel), parLevel: data.parLevel == null ? null : D(data.parLevel), createdById: ctx.userId === "system" ? null : ctx.userId } }),
       `SKU "${data.sku}" already exists`
     );
-    await writeAudit(tx, ctx, { action: "CREATE", entityType: "Material", entityId: m.id, after: { sku: data.sku, name: data.name, baseUnitId: data.baseUnitId } });
+    await writeAudit(tx, ctx, { action: "CREATE", entityType: "Material", entityId: m.id, after: { sku: data.sku, name: data.name, baseUnitId: data.baseUnitId, brand: data.brand ?? null } });
     return m;
   });
 }
 
-export async function updateMaterial(ctx: AccessContext, materialId: string, patch: Partial<z.input<typeof materialSchema>> & { active?: boolean }, db: Client = prisma) {
-  const data = materialSchema.partial().extend({ active: z.boolean().optional() }).parse(patch);
+export async function updateMaterial(ctx: AccessContext, materialId: string, patch: Partial<z.input<typeof materialInputSchema>> & { active?: boolean }, db: Client = prisma) {
+  const data = materialInputSchema.partial().extend({ active: z.boolean().optional() }).parse(patch);
   assertOrgWide(ctx, "master.manage");
   return runInTx(db, async (tx) => {
     const m = await loadOrg(await tx.material.findUnique({ where: { id: materialId } }), ctx, "Material");
@@ -197,7 +199,7 @@ export async function updateMaterial(ctx: AccessContext, materialId: string, pat
       () => tx.material.update({ where: { id: materialId }, data: { ...data, ...(data.taxPct !== undefined ? { taxPct: D(data.taxPct) } : {}), ...(data.minStock !== undefined ? { minStock: D(data.minStock) } : {}), ...(data.reorderLevel !== undefined ? { reorderLevel: D(data.reorderLevel) } : {}), ...(data.parLevel !== undefined ? { parLevel: data.parLevel === null ? null : D(data.parLevel) } : {}) } }),
       `SKU "${data.sku}" already exists`
     );
-    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Material", entityId: materialId, before: { sku: m.sku, name: m.name, active: m.active, baseUnitId: m.baseUnitId }, after: data });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Material", entityId: materialId, before: { sku: m.sku, name: m.name, active: m.active, baseUnitId: m.baseUnitId, brand: m.brand }, after: data });
     return updated;
   });
 }
@@ -210,7 +212,7 @@ export async function listMaterials(db: PrismaClient, ctx: AccessContext, query:
       organizationId: ctx.organizationId,
       ...(q.categoryId ? { categoryId: q.categoryId } : {}),
       ...(q.active !== undefined ? { active: q.active } : {}),
-      ...(q.search ? { OR: [{ name: textContains(q.search) }, { sku: textContains(q.search) }] } : {}),
+      ...(q.search ? { OR: [{ name: textContains(q.search) }, { sku: textContains(q.search) }, { brand: textContains(q.search) }] } : {}),
     },
     orderBy: [{ name: "asc" }, { id: "asc" }],
     take: q.take + 1,
@@ -232,7 +234,7 @@ export async function getMaterial(db: PrismaClient, ctx: AccessContext, material
 // Vendors + vendor-material links
 // ============================================================
 
-const vendorSchema = z.object({
+export const vendorInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   companyName: z.string().max(160).optional(),
   phone: z.string().max(20).optional(),
@@ -242,6 +244,9 @@ const vendorSchema = z.object({
   bankAccount: z.string().regex(/^[0-9]{6,20}$/, "Bank account must be 6-20 digits").optional(),
   bankIfsc: z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC").optional(),
   paymentTerms: z.string().max(20).optional(),
+  /** What kind of vendor (Dairy, Produce, Packaging ...) and the GST nature of supply. */
+  category: z.string().trim().min(1).max(60).nullable().optional(),
+  natureOfSupply: z.enum(["GOODS", "SERVICES", "BOTH"]).nullable().optional(),
   creditLimit: z.number().nonnegative().default(0),
   upiId: z.string().trim().regex(/^[\w.-]{2,256}@[a-zA-Z][a-zA-Z0-9]{1,63}$/, "Invalid UPI id (name@bank)").optional(),
   notes: z.string().max(1000).optional(),
@@ -257,12 +262,12 @@ function maskVendor<T extends { bankAccount: string | null; bankIfsc: string | n
  * New vendors start PENDING (proposal module 01: "must be approved before
  * anyone can buy from them"); approval is setVendorStatus(ACTIVE).
  */
-export async function createVendor(ctx: AccessContext, input: z.input<typeof vendorSchema>, db: Client = prisma) {
-  const data = vendorSchema.parse(input);
+export async function createVendor(ctx: AccessContext, input: z.input<typeof vendorInputSchema>, db: Client = prisma) {
+  const data = vendorInputSchema.parse(input);
   assertOrgWide(ctx, "vendor.manage");
   return runInTx(db, async (tx) => {
     const v = await unique(() => tx.vendor.create({ data: { organizationId: ctx.organizationId, ...data, creditLimit: money(data.creditLimit), status: "PENDING", active: false, createdById: ctx.userId === "system" ? null : ctx.userId } }), `Vendor "${data.name}" already exists`);
-    await writeAudit(tx, ctx, { action: "CREATE", entityType: "Vendor", entityId: v.id, after: { name: data.name, gstin: data.gstin, status: "PENDING" } });
+    await writeAudit(tx, ctx, { action: "CREATE", entityType: "Vendor", entityId: v.id, after: { name: data.name, gstin: data.gstin, category: data.category ?? null, natureOfSupply: data.natureOfSupply ?? null, status: "PENDING" } });
     return v;
   });
 }
@@ -294,8 +299,8 @@ export async function setVendorStatus(ctx: AccessContext, vendorId: string, inpu
   });
 }
 
-export async function updateVendor(ctx: AccessContext, vendorId: string, patch: Partial<z.input<typeof vendorSchema>> & { active?: boolean }, db: Client = prisma) {
-  const { active, ...data } = vendorSchema.partial().extend({ active: z.boolean().optional() }).parse(patch);
+export async function updateVendor(ctx: AccessContext, vendorId: string, patch: Partial<z.input<typeof vendorInputSchema>> & { active?: boolean }, db: Client = prisma) {
+  const { active, ...data } = vendorInputSchema.partial().extend({ active: z.boolean().optional() }).parse(patch);
   assertOrgWide(ctx, "vendor.manage");
   // The old activate / deactivate switch goes through the approval lifecycle.
   if (active !== undefined) {
@@ -310,7 +315,7 @@ export async function updateVendor(ctx: AccessContext, vendorId: string, patch: 
     // Bank / UPI changes are a classic fraud vector: audit them without storing the details.
     const bankChanged = data.bankAccount !== undefined && data.bankAccount !== v.bankAccount;
     const upiChanged = data.upiId !== undefined && data.upiId !== v.upiId;
-    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Vendor", entityId: vendorId, before: { name: v.name, status: v.status }, after: { ...data, bankAccount: bankChanged ? `changed to ••••${data.bankAccount!.slice(-4)}` : undefined, upiId: upiChanged ? "changed" : undefined } });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Vendor", entityId: vendorId, before: { name: v.name, status: v.status, category: v.category, natureOfSupply: v.natureOfSupply }, after: { ...data, bankAccount: bankChanged ? `changed to ••••${data.bankAccount!.slice(-4)}` : undefined, upiId: upiChanged ? "changed" : undefined } });
     return updated;
   });
 }
@@ -345,7 +350,7 @@ export async function listVendors(db: PrismaClient, ctx: AccessContext, query: {
   assertCan(ctx, "vendor.view");
   const q = pageQuery.extend({ search: z.string().max(100).optional(), active: z.boolean().optional(), status: VendorStatus.zod.optional() }).parse(query);
   const rows = await db.vendor.findMany({
-    where: { organizationId: ctx.organizationId, ...(q.active !== undefined ? { active: q.active } : {}), ...(q.status ? { status: q.status } : {}), ...(q.search ? { OR: [{ name: textContains(q.search) }, { phone: textContains(q.search) }, { gstin: textContains(q.search) }] } : {}) },
+    where: { organizationId: ctx.organizationId, ...(q.active !== undefined ? { active: q.active } : {}), ...(q.status ? { status: q.status } : {}), ...(q.search ? { OR: [{ name: textContains(q.search) }, { phone: textContains(q.search) }, { gstin: textContains(q.search) }, { category: textContains(q.search) }] } : {}) },
     orderBy: [{ name: "asc" }, { id: "asc" }],
     take: q.take + 1,
     ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
@@ -356,7 +361,7 @@ export async function listVendors(db: PrismaClient, ctx: AccessContext, query: {
 
 export async function getVendor(db: PrismaClient, ctx: AccessContext, vendorId: string) {
   assertCan(ctx, "vendor.view");
-  const v = await loadOrg(await db.vendor.findUnique({ where: { id: vendorId }, include: { materials: { include: { material: { select: { sku: true, name: true } } } } } }), ctx, "Vendor");
+  const v = await loadOrg(await db.vendor.findUnique({ where: { id: vendorId }, include: { materials: { include: { material: { select: { sku: true, name: true } } } }, contacts: { orderBy: [{ isPrimary: "desc" }, { name: "asc" }, { id: "asc" }] } } }), ctx, "Vendor");
   return maskVendor(ctx, v);
 }
 
@@ -496,7 +501,7 @@ export async function rotateTableQr(ctx: AccessContext, tableId: string, db: Cli
   return runInTx(db, async (tx) => {
     const t = await loadTable(tx, ctx, tableId);
     assertOutletManager(ctx, t.outletId);
-    const qrToken = randomBytes(18).toString("base64url");
+    const qrToken = await issueTableQrToken(tx);
     const updated = await tx.restaurantTable.update({ where: { id: tableId }, data: { qrToken } });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "RestaurantTable", entityId: tableId, outletId: t.outletId, after: { qrRotated: true } });
     return updated;
@@ -515,6 +520,54 @@ export async function revokeTableQr(ctx: AccessContext, tableId: string, db: Cli
     const updated = await tx.restaurantTable.update({ where: { id: tableId }, data: { qrToken: null } });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "RestaurantTable", entityId: tableId, outletId: t.outletId, before: { qrIssued: Boolean(t.qrToken) }, after: { qrIssued: false, qrRevoked: true } });
     return updated;
+  });
+}
+
+// ------------------------------------------------------------------ the restaurant's common QR
+
+/**
+ * The outlet's common QR (one code for every table; docs/common-qr-ordering.md).
+ * Guests who scan it order without a table; staff assign the table later.
+ * Same token rules and namespace as table codes; managed by outlet managers.
+ */
+async function loadOutletForQr(tx: Tx, ctx: AccessContext, outletId: string) {
+  const o = await tx.outlet.findUnique({ where: { id: outletId }, select: { id: true, organizationId: true, guestQrToken: true } });
+  if (!o || o.organizationId !== ctx.organizationId) throw new NotFoundError("Outlet not found");
+  assertOutletAccess(ctx, o.id);
+  assertOutletManager(ctx, o.id);
+  return o;
+}
+
+const commonQrView = (outletId: string, token: string | null) => {
+  const base = guestBaseUrl();
+  return { outletId, qrToken: token, guestUrl: token && base ? `${base}/t/${encodeURIComponent(token)}` : null };
+};
+
+export async function getOutletCommonQr(ctx: AccessContext, outletId: string, db: Client = prisma) {
+  return runInTx(db, async (tx) => {
+    const o = await loadOutletForQr(tx, ctx, outletId);
+    return commonQrView(o.id, o.guestQrToken);
+  });
+}
+
+/** Issue (or rotate) the outlet's common QR; the previous code stops working immediately. */
+export async function rotateOutletCommonQr(ctx: AccessContext, outletId: string, db: Client = prisma) {
+  return runInTx(db, async (tx) => {
+    const o = await loadOutletForQr(tx, ctx, outletId);
+    const guestQrToken = await issueOutletQrToken(tx);
+    await tx.outlet.update({ where: { id: o.id }, data: { guestQrToken } });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Outlet", entityId: o.id, outletId: o.id, before: { commonQrIssued: Boolean(o.guestQrToken) }, after: { commonQrRotated: true } });
+    return commonQrView(o.id, guestQrToken);
+  });
+}
+
+/** Withdraw the common QR: the printed code stops working at once; table QR codes are unaffected. */
+export async function revokeOutletCommonQr(ctx: AccessContext, outletId: string, db: Client = prisma) {
+  return runInTx(db, async (tx) => {
+    const o = await loadOutletForQr(tx, ctx, outletId);
+    await tx.outlet.update({ where: { id: o.id }, data: { guestQrToken: null } });
+    await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Outlet", entityId: o.id, outletId: o.id, before: { commonQrIssued: Boolean(o.guestQrToken) }, after: { commonQrIssued: false, commonQrRevoked: true } });
+    return commonQrView(o.id, null);
   });
 }
 

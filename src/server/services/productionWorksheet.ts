@@ -105,7 +105,9 @@ export async function getWorksheet(db: PrismaClient, ctx: AccessContext, input: 
     };
     if (showCost) {
       const version = await getActiveVersionForMenuItem(db, ctx, it.id);
-      const plate = version ? D((await calculateRecipeCost(db, ctx, version.id, { outletId: q.outletId, quantity: 1 })).total) : null;
+      const costing = version ? await calculateRecipeCost(db, ctx, version.id, { outletId: q.outletId, quantity: 1 }) : null;
+      // Unpriced ingredients: no plate cost rather than a partial sum that reads as the cost.
+      const plate = costing && !costing.unpricedMaterialIds.length ? D(costing.total) : null;
       row.plateCost = plate ? num(money(plate)) : null;
       row.wastageCost = num(money(w?.cost ?? D(0)));
       row.varianceCost = plate && variance !== null ? num(money(plate.times(variance))) : null;

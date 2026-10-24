@@ -402,6 +402,22 @@ describe("login", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled();
   });
 
+  it("signs in with what is in the fields even if typing happened before React attached its handlers", async () => {
+    handler = () => ok({ user: {} });
+    router.replace.mockClear();
+    const { container } = render(<LoginForm />);
+    // Pre-hydration typing: the DOM holds the text but no change event reached React.
+    (screen.getByLabelText("Email") as HTMLInputElement).value = "early@b.co";
+    (screen.getByLabelText("Password") as HTMLInputElement).value = "early-secret";
+    await act(async () => {
+      screen.getByRole("button", { name: "Sign in" }).click();
+    });
+    expect(calls[0]?.body).toEqual({ email: "early@b.co", password: "early-secret" });
+    expect(router.replace).toHaveBeenCalled();
+    // Without JS the browser must not append credentials to the URL.
+    expect(container.querySelector("form")).toHaveAttribute("method", "post");
+  });
+
   it("keeps Sign in actionable and explains empty fields without calling the API", async () => {
     const user = userEvent.setup();
     handler = () => ok({ user: {} });

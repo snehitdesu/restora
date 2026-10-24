@@ -11,7 +11,7 @@
  * checks and unit conversion all happen on the server.
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api/client";
 import { usePaged, useQuery } from "@/lib/hooks/useApi";
@@ -33,19 +33,36 @@ import { MaterialSelect, useMaterials, useUnits, type UnitRow, useCanSeeCost } f
 type Num = string | number;
 export type RecipeListRow = {
   id: string; name: string; outputType: string; active: boolean; menuItemId: string | null; outputMaterialId: string | null;
-  menuItem: { name: string } | null; versions: Array<{ id: string; version: number; status: string; effectiveFrom: string }>;
+  menuItem: { name: string } | null; versions: Array<{ id: string; version: number; status: string; effectiveFrom: string; estimated?: boolean }>;
 };
 export type RecipeLine = { id: string; componentType: string; materialId: string | null; subRecipeId: string | null; qty: Num; unitId: string | null; wastagePct: Num; sortOrder: number; name: string | null; sku: string | null; unit: string | null };
 export type RecipeVersion = {
   id: string; version: number; status: string; effectiveFrom: string; yieldQty: Num; yieldUnitId: string | null; yieldUnit: string | null; servingSize: Num; overheadPct?: Num;
   notes: string | null; approvedAt: string | null; createdAt: string; lines: RecipeLine[];
+  /** Quantities are estimates the kitchen has not confirmed: never used for stock or food cost, cannot be approved. */
+  estimated?: boolean;
 };
 export type Recipe = {
   id: string; name: string; outputType: string; active: boolean; menuItemId: string | null; outputMaterialId: string | null; stocked?: boolean; createdAt: string;
   menuItem: { id: string; name: string; price: Num } | null; outputMaterial: { id: string; name: string; sku: string; unit: string | null } | null;
   versions: RecipeVersion[];
 };
-type Cost = { total: number; quantity: number; lines: Array<{ materialId: string; name: string | null; sku: string | null; unit: string | null; quantity: number; unitCost: number; cost: number }> };
+/** `total` is null unless every line is priced: a partial sum is never shown as the cost. */
+type Cost = {
+  complete: boolean; total: number | null; pricedSubtotal: number; unpricedCount: number; quantity: number;
+  lines: Array<{ materialId: string; name: string | null; sku: string | null; unit: string | null; quantity: number; priced: boolean; unitCost: number | null; cost: number | null }>;
+};
+
+/** What a cost total says when ingredient costs are missing: never a numeric ₹0.00. */
+export function costTotalText(c: Pick<Cost, "complete" | "total" | "pricedSubtotal" | "unpricedCount" | "lines">) {
+  if (c.complete && c.total !== null) return { value: formatMoney(c.total), unavailable: false };
+  const priced = c.lines.filter((l) => l.priced).length;
+  if (!priced) return { value: "Cost unavailable", unavailable: true, detail: "Ingredient costs not entered at this outlet." };
+  return {
+    value: "Incomplete", unavailable: true,
+    detail: `Priced ingredients only come to ${formatMoney(c.pricedSubtotal)}; ${c.unpricedCount} of ${c.lines.length} ingredients have no cost, so this is not the recipe's cost.`,
+  };
+}
 type MenuPick = { id: string; name: string; active: boolean };
 
 function useRecipeAuthority() {
@@ -54,6 +71,11 @@ function useRecipeAuthority() {
 }
 
 const latest = (r: { versions: Array<{ version: number; status: string }> }) => r.versions[0];
+
+/** Marks a version whose quantities are estimates (not the kitchen's verified weights). */
+function EstimatedBadge() {
+  return <Badge tone="warn">Estimated</Badge>;
+}
 const approvedCount = (r: { versions: Array<{ status: string }> }) => r.versions.filter((v) => v.status === "APPROVED").length;
 
 // ============================================================
@@ -117,7 +139,7 @@ function UnitSelect({ units, value, onChange, empty, id, label }: { units: UnitR
 }
 
 export function RecipesScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { manage } = useRecipeAuthority();
   const [outputType, setOutputType] = useState("");
   const [search, setSearch] = useState("");
@@ -136,7 +158,7 @@ export function RecipesScreen() {
         columns={[
           { key: "n", header: "Recipe", cell: (r) => <span className="font-medium text-ink-900">{r.name}</span> },
           { key: "t", header: "Produces", cell: (r) => (r.outputType === "MENU_ITEM" ? r.menuItem?.name ?? "Menu item" : <Badge>Sub-recipe</Badge>) },
-          { key: "v", header: "Latest version", cell: (r) => (latest(r) ? <span className="inline-flex items-center gap-1.5">v{latest(r)!.version} <StatusBadge status={latest(r)!.status} /></span> : "—") },
+          { key: "v", header: "Latest version", cell: (r) => (latest(r) ? <span className="inline-flex items-center gap-1.5">v{latest(r)!.version} <StatusBadge status={latest(r)!.status} />{r.versions[0]?.estimated && <EstimatedBadge />}</span> : "—") },
           { key: "a", header: "Approved versions", numeric: true, cell: (r) => approvedCount(r) || <span className="text-bad-500">None</span> },
           { key: "s", header: "Status", cell: (r) => <ActiveBadge active={r.active} /> },
         ]} />
@@ -248,29 +270,40 @@ function CostCard({ version, outletId, outletName }: { version: RecipeVersion; o
   const cost = useQuery<Cost>(`/api/recipes/versions/${version.id}/cost`, { outletId, quantity: applied, _l: version.lines.length });
   const yieldLabel = `${formatPrecise(version.yieldQty)}${version.yieldUnit ? ` ${version.yieldUnit}` : ""}`;
   return (
-    <Card title={`Cost at ${outletName}`} className="mb-4"
+    <Card title={version.estimated ? `Indicative cost at ${outletName} (estimated quantities)` : `Cost at ${outletName}`} className="mb-4"
       actions={
         <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); setApplied(optNum(qty)); }}>
           <label className="flex flex-col gap-0.5 text-xs text-ink-500"><span>Quantity</span><Input type="number" inputMode="decimal" step="any" min="0" className="w-28" value={qty} onChange={(e) => setQty(e.target.value)} placeholder={String(toNumber(version.yieldQty))} aria-label="Cost quantity" /></label>
           <Button size="sm" type="submit">Recalculate</Button>
         </form>
       }>
-      {cost.loading && !cost.data ? <LoadingState /> : cost.error ? <ErrorState error={cost.error} onRetry={cost.reload} compact /> : cost.data ? (
-        <>
-          <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-3">
-            <Stat label={`Total for ${applied !== undefined ? formatPrecise(applied) : yieldLabel}`} value={formatMoney(cost.data.total)} hint="Raw materials × weighted average cost at this outlet" />
-            <Stat label="Materials" value={cost.data.lines.length} hint="After exploding sub-recipes" />
-            <Stat label="Unpriced materials" value={cost.data.lines.filter((l) => !l.unitCost).length} tone={cost.data.lines.some((l) => !l.unitCost) ? "bad" : undefined} hint="No purchase cost at this outlet yet" />
-          </div>
-          <DataTable label="Cost breakdown" rows={cost.data.lines} rowKey={(l) => l.materialId} empty="No material lines"
-            columns={[
-              { key: "m", header: "Material", cell: (l) => <span>{l.name ?? l.materialId}{l.sku && <span className="text-ink-500"> ({l.sku})</span>}</span> },
-              { key: "q", header: "Qty (base unit)", numeric: true, cell: (l) => `${formatPrecise(l.quantity)} ${l.unit ?? ""}` },
-              { key: "u", header: "Unit cost", numeric: true, cell: (l) => (l.unitCost ? formatMoney(l.unitCost) : <Badge tone="warn">No cost</Badge>) },
-              { key: "c", header: "Cost", numeric: true, cell: (l) => formatMoney(l.cost) },
-            ]} />
-        </>
-      ) : null}
+      {cost.loading && !cost.data ? <LoadingState /> : cost.error ? <ErrorState error={cost.error} onRetry={cost.reload} compact /> : cost.data ? (() => {
+        const total = costTotalText(cost.data);
+        const unpriced = cost.data.lines.filter((l) => !l.priced);
+        return (
+          <>
+            <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-3">
+              <Stat label={`Total for ${applied !== undefined ? formatPrecise(applied) : yieldLabel}`} value={total.value} tone={total.unavailable ? "bad" : undefined}
+                hint={total.detail ?? (version.estimated ? "Estimated quantities × weighted average cost at this outlet: indicative only, not used for food cost" : "Raw materials × weighted average cost at this outlet")} />
+              <Stat label="Materials" value={cost.data.lines.length} hint="After exploding sub-recipes" />
+              <Stat label="Unpriced materials" value={unpriced.length} tone={unpriced.length ? "bad" : undefined} hint="No purchase cost at this outlet yet" />
+            </div>
+            {unpriced.length > 0 && (
+              <p className="mb-3 text-sm text-ink-700" data-testid="recipe-cost-unpriced">
+                {total.value === "Cost unavailable" ? "Cost unavailable: ingredient costs not entered." : "Cost incomplete."} No purchase cost at this outlet for{" "}
+                {unpriced.map((l) => l.name ?? l.materialId).join(", ")}. Record a purchase (goods receipt) for these to cost the recipe.
+              </p>
+            )}
+            <DataTable label="Cost breakdown" rows={cost.data.lines} rowKey={(l) => l.materialId} empty="No material lines"
+              columns={[
+                { key: "m", header: "Material", cell: (l) => <span>{l.name ?? l.materialId}{l.sku && <span className="text-ink-500"> ({l.sku})</span>}</span> },
+                { key: "q", header: "Qty (base unit)", numeric: true, cell: (l) => `${formatPrecise(l.quantity)} ${l.unit ?? ""}` },
+                { key: "u", header: "Unit cost", numeric: true, cell: (l) => (l.priced && l.unitCost !== null ? formatMoney(l.unitCost) : <Badge tone="warn">No cost</Badge>) },
+                { key: "c", header: "Cost", numeric: true, cell: (l) => (l.priced && l.cost !== null ? formatMoney(l.cost) : <span className="text-ink-500" title="No purchase cost at this outlet">—</span>) },
+              ]} />
+          </>
+        );
+      })() : null}
     </Card>
   );
 }
@@ -318,7 +351,7 @@ export function RecipeDetail({ id }: { id: string }) {
         <DataTable label="Versions" rows={r.versions} rowKey={(x) => x.id} onRowClick={(x) => setSelected(x.id)} empty="No versions"
           columns={[
             { key: "v", header: "Version", cell: (x) => <span className={x.id === v?.id ? "font-semibold text-brand-700" : ""}>v{x.version}{x.id === v?.id && <span className="sr-only"> (selected)</span>}</span> },
-            { key: "s", header: "Status", cell: (x) => <StatusBadge status={x.status} /> },
+            { key: "s", header: "Status", cell: (x) => <span className="inline-flex items-center gap-1.5"><StatusBadge status={x.status} />{x.estimated && <EstimatedBadge />}</span> },
             { key: "e", header: "Effective from", cell: (x) => formatDateTime(x.effectiveFrom, tz) },
             { key: "y", header: "Yield", numeric: true, cell: (x) => `${formatPrecise(x.yieldQty)} ${x.yieldUnit ?? ""}` },
             { key: "l", header: "Lines", numeric: true, cell: (x) => x.lines.length },
@@ -328,8 +361,25 @@ export function RecipeDetail({ id }: { id: string }) {
 
       {v && (
         <>
+          {v.estimated && (
+            <Card className="mb-4 border-warn-500" title={<span className="flex items-center gap-2"><EstimatedBadge /> Draft with estimated quantities</span>}>
+              <div className="flex flex-wrap items-start justify-between gap-3" data-testid="recipe-estimated">
+                <p className="max-w-2xl text-sm text-ink-700">
+                  The ingredient quantities{v.notes ? ", method and timings in the notes" : ""} are estimates, not the kitchen&apos;s weighed recipe.
+                  This version is never used for stock consumption, purchasing or food cost, and it cannot be approved until someone checks
+                  every quantity against the kitchen and confirms them. Allergens are not verified.
+                </p>
+                {manage && draft && (
+                  <ActionButton size="sm" action={() => api(`/api/recipes/versions/${v.id}`, { method: "PATCH", body: { estimated: false } })} onDone={q.reload} success="Quantities confirmed"
+                    confirm={{ title: "Confirm these quantities?", message: "Only confirm after checking every line against what the kitchen actually uses. Approving the version afterwards makes it drive stock consumption and food cost.", confirmLabel: "Confirm quantities" }}>
+                    Confirm quantities
+                  </ActionButton>
+                )}
+              </div>
+            </Card>
+          )}
           <Card className="mb-4"
-            title={<span className="flex items-center gap-2">Version {v.version} <StatusBadge status={v.status} /></span>}
+            title={<span className="flex items-center gap-2">Version {v.version} <StatusBadge status={v.status} />{v.estimated && <EstimatedBadge />}</span>}
             actions={
               <TransitionBar status={v.status as RecipeStatus} table={RECIPE_VERSION_TRANSITIONS} onDone={q.reload}
                 specs={approve ? {

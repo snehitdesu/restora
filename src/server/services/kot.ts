@@ -8,11 +8,12 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import { KOTStatus, KOT_TRANSITIONS, canTransition } from "@/constants/enums";
 import { prisma } from "@/server/db/client";
 import { runInTx } from "@/server/services/_workflow";
-import { type AccessContext, ValidationError, NotFoundError, assertOutletAccess } from "@/server/db/scope";
+import { type AccessContext, ConflictError, ValidationError, NotFoundError, assertOutletAccess } from "@/server/db/scope";
 import { assertCan, can } from "@/server/auth/rbac";
 import { writeAudit } from "@/server/audit/log";
 import { createNotificationTx } from "@/server/services/notifications";
 import { runAfterCommit, isRootClient } from "@/server/services/afterCommit";
+import { assertKitchenReleasableTx } from "@/server/services/kitchenGate";
 
 type Tx = Prisma.TransactionClient;
 type Client = PrismaClient | Tx;
@@ -29,7 +30,7 @@ const onPostgres = () => /^postgres(ql)?:/.test(process.env.DATABASE_URL ?? "");
  * predicate lock, no extra connection; a rolled-back order may leave a gap.
  * SQLite serializes writers, so max + 1 is safe and stays gap-free there.
  */
-async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
+export async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
   if (onPostgres()) {
     const [row] = await tx.$queryRaw<{ n: number }[]>`SELECT nextval('"kot_number_seq"')::int AS n`;
     return Number(row.n);
@@ -38,13 +39,18 @@ async function nextKotNumber(tx: Tx, outletId: string): Promise<number> {
   return (last?.number ?? 0) + 1;
 }
 
-/** Create one KOT per station for the order's items. Idempotent-ish: skips items already on a KOT. */
+/**
+ * Create one KOT per station for the order's items. Idempotent-ish: skips items already on a KOT.
+ * The single place kitchen tickets are made, so the online-payment gate for guest QR orders
+ * (kitchenGate.ts) is enforced here for every caller.
+ */
 export async function createKOTsForOrder(tx: Tx, ctx: AccessContext, orderId: string) {
   const order = await tx.order.findUnique({ where: { id: orderId }, include: { items: { include: { kotItems: true } } } });
   if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
 
   const pending = order.items.filter((it) => it.kotItems.length === 0);
   if (pending.length === 0) return [];
+  await assertKitchenReleasableTx(tx, order);
 
   const byStation = new Map<string, typeof pending>();
   for (const it of pending) {
@@ -74,9 +80,28 @@ export async function createKOTsForOrder(tx: Tx, ctx: AccessContext, orderId: st
   return created;
 }
 
+/** The KOT column that records when a ticket reached a status (transitions are sequential, so each is stamped once). */
+/**
+ * Lifecycle stamp written by the transition that reaches each state. KOT_TRANSITIONS
+ * is linear (NEW -> ACCEPTED -> PREPARING -> READY -> SERVED), so each stamp has
+ * exactly one transition that can set it. CANCELLED carries no stamp.
+ */
+export const KOT_STAMP: Partial<Record<KOTStatus, "acceptedAt" | "startedAt" | "readyAt" | "servedAt">> = {
+  ACCEPTED: "acceptedAt",
+  PREPARING: "startedAt",
+  READY: "readyAt",
+  SERVED: "servedAt",
+};
+
 /**
  * KDS status change (audited). When every live KOT of an order is READY, an
  * ORDER_READY notification is raised for the outlet (deduplicated).
+ *
+ * The transition's stamp (KOT_STAMP) is set with the status, in the same
+ * statement, from the server clock (stored as UTC), and only when still empty:
+ * a retried or duplicate request never overwrites it, a refused transition
+ * never writes it. The write is a compare-and-set on the status that was read,
+ * so two concurrent requests cannot both apply the move.
  */
 export async function updateKOTStatus(ctx: AccessContext, kotId: string, to: KOTStatus, db: Client = prisma) {
   KOTStatus.zod.parse(to);
@@ -93,7 +118,19 @@ export async function updateKOTStatus(ctx: AccessContext, kotId: string, to: KOT
     if (!canTransition(KOT_TRANSITIONS, kot.status as KOTStatus, to)) {
       throw new ValidationError(`Cannot move KOT from ${kot.status} to ${to}`);
     }
-    const updated = await tx.kot.update({ where: { id: kotId }, data: { status: to } });
+    // The moment each stage was reached: what the measured prep times and the late-ticket alerts are built from.
+    const stamp = KOT_STAMP[to];
+    const moved = await tx.kot.updateMany({
+      where: { id: kotId, status: kot.status },
+      data: { status: to, ...(stamp && kot[stamp] === null ? { [stamp]: new Date() } : {}) },
+    });
+    if (moved.count !== 1) {
+      // Another request moved the ticket between our read and this write.
+      const now = await tx.kot.findUnique({ where: { id: kotId } });
+      if (now?.status === to) return now; // the same move already happened: no-op, as above
+      throw new ConflictError(`KOT changed to ${now?.status ?? "deleted"} while moving it to ${to}; refresh and try again`);
+    }
+    const updated = await tx.kot.findUniqueOrThrow({ where: { id: kotId } });
     await tx.kotItem.updateMany({ where: { kotId }, data: { status: to } });
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Kot", entityId: kotId, outletId: kot.outletId, before: { status: kot.status }, after: { status: to } });
     if (to === "READY") {
@@ -148,7 +185,7 @@ export async function listKOTs(db: PrismaClient, ctx: AccessContext, filter: { o
     include: {
       station: { select: { id: true, name: true } },
       order: { select: { id: true, channel: true, source: true, covers: true, notes: true, createdAt: true, table: { select: { code: true } } } },
-      items: { include: { orderItem: { select: { notes: true, modifiers: { select: { name: true } } } } } },
+      items: { include: { orderItem: { select: { menuItemId: true, notes: true, modifiers: { select: { name: true } } } } } },
     },
   });
   return rows.reverse(); // the board reads oldest first
@@ -159,9 +196,6 @@ export async function listStations(db: PrismaClient, ctx: AccessContext, outletI
   assertCan(ctx, "kot.view", outletId);
   return db.kitchenStation.findMany({ where: { organizationId: ctx.organizationId, outletId, active: true }, orderBy: { name: "asc" }, select: { id: true, name: true, kind: true } });
 }
-
-/** KDS is the kitchen's view of the same lifecycle. */
-export const updateKDSStatus = updateKOTStatus;
 
 export async function routeKOTToStation(ctx: AccessContext, kotId: string, stationId: string, db: Client = prisma) {
   const kot = await db.kot.findUnique({ where: { id: kotId } });

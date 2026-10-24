@@ -1,9 +1,9 @@
-import { securityHeaders as buildSecurityHeaders } from "./src/server/config/securityHeaders.mjs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { securityHeaders as buildSecurityHeaders, QR_SCANNER_PATH, SCANNER_PERMISSIONS_POLICY } from "./src/server/config/securityHeaders.mjs";
 
 // Development keeps 'unsafe-eval' + ws: (HMR) in the CSP; production adds HSTS.
 const securityHeaders = buildSecurityHeaders({ dev: process.env.NODE_ENV !== "production" });
-// Guest order pages (/o/<orderId>) run Razorpay Checkout: its hosts are allowed there and nowhere else.
-const checkoutHeaders = buildSecurityHeaders({ dev: process.env.NODE_ENV !== "production", paymentCheckout: true });
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -11,7 +11,18 @@ const nextConfig = {
   // that `output: "standalone"` produces; `next start` / the web build are unchanged.
   // It builds into its own directory so a `next dev` running in the same checkout
   // (which writes to .next) cannot mix its chunks into the packaged server.
-  ...(process.env.AHAROS_STANDALONE === "1" ? { output: "standalone", distDir: ".next-desktop" } : {}),
+  //
+  // preloadEntriesOnStart (Next 15 default true) makes the server load every route and evaluate
+  // every module at start-up, blocking its event loop for seconds: the desktop launcher's health
+  // checks then fail ("database ping timed out" although the database is fine), and a stalled start
+  // took 48.8 s to answer (the launcher gives up at 60 s). Off for the desktop server: each screen's
+  // code loads when first opened.
+  ...(process.env.AHAROS_STANDALONE === "1" ? { output: "standalone", distDir: ".next-desktop", experimental: { preloadEntriesOnStart: false } } : {}),
+  // This checkout is the root. Without it Next infers the root from the nearest lockfile it finds
+  // further up (a stray package-lock.json in the user's home folder did exactly that): the standalone
+  // server then lands in .next-desktop/standalone/<path below that folder>/ and the desktop build
+  // cannot find it, and file tracing may pull files from outside the project into the package.
+  outputFileTracingRoot: path.dirname(fileURLToPath(import.meta.url)),
   // The download route reads dist-desktop/ under `next dev` only (src/site/release.ts), but the
   // file tracer follows that path and copied every built installer (1.3 GB incl. win-unpacked)
   // into the standalone server, so each desktop package embedded the previous one. (Next applies
@@ -27,8 +38,10 @@ const nextConfig = {
   async headers() {
     return [
       { source: "/:path*", headers: securityHeaders },
-      // Later rules override the same header keys for matching paths.
-      { source: "/o/:path*", headers: checkoutHeaders },
+      // Later rules override the same header keys for matching paths. Guest order pages (/o/*) keep the
+      // strict policy: the bank's UPI QR is rendered by RESTORA, no payment gateway script or frame is loaded.
+      // The staff QR scanner may use the camera (same origin); everywhere else keeps camera=().
+      { source: QR_SCANNER_PATH, headers: [{ key: "Permissions-Policy", value: SCANNER_PERMISSIONS_POLICY }] },
       // API responses carry tenant data: never cache them in shared caches.
       { source: "/api/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] },
     ];

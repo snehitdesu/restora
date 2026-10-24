@@ -4,13 +4,16 @@
  * Fixed-window counters behind a `RateLimitStore` interface:
  *  - MemoryRateLimitStore (default): per-process. Correct for local development
  *    and single-instance deployments.
- *  - A shared store (e.g. Redis INCR + PEXPIRE) is REQUIRED when running more
- *    than one instance; it is NOT implemented here (see PROJECT_STATUS.md) —
- *    selecting RATE_LIMIT_STORE=redis fails loudly instead of silently
- *    degrading to per-process limits.
+ *  - DatabaseRateLimitStore (rateLimitDb.ts): the counters live in the application
+ *    database, so several instances share them. REQUIRED when more than one
+ *    instance serves the same restaurant. Any other value fails loudly instead of
+ *    silently degrading to per-process limits.
+ *
+ * Keys are `policy:sha256(subject)` (rateLimitKey), so no store — the database
+ * one included — ever holds the email address or IP it counts.
  *
  * Env: RATE_LIMIT_DISABLED=true turns limiting off (e.g. load tests);
- *      RATE_LIMIT_STORE=memory|redis.
+ *      RATE_LIMIT_STORE=memory|database.
  *
  * Client IP comes from X-Forwarded-For, which is only trustworthy behind a
  * reverse proxy. Proxies APPEND the address they saw, so the client controls
@@ -20,7 +23,10 @@
  * client pick a fresh "IP" per request, defeating the per-IP login limit and
  * flooding the store. Login is ALSO limited per email.
  */
+import { createHash } from "node:crypto";
 import type { NextRequest } from "next/server";
+import { DatabaseRateLimitStore } from "@/server/api/rateLimitDb";
+import { MemoryRateLimitStore, type RateLimitStore } from "@/server/api/rateLimitStore";
 
 export class RateLimitError extends Error {
   status = 429;
@@ -32,46 +38,20 @@ export class RateLimitError extends Error {
   }
 }
 
-export interface RateLimitStore {
-  /** Count one hit for `key` in the current window; returns the new count and window end (ms epoch). */
-  hit(key: string, windowMs: number, now?: number): Promise<{ count: number; resetAt: number }>;
-  reset(key?: string): Promise<void>;
-}
-
-export class MemoryRateLimitStore implements RateLimitStore {
-  private readonly windows = new Map<string, { count: number; resetAt: number }>();
-  constructor(private readonly maxKeys = 50_000) {}
-
-  async hit(key: string, windowMs: number, now = Date.now()) {
-    let w = this.windows.get(key);
-    if (!w || w.resetAt <= now) {
-      if (this.windows.size >= this.maxKeys) this.prune(now);
-      w = { count: 0, resetAt: now + windowMs };
-      this.windows.set(key, w);
-    }
-    w.count += 1;
-    return { count: w.count, resetAt: w.resetAt };
-  }
-
-  async reset(key?: string) {
-    if (key) this.windows.delete(key);
-    else this.windows.clear();
-  }
-
-  private prune(now: number) {
-    for (const [k, w] of this.windows) if (w.resetAt <= now) this.windows.delete(k);
-    // Still full (a flood of distinct keys): drop the oldest half rather than grow without bound.
-    if (this.windows.size >= this.maxKeys) [...this.windows.keys()].slice(0, Math.floor(this.maxKeys / 2)).forEach((k) => this.windows.delete(k));
-  }
-}
+export { MemoryRateLimitStore, type RateLimitStore } from "@/server/api/rateLimitStore";
 
 let store: RateLimitStore | null = null;
 export function getRateLimitStore(): RateLimitStore {
   if (store) return store;
-  const kind = (process.env.RATE_LIMIT_STORE ?? "memory").toLowerCase();
-  if (kind !== "memory") throw new Error(`RATE_LIMIT_STORE=${kind} is not implemented; use "memory" (single instance) or implement a shared store`);
-  store = new MemoryRateLimitStore();
+  const kind = (process.env.RATE_LIMIT_STORE ?? "memory").trim().toLowerCase() || "memory";
+  if (kind !== "memory" && kind !== "database") throw new Error(`RATE_LIMIT_STORE=${kind} is not supported; use "memory" (one instance) or "database" (shared by every instance)`);
+  store = kind === "database" ? new DatabaseRateLimitStore() : new MemoryRateLimitStore();
   return store;
+}
+
+/** Tests only: forget the chosen store so the next call reads RATE_LIMIT_STORE again. */
+export function resetRateLimitStoreForTests(): void {
+  store = null;
 }
 
 export type RatePolicy = { name: string; limit: number; windowMs: number };
@@ -84,11 +64,23 @@ export const RATE_POLICIES = {
   passwordCompletePerIp: { name: "pwcomplete-ip", limit: 20, windowMs: 15 * 60_000 },
   passwordChangePerUser: { name: "pwchange-user", limit: 10, windowMs: 15 * 60_000 },
   reauthPerUser: { name: "reauth-user", limit: 30, windowMs: 15 * 60_000 },
+  // Owner recovery codes: redeeming is anonymous (email + code), so it is held far below what a guess needs.
+  recoveryRedeemPerIp: { name: "recovery-ip", limit: 10, windowMs: 15 * 60_000 },
+  recoveryRedeemPerEmail: { name: "recovery-email", limit: 5, windowMs: 60 * 60_000 },
+  recoveryGeneratePerUser: { name: "recovery-gen-user", limit: 5, windowMs: 60 * 60_000 },
+  emailVerifyRequestPerUser: { name: "email-verify-user", limit: 3, windowMs: 60 * 60_000 },
+  emailVerifyPerIp: { name: "email-verify-ip", limit: 20, windowMs: 15 * 60_000 },
   webhook: { name: "webhook", limit: 600, windowMs: 60_000 },
   export: { name: "export", limit: 20, windowMs: 60_000 },
   report: { name: "report", limit: 120, windowMs: 60_000 },
+  // The search box fires as people type (debounced); a runaway client is not a person.
+  search: { name: "search", limit: 240, windowMs: 60_000 },
   // Calls that reach an external provider or device (test connection / test print / test message).
   integrationAction: { name: "integration-action", limit: 30, windowMs: 60_000 },
+  // Staff table-QR scanner checks (per user): a person checks a handful of codes; a loop guessing tokens is not a person.
+  qrScanPerUser: { name: "qr-scan-user", limit: 60, windowMs: 60_000 },
+  // Desktop sync: a feed poll every few seconds plus queued actions; one device per signed-in user.
+  syncPerUser: { name: "sync-user", limit: 300, windowMs: 60_000 },
   // Guest QR ordering (anonymous). Guests behind restaurant Wi-Fi share one IP,
   // so per-IP limits are generous; order placement is also capped per table.
   guestReadPerIp: { name: "guest-read-ip", limit: 600, windowMs: 60_000 },
@@ -96,6 +88,9 @@ export const RATE_POLICIES = {
   guestOrderPerTable: { name: "guest-order-table", limit: 20, windowMs: 10 * 60_000 },
   // Cart re-pricing (read-only POST): several guests on one café Wi-Fi share an IP.
   guestQuotePerIp: { name: "guest-quote-ip", limit: 240, windowMs: 60_000 },
+  // One feedback answer per order; a link or an order key being hammered is not a guest.
+  guestFeedbackPerKey: { name: "guest-feedback-key", limit: 10, windowMs: 10 * 60_000 },
+  guestUnsubscribePerIp: { name: "guest-unsub-ip", limit: 30, windowMs: 10 * 60_000 },
 } satisfies Record<string, RatePolicy>;
 
 export function trustedProxyHops(): number {
@@ -111,9 +106,14 @@ export function clientIp(req: NextRequest | Request, hops = trustedProxyHops()):
   return (ip || "unknown").slice(0, 64);
 }
 
+/** The store key for one subject (email, IP, user, table) under a policy: the subject is hashed. */
+export function rateLimitKey(policy: Pick<RatePolicy, "name">, subject: string): string {
+  return `${policy.name}:${createHash("sha256").update(subject).digest("hex")}`;
+}
+
 /** Count a hit and throw RateLimitError (429 + Retry-After) when over the limit. */
 export async function enforceRateLimit(policy: RatePolicy, key: string, now = Date.now()): Promise<void> {
   if (process.env.RATE_LIMIT_DISABLED === "true") return;
-  const { count, resetAt } = await getRateLimitStore().hit(`${policy.name}:${key}`, policy.windowMs, now);
+  const { count, resetAt } = await getRateLimitStore().hit(rateLimitKey(policy, key), policy.windowMs, now);
   if (count > policy.limit) throw new RateLimitError(Math.max(1, Math.ceil((resetAt - now) / 1000)));
 }

@@ -2,15 +2,15 @@
 /**
  * Guest QR storefront in a DOM: menu (quick add, sizes / add-ons sheet, sticky
  * cart) -> cart (server quote: current prices, unavailable items, clear) ->
- * checkout (optional name / phone, cash or online, one idempotent request, no
+ * checkout (optional name / phone, online payment only, one idempotent request, no
  * prices sent) -> order page (key from the URL fragment, header auth, live
- * tracker, test-gateway approve / decline and Razorpay -> server confirmation);
+ * tracker, test-gateway approve / decline and the UPI QR -> server confirmation);
  * bill rendering; the guest browser-state helpers.
  */
 import "@testing-library/jest-dom/vitest";
 import type { ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, within, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, within, waitFor, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GuestMenuScreen } from "@/features/guest/components/GuestMenuScreen";
 import { GuestCartScreen } from "@/features/guest/components/GuestCartScreen";
@@ -20,15 +20,16 @@ import { StorefrontOverlays } from "@/features/guest/components/Chrome";
 import { StorefrontProvider, type GuestMenuData } from "@/features/guest/storefront";
 import { brandFor } from "@/features/guest/brand";
 import { BillView } from "@/features/billing/BillView";
-import { loadCart, saveCart, submissionKey, clearSubmission, rememberOrder, rememberedOrders, orderKeyFor, orderUrl } from "@/features/guest/session";
+import { loadCart, saveCart, submissionKey, clearSubmission, pendingSubmission, rememberOrder, rememberedOrders, orderKeyFor, orderUrl } from "@/features/guest/session";
 import { cartReducer, emptyCart, type CartLine } from "@/features/pos/cart";
 import type { Bill } from "@/server/services/bill";
 
-vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: ReactNode }) => <a href={href} {...rest}>{children}</a> }));
+vi.mock("next/link", () => ({ default: ({ href, children, prefetch: _prefetch, ...rest }: { href: string; children: ReactNode; prefetch?: boolean }) => <a href={href} {...rest}>{children}</a> }));
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: any };
 let calls: Call[] = [];
-let handler: (c: Call) => { status?: number; data?: unknown; error?: { code: string; message: string } };
+/** delayMs: answer late; hang: never answer (until the client gives up and aborts). */
+let handler: (c: Call) => { status?: number; data?: unknown; error?: { code: string; message: string }; delayMs?: number; hang?: boolean };
 
 beforeEach(() => {
   calls = [];
@@ -38,6 +39,12 @@ beforeEach(() => {
     const c: Call = { url, method: init.method ?? "GET", headers: (init.headers ?? {}) as Record<string, string>, body: init.body ? JSON.parse(init.body as string) : undefined };
     calls.push(c);
     const r = handler(c);
+    if (r.hang || r.delayMs) {
+      await new Promise<void>((resolve, reject) => {
+        const t = r.hang ? undefined : setTimeout(resolve, r.delayMs);
+        init.signal?.addEventListener("abort", () => (clearTimeout(t), reject(new DOMException("aborted", "AbortError"))), { once: true });
+      });
+    }
     if (r.error) return new Response(JSON.stringify({ ok: false, error: r.error }), { status: r.status ?? 422 });
     return new Response(JSON.stringify({ ok: true, data: r.data }), { status: 200 });
   }));
@@ -125,6 +132,51 @@ describe("guest storefront — menu", () => {
     expect(saved.map((l) => [l.menuItemId, l.variantId, l.modifierOptionIds, l.qty])).toEqual([["i-dosa", undefined, [], 2], ["i-biryani", "v-large", ["o-hot", "o-raita"], 2]]);
   });
 
+  it("a tapped category keeps the highlight while the page scrolls past the others, then follows the reader again", async () => {
+    const user = userEvent.setup();
+    handler = () => ({ data: menuData() });
+    type Entry = { target: Element; isIntersecting: boolean; boundingClientRect: { top: number } };
+    let report: (entries: Entry[]) => void = () => {};
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(cb: (e: Entry[]) => void) {
+          // the reveal observer is not created for a classic storefront: this is the category observer
+          report = cb;
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+    );
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    inStore(<GuestMenuScreen />);
+    const tabs = screen.getByRole("navigation", { name: "Menu categories" });
+    const tab = (name: string) => within(tabs).getByRole("button", { name });
+    const passing = (id: string) => act(() => report([{ target: document.getElementById(`cat-${id}`)!, isIntersecting: true, boundingClientRect: { top: 140 } }]));
+
+    await user.click(tab("Mains"));
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    expect(scrolled).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    window.dispatchEvent(new Event("scroll"));
+    passing("c1"); // the smooth scroll passes "Tiffin" on its way
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    expect(tab("Tiffin")).not.toHaveAttribute("aria-current");
+
+    await new Promise((r) => setTimeout(r, 200)); // the page stopped scrolling
+    passing("c1"); // the guest now scrolls back up by hand
+    expect(tab("Tiffin")).toHaveAttribute("aria-current", "true");
+
+    // touching the screen mid-jump hands the highlight back to the reader at once
+    await user.click(tab("Mains"));
+    expect(tab("Mains")).toHaveAttribute("aria-current", "true");
+    window.dispatchEvent(new Event("touchstart"));
+    passing("c1");
+    expect(tab("Tiffin")).toHaveAttribute("aria-current", "true");
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
   it("explains when ordering is closed and only shows facts the restaurant entered", () => {
     handler = () => ({ data: menuData() });
     const data = { ...menuData(), ordering: { open: false, message: "We're closed right now — ordering opens at 9:00 AM. You can still browse the menu." } };
@@ -203,14 +255,17 @@ describe("guest storefront — checkout", () => {
     inStore(<GuestCheckoutScreen navigate={navigate} />);
     expect(await screen.findByText("Table T4")).toBeInTheDocument();
     await screen.findByText("Prices and GST confirmed by the café just now.").catch(() => undefined);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled());
     expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
     await user.type(screen.getByLabelText(/Your name/), "Ananya");
     await user.type(screen.getByLabelText(/Phone/), "+91 98765-43210");
-    expect(screen.getByRole("radio", { name: /Simulated online payment/ })).toBeInTheDocument();
-    expect(screen.getByText("Simulated payment — no real money is charged.")).toBeInTheDocument();
+    // Online is the only way a QR order is paid (the server refuses pay-at-the-counter): no cash choice is offered.
+    expect(screen.queryByRole("radio", { name: /^Cash/ })).toBeNull();
+    expect(screen.queryByText(/Pay at the counter/)).toBeNull();
+    expect(screen.getByRole("radio", { name: /Simulated online payment/ })).toBeChecked();
+    expect(screen.getByText(/The café sends the order to the kitchen only after that payment is accepted\./)).toBeInTheDocument();
+    expect(screen.getAllByText(/Simulated payment — no real money is charged\./).length).toBeGreaterThan(0);
     expect(screen.queryByText(/Razorpay/)).toBeNull();
-    await user.click(screen.getByRole("radio", { name: /Simulated online payment/ }));
     const place = screen.getByRole("button", { name: /Place order & pay ₹252\.00/ });
     await user.dblClick(place);
 
@@ -219,10 +274,36 @@ describe("guest storefront — checkout", () => {
     expect(posts).toHaveLength(1);
     expect(posts[0].url).toBe(`/api/qr/t/${TOKEN}/orders`);
     expect(posts[0].headers["Idempotency-Key"]).toMatch(/^qr-/);
-    expect(posts[0].body).toEqual({ items: [{ menuItemId: "i-dosa", qty: 2 }], notes: "no onion", customer: { name: "Ananya", phone: "9876543210" }, paymentMethod: "ONLINE" });
-    expect(JSON.stringify(posts[0].body)).not.toMatch(/price|total|tax/i);
+    // The shown total travels only as a guard (the server refuses on a mismatch); no price or tax is ever sent.
+    expect(posts[0].body).toEqual({ items: [{ menuItemId: "i-dosa", qty: 2 }], notes: "no onion", customer: { name: "Ananya", phone: "9876543210" }, paymentMethod: "ONLINE", expectedTotal: "252.00" });
+    expect(JSON.stringify({ ...posts[0].body, expectedTotal: undefined })).not.toMatch(/price|total|tax/i);
     expect(rememberedOrders()).toEqual([expect.objectContaining({ orderId: "cmord1", key: "key-abc", token: TOKEN })]);
     expect(loadCart(TOKEN).lines).toHaveLength(0);
+  });
+
+  it("cart → checkout (client navigation, same storefront) reuses the server quote for the unchanged cart; a change re-prices", async () => {
+    const user = userEvent.setup();
+    seedCart([line({ qty: 2 })]);
+    handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: menuData() });
+    const page = (ui: ReactNode) => (
+      <StorefrontProvider token={TOKEN} initial={menuData()}>
+        {ui}
+        <StorefrontOverlays />
+      </StorefrontProvider>
+    );
+    const quotes = () => calls.filter((c) => c.url.endsWith("/quote")).length;
+    const { rerender } = render(page(<GuestCartScreen />));
+    await screen.findByRole("link", { name: /^Proceed to checkout/ });
+    expect(quotes()).toBe(1);
+    // The /t/[token] layout (and its provider) stays mounted; only the page changes.
+    rerender(page(<GuestCheckoutScreen navigate={vi.fn()} />));
+    expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled(); // at once: no second request
+    expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹252.00");
+    rerender(page(<GuestCartScreen />));
+    expect(quotes()).toBe(1);
+    await user.click(screen.getByRole("button", { name: "Increase Masala Dosa" }));
+    await waitFor(() => expect(quotes()).toBe(2)); // a changed cart is priced again
+    await screen.findByRole("link", { name: /^Proceed to checkout · ₹378\.00/ });
   });
 
   it("shows the server's refusal, refreshes the menu and re-checks the cart; a retry reuses the same idempotency key", async () => {
@@ -235,25 +316,195 @@ describe("guest storefront — checkout", () => {
       return { data: menuData() };
     };
     inStore(<GuestCheckoutScreen navigate={() => undefined} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Place order" })).toBeEnabled()); // after the server quote
-    await user.click(screen.getByRole("button", { name: "Place order" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled()); // after the server quote
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
     await waitFor(() => expect(calls.some((c) => c.method === "GET" && c.url === `/api/qr/t/${TOKEN}`)).toBe(true));
     await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/quote")).length).toBeGreaterThanOrEqual(2));
-    await user.click(await screen.findByRole("button", { name: "Place order" }));
+    await user.click(await screen.findByRole("button", { name: /^Place order/ }));
     await waitFor(() => expect(calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders"))).toHaveLength(2));
     const keys = calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders")).map((c) => c.headers["Idempotency-Key"]);
     expect(keys[0]).toBe(keys[1]);
-    expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("CASH");
+    expect(calls.find((c) => c.url.endsWith("/orders"))!.body.paymentMethod).toBe("ONLINE");
   });
 
-  it("names Razorpay only for test mode, and says no real money is charged", async () => {
+  describe("slow, lost and refused answers (2026-10-19: a 22.9 s placement was reported as a failure)", () => {
+    const placedOrder = (id: string, replayed = false) => ({ orderId: id, ref: id.toUpperCase(), accessKey: `key-${id}`, replayed });
+    const orderPosts = () => calls.filter((c) => c.method === "POST" && c.url.endsWith("/orders"));
+    const fast = { attemptTimeoutMs: 60, slowAfterMs: 20, delaysMs: [5, 5, 5] };
+    /** A server that keeps one order per Idempotency-Key, like placeGuestOrder. */
+    function keyedServer(answer: (attempt: number) => { hang?: boolean; delayMs?: number; status?: number; error?: { code: string; message: string } } | null) {
+      const orders = new Map<string, ReturnType<typeof placedOrder>>();
+      let attempt = 0;
+      handler = (c) => {
+        if (c.url.endsWith("/quote")) return { data: okQuote(c) };
+        if (c.method !== "POST") return { data: menuData() };
+        const a = answer(attempt++);
+        if (a?.error) return a; // refused: nothing created
+        const key = c.headers["Idempotency-Key"];
+        const prior = orders.get(key);
+        if (!prior) orders.set(key, placedOrder(`cmord${orders.size + 1}`));
+        return { ...a, data: { ...orders.get(key)!, replayed: Boolean(prior) } }; // committed, even if the answer never arrives
+      };
+      return orders;
+    }
+    async function ready(navigate: (url: string) => void, timing?: typeof fast) {
+      inStore(<GuestCheckoutScreen navigate={navigate} timing={timing} />);
+      await waitFor(() => expect(screen.getByRole("button", { name: /^Place order/ })).toBeEnabled());
+    }
+
+    it("a successful answer after 22.9 s (past the old 20 s limit) places the order once — a 'still placing' notice, never an error", async () => {
+      seedCart([line({})]);
+      const navigate = vi.fn();
+      const orders = keyedServer(() => ({ delayMs: 22_900 }));
+      await ready(navigate); // the real limits
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        fireEvent.click(screen.getByRole("button", { name: /^Place order/ }));
+        await act(() => vi.advanceTimersByTimeAsync(8_500));
+        expect(screen.getByRole("status")).toHaveTextContent("Still placing your order — the connection to the café is slow.");
+        await act(() => vi.advanceTimersByTimeAsync(12_000)); // 20.5 s: where the old client gave up
+        expect(screen.queryByRole("alert")).toBeNull();
+        expect(navigate).not.toHaveBeenCalled();
+        await act(() => vi.advanceTimersByTimeAsync(2_600));
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1&pay=1`);
+      expect(orderPosts()).toHaveLength(1);
+      expect(orders.size).toBe(1);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(pendingSubmission(TOKEN)).toBeNull();
+    });
+
+    it("the server places the order but the answer is lost: the SAME request is replayed and recovers that order", async () => {
+      seedCart([line({ qty: 2 })]);
+      const navigate = vi.fn();
+      const orders = keyedServer((n) => (n === 0 ? { hang: true } : null));
+      await ready(navigate, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1&pay=1`));
+      const posts = orderPosts();
+      expect(posts).toHaveLength(2);
+      expect(posts[1].headers["Idempotency-Key"]).toBe(posts[0].headers["Idempotency-Key"]);
+      expect(posts[1].body).toEqual(posts[0].body);
+      expect(orders.size).toBe(1);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(rememberedOrders()).toEqual([expect.objectContaining({ orderId: "cmord1" })]);
+      expect(loadCart(TOKEN).lines).toHaveLength(0);
+    });
+
+    it("double taps while a slow request is in flight send nothing extra", async () => {
+      seedCart([line({})]);
+      const navigate = vi.fn();
+      const orders = keyedServer(() => ({ delayMs: 80 }));
+      await ready(navigate, { ...fast, attemptTimeoutMs: 5_000 });
+      const button = screen.getByRole("button", { name: /^Place order/ });
+      fireEvent.click(button);
+      fireEvent.click(button);
+      await userEvent.setup().dblClick(button);
+      await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+      expect(orderPosts()).toHaveLength(1);
+      expect(orders.size).toBe(1);
+    });
+
+    it("no answer at all: no failure is claimed; 'Check order status' replays the same request — even after a refresh — and recovers the order", async () => {
+      seedCart([line({})]);
+      const navigate = vi.fn();
+      const orders = keyedServer((n) => (n < 4 ? { hang: true } : null)); // the first attempt and all three replays go unanswered
+      await ready(navigate, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
+      expect(await screen.findByTestId("order-unconfirmed")).toHaveTextContent("We couldn't confirm your order yet. It may already have been placed");
+      expect(screen.queryByRole("alert")).toBeNull(); // not an error
+      expect(screen.queryByRole("button", { name: /^Place order/ })).toBeNull(); // no way to place it a second time
+      expect(orderPosts()).toHaveLength(4);
+      expect(navigate).not.toHaveBeenCalled();
+
+      // The guest refreshes: the page still knows the order is unconfirmed.
+      cleanup();
+      inStore(<GuestCheckoutScreen navigate={navigate} timing={fast} />);
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Check order status" }));
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`${orderUrl("cmord1", "key-cmord1")}&new=1&pay=1`));
+      const posts = orderPosts();
+      expect(posts).toHaveLength(5);
+      expect(new Set(posts.map((p) => p.headers["Idempotency-Key"])).size).toBe(1);
+      for (const p of posts) expect(p.body).toEqual(posts[0].body);
+      expect(orders.size).toBe(1);
+      expect(pendingSubmission(TOKEN)).toBeNull();
+    });
+
+    it("a genuine refusal is a clear error, not retried; after a lost answer, a refusal on the replay is final too", async () => {
+      seedCart([line({})]);
+      const soldOut = { status: 422, error: { code: "ValidationError", message: "Item 1: Masala Dosa is sold out at this outlet. Please update your cart." } };
+      let orders = keyedServer(() => soldOut);
+      await ready(() => undefined, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
+      expect(orderPosts()).toHaveLength(1);
+      expect(orders.size).toBe(0);
+      expect(screen.queryByTestId("order-unconfirmed")).toBeNull();
+      expect(pendingSubmission(TOKEN)).toBeNull();
+
+      cleanup();
+      calls = [];
+      orders = keyedServer((n) => (n === 0 ? { status: 502, error: { code: "HTTP502", message: "Bad gateway" } } : soldOut));
+      await ready(() => undefined, fast);
+      await userEvent.setup().click(screen.getByRole("button", { name: /^Place order/ }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("sold out");
+      expect(orderPosts()).toHaveLength(2);
+      expect(orders.size).toBe(0);
+      expect(screen.queryByTestId("order-unconfirmed")).toBeNull();
+      expect(await screen.findByRole("button", { name: /^Place order/ })).toBeInTheDocument();
+    });
+  });
+
+  it("a price that changed after the quote: shows the new total, re-prices the cart, places nothing until the guest confirms", async () => {
+    const user = userEvent.setup();
+    seedCart([line({})]);
+    let price = "120.00";
+    let posted = 0;
+    handler = (c) => {
+      if (c.url.endsWith("/quote")) return { data: quoteOf((c.body.items as Array<{ menuItemId: string; qty: number }>).map((i) => ({ ok: true as const, menuItemId: i.menuItemId, name: "Masala Dosa", unitPrice: price, qty: i.qty }))) };
+      if (c.method === "POST") {
+        posted++;
+        if (c.body.expectedTotal !== "136.50") return { status: 409, error: { code: "PriceChanged", message: "Prices changed since you opened checkout. Check the new total, then place your order again.", details: { total: "136.50" } } as never };
+        return { data: { orderId: "o3", ref: "R3", accessKey: "k3" } };
+      }
+      return { data: menuData() };
+    };
+    const navigate = vi.fn();
+    inStore(<GuestCheckoutScreen navigate={navigate} />);
+    await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹126.00"));
+    price = "130.00"; // the café changes the price while the guest is on this page
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Prices changed since you opened checkout. Check the new total, then place your order again. New total: ₹136.50.");
+    expect(navigate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId("checkout-total")).toHaveTextContent("₹136.50"));
+    await user.click(screen.getByRole("button", { name: /^Place order/ }));
+    await waitFor(() => expect(navigate).toHaveBeenCalled());
+    expect(posted).toBe(2);
+  });
+
+  it("the bank's test environment says no real money is charged, and names no payment gateway", async () => {
     seedCart([line({})]);
     handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: { ...menuData(), payment: { online: true, testMode: false, mode: "SANDBOX" } } });
     inStore(<GuestCheckoutScreen navigate={() => undefined} />, { ...menuData(), payment: { online: true, testMode: false, mode: "SANDBOX" } });
-    expect(await screen.findByRole("radio", { name: /Pay online/ })).toBeInTheDocument();
-    expect(screen.getByText("Razorpay test mode — no real money is charged.")).toBeInTheDocument();
+    expect(await screen.findByRole("radio", { name: /Pay by UPI \(test\)/ })).toBeInTheDocument();
+    expect(screen.getByText("Bank test environment — no real money is charged.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/razorpay/i);
     expect(screen.queryByText("Simulated online payment")).toBeNull();
+  });
+
+  it("without online payment there is no way to order from the table (no cash fallback); nothing is sent", async () => {
+    seedCart([line({})]);
+    const offline = { ...menuData(), payment: { online: false, testMode: false, mode: null } };
+    handler = (c) => (c.url.endsWith("/quote") ? { data: okQuote(c) } : { data: offline });
+    inStore(<GuestCheckoutScreen navigate={() => undefined} />, offline);
+    expect(await screen.findByText(/Online payment isn't available right now, so orders can't be placed from the table/)).toBeInTheDocument();
+    await screen.findByText("₹126.00", { selector: "[data-testid=checkout-total]" });
+    expect(screen.queryByRole("radio", { name: /^Cash/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Place order/ })).toBeDisabled();
+    expect(calls.some((c) => c.url.endsWith("/orders"))).toBe(false);
   });
 
   it("validates the optional phone before sending anything", async () => {
@@ -265,7 +516,7 @@ describe("guest storefront — checkout", () => {
     await user.type(screen.getByLabelText(/Phone/), "12ab");
     await user.tab();
     expect(screen.getByText("Enter a valid mobile number, or leave it empty.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Place order" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Place order/ })).toBeDisabled();
     expect(calls.some((c) => c.url.endsWith("/orders"))).toBe(false);
     expect(normalizePhone("098765 43210")).toBe("9876543210");
     expect(phoneValid("")).toBe(true);
@@ -286,7 +537,7 @@ describe("guest order page", () => {
   it("authenticates with the key from the URL fragment and pays through the server (decline, then approve)", async () => {
     const user = userEvent.setup();
     window.history.replaceState(null, "", "/o/cmord1#k=key-abc");
-    const view = (over: object = {}) => ({ orderId: "cmord1", ref: "ORD001", status: "SENT", fulfilment: "PREPARING", fulfilmentLabel: "Being prepared", tracker: { step: 2, confirmed: true }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, ...over });
+    const view = (over: object = {}) => ({ orderId: "cmord1", ref: "ORD001", status: "SENT", fulfilment: "PREPARING", fulfilmentLabel: "Being prepared", tracker: { step: 2, confirmed: true }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     let confirms = 0;
     handler = (c) => {
       if (c.url.endsWith("/payments/confirm")) {
@@ -321,79 +572,112 @@ describe("guest order page", () => {
     expect(starts[0].headers["Idempotency-Key"]).not.toBe(starts[1].headers["Idempotency-Key"]); // a new attempt after a decline
   });
 
-  describe("Razorpay Checkout", () => {
-    type Opts = { key: string; order_id: string; amount: number; currency: string; handler: (r: Record<string, string>) => void; modal: { ondismiss: () => void } };
-    let opened: Opts[] = [];
-    let behaviour: (o: Opts, failed: (r: unknown) => void) => void;
-    beforeEach(() => {
-      opened = [];
-      window.Razorpay = class {
-        private failed: (r: unknown) => void = () => undefined;
-        constructor(private o: Opts) { opened.push(o); }
-        on(_e: string, cb: (r: unknown) => void) { this.failed = cb; }
-        open() { setTimeout(() => behaviour(this.o, this.failed), 0); }
-      } as never;
-    });
-    afterEach(() => { delete window.Razorpay; });
+  describe("bank UPI QR checkout", () => {
+    const upiView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for your online payment", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, heldForReview: false, expired: false, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
+    const QR = "upi://pay?pa=restora-emulator@invalid&tr=RSTpayU&am=462.00&cu=INR";
+    const started = (expiresAt = new Date(Date.now() + 5 * 60_000).toISOString()) => ({ paymentId: "payU", amount: "462.00", provider: "sbi_upi", mode: "SANDBOX", testMode: false, checkout: { provider: "sbi_upi", mode: "SANDBOX", kind: "upi_qr", qr: QR, intentUri: QR, reference: "RSTpayU", amount: 46200, currency: "INR", expiresAt } });
+    const paidView = () => upiView({ status: "PAID", canPay: false, bill: bill({ kind: "RECEIPT", paymentStatus: "PAID", paid: "462.00", balanceDue: "0.00", total: "462.00" }) });
+    afterEach(() => vi.useRealTimers());
 
-    const rzpView = (over: object = {}) => ({ orderId: "cmord9", ref: "ORD009", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting", tracker: { step: 0, confirmed: false }, bill: bill({ total: "462.00", balanceDue: "462.00" }), canPay: true, payment: { online: true, testMode: false, mode: "SANDBOX" }, pendingPaymentId: null, ...over });
-    const started = { paymentId: "payR", amount: "462.00", provider: "razorpay", mode: "SANDBOX", testMode: false, checkout: { provider: "razorpay", mode: "SANDBOX", keyId: "rzp_test_PUBLIC", orderId: "order_R1", amount: 46200, currency: "INR" } };
-
-    it("opens Checkout with the server's key, gateway order and amount; the signed response is verified by the server", async () => {
+    it("shows the server's QR and amount, asks the server while it is open, and shows success only when the server confirms", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
       const user = userEvent.setup();
       window.history.replaceState(null, "", "/o/cmord9#k=key-9");
-      const success = { razorpay_payment_id: "pay_1", razorpay_order_id: "order_R1", razorpay_signature: "sig" };
-      behaviour = (o) => o.handler(success);
+      let checks = 0;
       handler = (c) => {
-        if (c.url.endsWith("/payments/confirm")) return { data: { ...rzpView({ status: "PAID", canPay: false, bill: bill({ kind: "RECEIPT", paymentStatus: "PAID", paid: "462.00", balanceDue: "0.00", total: "462.00" }) }), paymentStatus: "SUCCESS", pending: false } };
-        if (c.url.endsWith("/payments")) return { data: started };
-        return { data: rzpView() };
+        if (c.url.endsWith("/payments/confirm")) {
+          checks++;
+          return checks < 3 ? { data: { ...upiView({ pendingPaymentId: "payU" }), paymentStatus: "PENDING", pending: true } } : { data: { ...paidView(), paymentStatus: "SUCCESS", pending: false } };
+        }
+        if (c.url.endsWith("/payments")) return { data: started() };
+        return { data: upiView() };
       };
       render(<GuestOrderScreen orderId="cmord9" />);
-      expect(await screen.findByTestId("gateway-mode")).toHaveTextContent("Razorpay test mode");
-      expect(screen.getByTestId("pay-at-counter")).toHaveTextContent("Pay at the counter");
+      expect(await screen.findByTestId("gateway-mode")).toHaveTextContent("Bank test environment — no real money is charged.");
+      expect(screen.getByTestId("gateway-mode")).not.toHaveTextContent(/razorpay/i);
+      expect(screen.queryByTestId("pay-at-counter")).toBeNull();
       await user.click(screen.getByRole("button", { name: /Pay online .*462\.00/ }));
+      const qr = await screen.findByTestId("upi-qr");
+      expect(within(qr).getByRole("img", { name: /UPI QR code for ₹462\.00/ })).toBeInTheDocument();
+      expect(within(qr).getByTestId("upi-amount")).toHaveTextContent("₹462.00");
+      expect(within(qr).getByTestId("upi-waiting")).toHaveTextContent(/Waiting for the bank to confirm · QR valid for [45]:\d\d/);
+      // Two checks: the bank has not confirmed. The QR stays; nothing says "paid".
+      for (let i = 0; i < 2; i++) await act(async () => { vi.advanceTimersByTime(4000); });
+      await waitFor(() => expect(checks).toBe(2));
+      expect(screen.getByTestId("upi-qr")).toBeInTheDocument();
+      expect(screen.queryByText("Payment successful. Thank you!")).toBeNull();
+      // Third check: the server answers with the committed, verified payment.
+      await act(async () => { vi.advanceTimersByTime(4000); });
       expect(await screen.findByText("Payment successful. Thank you!")).toBeInTheDocument();
-      expect(opened).toEqual([expect.objectContaining({ key: "rzp_test_PUBLIC", order_id: "order_R1", amount: 46200, currency: "INR" })]);
-      const confirms = calls.filter((c) => c.url.endsWith("/payments/confirm")).map((c) => c.body);
-      expect(confirms).toEqual([{ paymentId: "payR", gateway: success }]);
+      expect(screen.queryByTestId("upi-qr")).toBeNull();
+      // Every check sent only the payment id: never a client "paid" claim.
+      expect(calls.filter((c) => c.url.endsWith("/payments/confirm")).map((c) => c.body)).toEqual([{ paymentId: "payU" }, { paymentId: "payU" }, { paymentId: "payU" }]);
     });
 
-    it("a closed window is a status check, not a failure; a declined attempt is reported while the window stays open", async () => {
+    it("an expired QR asks the server once more, then offers a new QR", async () => {
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
       const user = userEvent.setup();
       window.history.replaceState(null, "", "/o/cmord9#k=key-9");
-      behaviour = (o, failed) => {
-        failed({ error: { description: "Card declined by the bank." } });
-        o.modal.ondismiss();
-      };
       handler = (c) => {
-        if (c.url.endsWith("/payments/confirm")) return { data: { ...rzpView({ pendingPaymentId: "payR" }), paymentStatus: "PENDING", pending: true } };
-        if (c.url.endsWith("/payments")) return { data: started };
-        return { data: rzpView() };
+        if (c.url.endsWith("/payments/confirm")) return { data: { ...upiView({ pendingPaymentId: "payU" }), paymentStatus: "PENDING", pending: true } };
+        if (c.url.endsWith("/payments")) return { data: started(new Date(Date.now() - 1000).toISOString()) };
+        return { data: upiView() };
       };
       render(<GuestOrderScreen orderId="cmord9" />);
       await user.click(await screen.findByRole("button", { name: /Pay online/ }));
-      // The bank's reason stays on screen after the window closes (the server still decides the state).
-      expect(await screen.findByRole("alert")).toHaveTextContent("Card declined by the bank. You can try again.");
-      expect(calls.filter((c) => c.url.endsWith("/payments/confirm")).map((c) => c.body)).toEqual([{ paymentId: "payR" }]);
-      // Resuming asks the server first (the UPI app may have completed it), then reopens the SAME checkout.
-      behaviour = (o) => o.modal.ondismiss();
-      await user.click(await screen.findByRole("button", { name: /Resume payment/ }));
-      await waitFor(() => expect(opened).toHaveLength(2));
-      // Closed again without a decline: "not completed", not "declined".
-      await waitFor(() => expect(screen.getAllByRole("status").some((el) => /^Payment not completed\. If money left your account/.test(el.textContent ?? ""))).toBe(true));
-      const after = calls.filter((c) => c.method === "POST").map((c) => c.url.replace("/api/qr/orders/cmord9", ""));
-      expect(after).toEqual(["/payments", "/payments/confirm", "/payments/confirm", "/payments", "/payments/confirm"]);
+      expect(await screen.findByTestId("upi-expired")).toHaveTextContent("This QR has expired");
+      expect(screen.queryByRole("img", { name: /UPI QR code/ })).toBeNull();
+      for (let i = 0; i < 3; i++) await act(async () => { vi.advanceTimersByTime(4000); });
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments/confirm"))).toHaveLength(1)); // one final check, not a loop
+      expect(screen.getByRole("button", { name: "Get a new QR" })).toBeEnabled();
+    });
+
+    it("offers 'Open a UPI app' only on a phone, with the bank's intent link; never for the emulator's test QR", async () => {
+      const ua = vi.spyOn(window.navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Linux; Android 14) Mobile");
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord9#k=key-9");
+      handler = (c) => (c.url.endsWith("/payments") ? { data: started() } : c.url.endsWith("/payments/confirm") ? { data: { ...upiView(), paymentStatus: "PENDING" } } : { data: upiView() });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      await user.click(await screen.findByRole("button", { name: /Pay online/ }));
+      expect(await screen.findByTestId("upi-intent")).toHaveAttribute("href", QR);
+      cleanup();
+      handler = (c) => (c.url.endsWith("/payments") ? { data: { ...started(), mode: "MOCK", checkout: { ...started().checkout, mode: "MOCK" } } } : { data: upiView({ payment: { online: true, testMode: false, mode: "MOCK" } }) });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      await user.click(await screen.findByRole("button", { name: /Pay online/ }));
+      expect(await screen.findByTestId("upi-qr")).toHaveTextContent("Emulator test QR — no real money; no UPI app can pay it.");
+      expect(screen.queryByTestId("upi-intent")).toBeNull();
+      ua.mockRestore();
+    });
+
+    it("a payment confirmed after the fulfilment window: 'payment received, see the staff' — never 'preparing', no second payment", async () => {
+      window.history.replaceState(null, "", "/o/cmord9#k=key-9");
+      handler = () => ({ data: upiView({ heldForReview: true, canPay: false, fulfilmentLabel: "Payment received late — the café is checking your order", bill: bill({ total: "462.00", balanceDue: "0.00", paid: "462.00", paymentStatus: "PAID" }) }) });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("Payment received — please see the staff");
+      expect(screen.getByTestId("held-for-review")).toHaveTextContent("The café will either send it to the kitchen or refund you");
+      expect(screen.getByTestId("order-stage")).toHaveTextContent("Payment received late");
+      expect(screen.queryByRole("button", { name: /^Pay/ })).toBeNull();
+    });
+
+    it("an unpaid order past the fulfilment window cannot be paid now", async () => {
+      window.history.replaceState(null, "", "/o/cmord9#k=key-9");
+      handler = () => ({ data: upiView({ expired: true, canPay: false }) });
+      render(<GuestOrderScreen orderId="cmord9" />);
+      expect(await screen.findByTestId("order-expired")).toHaveTextContent("can't be paid now");
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Order not sent");
+      expect(screen.queryByRole("button", { name: /^Pay/ })).toBeNull();
     });
   });
 
   it("live tracker follows the kitchen; checkout's \"pay online\" opens the payment once and is not replayed by a refresh", async () => {
     window.history.replaceState(null, "", "/o/cmord5#k=key-5&new=1&pay=1");
-    const v = (over: object = {}) => ({ orderId: "cmord5", ref: "ORD005", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, ...over });
+    const v = (over: object = {}) => ({ orderId: "cmord5", ref: "ORD005", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill(), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder: [], split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
     handler = (c) => (c.url.endsWith("/payments") ? { data: { paymentId: "p5", amount: "630.00", provider: "mock", testMode: true } } : { data: v() });
     const { unmount } = render(<GuestOrderScreen orderId="cmord5" />);
     expect(await screen.findByRole("region", { name: "Test payment gateway" })).toBeInTheDocument(); // opened without a tap
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Complete your payment");
+    // The caption agrees with the headline: the order waits for this payment, not for the restaurant.
+    expect(screen.getByTestId("order-stage")).toHaveTextContent("Waiting for your online payment");
     expect(window.location.hash).toBe("#k=key-5"); // one-shot flags removed
     expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(1);
     unmount();
@@ -407,6 +691,131 @@ describe("guest order page", () => {
     expect(steps[1]).toHaveAttribute("aria-current", "step");
     expect(steps[0]).toHaveTextContent("Done.");
     expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(1); // no second auto-start
+  });
+
+  describe("splitting the bill and ordering again", () => {
+    const reorder = [
+      { menuItemId: "i-biryani", name: "Biryani", variantId: "v-large", modifierOptionIds: ["o-hot"], modifierLabels: ["Spice: Hot"], unitPrice: 380, modifiersPerUnit: 0, taxPct: 5, qty: 2, notes: "no onions" },
+      { menuItemId: "i-dosa", name: "Masala Dosa", modifierOptionIds: [], modifierLabels: [], unitPrice: 120, modifiersPerUnit: 0, taxPct: 5, qty: 1 },
+    ];
+    const v = (over: object = {}) => ({ orderId: "cmord7", ref: "ORD007", status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE", fulfilmentLabel: "Waiting for the restaurant to accept", tracker: { step: 0, confirmed: false }, bill: bill({ total: "630.00", balanceDue: "630.00" }), canPay: true, payment: { online: true, testMode: true }, pendingPaymentId: null, reorder, split: { sharesPaid: 0, minParts: 2, maxParts: 12 }, ...over });
+
+    it("shows each person's part before they pay, sends only the number of people, and shows the server's amount", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = (c) => (c.url.endsWith("/payments") ? { data: { paymentId: "pS1", amount: "210.00", provider: "mock", testMode: true, share: { parts: 3, remainingParts: 3, last: false } } } : { data: v() });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      expect(screen.getByTestId("split-parts")).toHaveTextContent("2");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹315.00. One more person pays the rest");
+      expect(screen.getByRole("button", { name: "Fewer people" })).toBeDisabled(); // 2 is the least
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      expect(screen.getByTestId("split-parts")).toHaveTextContent("3");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹210.00. 2 more people pay the rest");
+      await user.click(screen.getByRole("button", { name: /Pay your part .*210\.00/ }));
+      const gw = await screen.findByRole("region", { name: "Test payment gateway" });
+      expect(within(gw).getByTestId("share-note")).toHaveTextContent("Your part of the bill, split 3 ways");
+      expect(gw).toHaveTextContent("210.00");
+      const start = calls.find((c) => c.url.endsWith("/payments"))!;
+      expect(start.body).toEqual({ parts: 3 }); // never an amount
+      expect(start.headers["Idempotency-Key"]).toBeTruthy();
+    });
+
+    it("the last person pays what is left; a part that is paid says what is still due", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      const half = (over: object = {}) => v({ bill: bill({ total: "630.00", balanceDue: "315.00", paid: "315.00", paymentStatus: "PARTIALLY_PAID" }), split: { sharesPaid: 1, minParts: 2, maxParts: 12 }, ...over });
+      let state = half();
+      handler = (c) => {
+        if (c.url.endsWith("/payments/confirm")) {
+          state = half({ bill: bill({ total: "630.00", balanceDue: "105.00", paid: "525.00", paymentStatus: "PARTIALLY_PAID" }), split: { sharesPaid: 2, minParts: 2, maxParts: 12 } });
+          return { data: { ...state, paymentStatus: "SUCCESS" } };
+        }
+        if (c.url.endsWith("/payments")) return { data: { paymentId: "pS2", amount: "210.00", provider: "mock", testMode: true, share: { parts: 3, remainingParts: 2, last: false } } };
+        return { data: state };
+      };
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      expect(screen.getByTestId("split-share")).toHaveTextContent("Your part: ₹157.50. One more person pays the rest");
+      expect(screen.getByTestId("split-share")).toHaveTextContent("One part is already paid.");
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await user.click(within(await screen.findByRole("region", { name: "Test payment gateway" })).getByRole("button", { name: "Approve payment" }));
+      expect(await screen.findByText(/Your part is paid\. ₹105\.00 is still due on this bill\./)).toBeInTheDocument();
+    });
+
+    it("a new ask is a new payment: the same ask retried keeps its key, a different number of people does not", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = (c) => {
+        if (c.url.endsWith("/payments")) return { error: { code: "VALIDATION_ERROR", message: "Could not start the payment." } };
+        return { data: v() };
+      };
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await user.click(await screen.findByRole("button", { name: "Split the bill" }));
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await screen.findByRole("alert");
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(2));
+      await user.click(screen.getByRole("button", { name: "More people" }));
+      await user.click(screen.getByRole("button", { name: /Pay your part/ }));
+      await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/payments"))).toHaveLength(3));
+      const keys = calls.filter((c) => c.url.endsWith("/payments")).map((c) => c.headers["Idempotency-Key"]);
+      expect(keys[1]).toBe(keys[0]);
+      expect(keys[2]).not.toBe(keys[0]);
+    });
+
+    it("offers no split once nothing is due, or when online payment is off", async () => {
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = () => ({ data: v({ canPay: false }) });
+      const { unmount } = render(<GuestOrderScreen orderId="cmord7" />);
+      // Still OPEN (waiting for its online payment): the counter cannot settle it, so it is not offered.
+      expect(await screen.findByTestId("pay-unavailable")).toHaveTextContent("hasn't been sent to the kitchen");
+      expect(screen.queryByTestId("pay-at-counter")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Split the bill" })).toBeNull();
+      unmount();
+      // Already in the kitchen (an order from before online-only checkout): the counter takes the balance.
+      handler = () => ({ data: v({ canPay: false, status: "SENT", fulfilment: "PREPARING" }) });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      expect(await screen.findByTestId("pay-at-counter")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Split the bill" })).toBeNull();
+    });
+
+    it("\"Order the same again\" fills the cart with the same dishes and opens it; the cart screen prices them", async () => {
+      const user = userEvent.setup();
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      rememberOrder({ orderId: "cmord7", key: "key-7", token: "tok-7", ref: "ORD007", at: "2026-10-04T08:00:00.000Z" });
+      saveCart("tok-7", cartReducer(emptyCart("DINE_IN"), { type: "add", line: { menuItemId: "i-dosa", name: "Masala Dosa", modifierOptionIds: [], modifierLabels: [], unitPrice: 120, modifiersPerUnit: 0, taxPct: 5, qty: 1 } }));
+      handler = () => ({ data: v() });
+      const assign = vi.fn();
+      const original = window.location;
+      Object.defineProperty(window, "location", { configurable: true, value: { ...original, assign, hash: original.hash, pathname: original.pathname, search: original.search } });
+      try {
+        render(<GuestOrderScreen orderId="cmord7" />);
+        await user.click(await screen.findByRole("button", { name: "Order the same again" }));
+        expect(assign).toHaveBeenCalledWith("/t/tok-7/cart");
+      } finally {
+        Object.defineProperty(window, "location", { configurable: true, value: original });
+      }
+      const lines = loadCart("tok-7").lines;
+      expect(lines.map((l) => [l.menuItemId, l.qty])).toEqual([["i-dosa", 2], ["i-biryani", 2]]); // merged with what was already in the cart
+      expect(lines[1]).toMatchObject({ variantId: "v-large", modifierOptionIds: ["o-hot"], notes: "no onions" });
+      expect(calls.some((c) => c.method === "POST")).toBe(false); // nothing is ordered until the guest checks out
+    });
+
+    it("has no \"Order the same again\" without the menu link, or for an order with no dishes", async () => {
+      window.history.replaceState(null, "", "/o/cmord7#k=key-7");
+      handler = () => ({ data: v() });
+      const { unmount } = render(<GuestOrderScreen orderId="cmord7" />);
+      await screen.findByTestId("order-stage");
+      expect(screen.queryByRole("button", { name: "Order the same again" })).toBeNull(); // opened from a bookmark: no table menu to go back to
+      unmount();
+      rememberOrder({ orderId: "cmord7", key: "key-7", token: "tok-7", ref: "ORD007", at: "2026-10-04T08:00:00.000Z" });
+      handler = () => ({ data: v({ reorder: [] }) });
+      render(<GuestOrderScreen orderId="cmord7" />);
+      await screen.findByTestId("order-stage");
+      expect(screen.queryByRole("button", { name: "Order the same again" })).toBeNull();
+    });
   });
 
   it("without a key it explains instead of calling the API", async () => {

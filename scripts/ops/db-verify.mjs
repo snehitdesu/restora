@@ -3,9 +3,11 @@
 // switching traffic to it, or any time). Read-only.
 //
 //   node scripts/ops/db-verify.mjs --url postgresql://...  [--fingerprint] [--json out.json]
+//                                  [--expect-migration <name>]
 //
 // Checks:
 //   - migrations: no failed / half-applied migration; this release's newest migration present
+//     (or the one named by --expect-migration, e.g. for a database still on an older release)
 //   - constraints: every foreign key / check constraint is VALIDATED
 //   - business invariants (H1 payment safety and the stock ledger):
 //       * no payment refunded beyond its amount
@@ -19,9 +21,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { dbName, expectedMigration, parseArgs, psql, redactUrl } from "./pg-common.mjs";
+import { dbName, parseArgs, psql, redactUrl, resolveExpectedMigration } from "./pg-common.mjs";
 
-export async function verifyDatabase(url, { fingerprint = false } = {}) {
+export async function verifyDatabase(url, { fingerprint = false, expectMigration } = {}) {
+  const expected = resolveExpectedMigration(expectMigration);
   const problems = [];
   const info = { database: dbName(url) };
 
@@ -29,7 +32,7 @@ export async function verifyDatabase(url, { fingerprint = false } = {}) {
   const migs = await psql(url, `SELECT migration_name, finished_at IS NOT NULL, rolled_back_at IS NOT NULL FROM "_prisma_migrations" ORDER BY migration_name`);
   const failed = migs.filter(([, fin, rb]) => fin !== "t" && rb !== "t");
   if (failed.length) problems.push(`migrations not finished: ${failed.map((m) => m[0]).join(", ")}`);
-  const expected = expectedMigration();
+  info.expectedMigration = expected;
   info.latestMigration = migs.filter(([, fin, rb]) => fin === "t" && rb !== "t").map((m) => m[0]).sort().at(-1) ?? null;
   if (expected && !migs.some(([n, fin, rb]) => n === expected && fin === "t" && rb !== "t")) problems.push(`expected migration ${expected} is not applied`);
 
@@ -74,14 +77,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const args = parseArgs(process.argv.slice(2));
   const url = args.url ?? process.env.VERIFY_DATABASE_URL;
   if (!url) {
-    console.error("usage: db-verify.mjs --url postgresql://... [--fingerprint] [--json out.json]");
+    console.error("usage: db-verify.mjs --url postgresql://... [--fingerprint] [--json out.json] [--expect-migration <name>]");
     process.exit(2);
   }
-  verifyDatabase(url, { fingerprint: Boolean(args.fingerprint) })
+  Promise.resolve()
+    .then(() => verifyDatabase(url, { fingerprint: Boolean(args.fingerprint), expectMigration: args["expect-migration"] }))
     .then((r) => {
       if (args.json) fs.writeFileSync(args.json, JSON.stringify(r, null, 2));
       const rows = Object.values(r.info.tables).reduce((a, t) => a + t.count, 0);
-      console.log(`database ${r.info.database}: ${Object.keys(r.info.tables).length} tables, ${rows} rows, ${r.info.foreignKeys} foreign keys, latest migration ${r.info.latestMigration}`);
+      console.log(`database ${r.info.database}: ${Object.keys(r.info.tables).length} tables, ${rows} rows, ${r.info.foreignKeys} foreign keys, latest migration ${r.info.latestMigration} (expected ${r.info.expectedMigration})`);
       console.log(`invariants: ${JSON.stringify(r.info.invariants)}`);
       if (r.ok) console.log("INTEGRITY OK");
       else console.error(`INTEGRITY FAILED:\n- ${r.problems.join("\n- ")}`);

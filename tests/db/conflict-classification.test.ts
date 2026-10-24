@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { Prisma } from "@prisma/client";
-import { isLedgerKeyRace, isSerializationConflict } from "@/server/db/conflict";
+import { isDatabaseBusy, isLedgerKeyRace, isSerializationConflict } from "@/server/db/conflict";
 import { runInTx } from "@/server/services/_workflow";
 import { fail } from "@/server/api/respond";
 
@@ -78,5 +78,31 @@ describe("database outage classification (Phase 12 restart drill)", () => {
     expect(isDatabaseUnavailable(known("P2002", "Unique constraint failed"))).toBe(false);
     expect(isDatabaseUnavailable(new Error("the database system is shutting down"))).toBe(false); // not a Prisma error
     expect(fail(known("P2025", "Record not found")).status).toBe(500);
+  });
+});
+
+describe("SQLite write-lock wait (busy) classification", () => {
+  it.each([
+    ["P1008", "Socket timeout (the database failed to respond to a query within the configured timeout— see https://pris.ly/d/sqlite-connector for more details).", true],
+    ["P2028", "Transaction API error: Unable to start a transaction in the given time.", true],
+    ["P2028", "Transaction API error: Transaction already closed: A query cannot be executed on an expired transaction. The timeout for this transaction was 20000 ms, however 20012 ms passed since the start of the transaction.", true],
+    ["P2010", "Raw query failed. Code: `5`. Message: `database is locked`", true],
+    ["P2028", "Transaction API error: some other transaction problem", false],
+    ["P2002", "Unique constraint failed on the fields: (`idempotencyKey`)", false],
+    ["P2025", "Record to update not found.", false],
+  ] as const)("%s %s → busy: %s", (code, message, busy) => {
+    expect(isDatabaseBusy(known(code, message))).toBe(busy);
+  });
+
+  it("plain errors that merely mention the words are not database busy", () => {
+    expect(isDatabaseBusy(new Error("database is locked"))).toBe(false);
+    expect(isDatabaseBusy(null)).toBe(false);
+  });
+
+  it("a busy database answers 503 Busy + Retry-After (the client retries idempotent requests), never a 500", async () => {
+    const res = fail(known("P1008", "Socket timeout (the database failed to respond to a query within the configured timeout)"));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("1");
+    expect((await res.json()).error.code).toBe("Busy");
   });
 });

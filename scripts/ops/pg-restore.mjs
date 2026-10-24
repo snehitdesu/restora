@@ -4,7 +4,7 @@
 //   BACKUP_ENCRYPTION_KEY=... node scripts/ops/pg-restore.mjs \
 //       --file /var/backups/restora/restora-restora-20261005T020000Z.dump.enc \
 //       --target postgresql://restora_owner:...@db/restora_restore \
-//       [--confirm-overwrite restora_restore] [--skip-verify]
+//       [--confirm-overwrite restora_restore] [--skip-verify] [--expect-migration <name>]
 //
 // Safety:
 //   - the target is ALWAYS explicit (--target); DATABASE_URL is never used implicitly;
@@ -16,23 +16,31 @@
 //   - pg_restore runs in ONE transaction with --exit-on-error: it applies
 //     completely or not at all;
 //   - afterwards scripts/ops/db-verify.mjs runs (migrations, constraints, payment /
-//     ledger invariants) and the row counts are compared with the manifest.
+//     ledger invariants) and the row counts are compared with the manifest. It
+//     requires this checkout's newest migration unless --expect-migration names
+//     another (restoring a backup of an older release, e.g. a rollback).
 // Restore as the schema OWNER role (the role migrations run as), then re-apply
 // scripts/ops/pg-roles.sql grants if the target is a new database.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { dbName, decryptFile, encryptionKey, isEncrypted, parseArgs, psql, redactUrl, run, sha256File } from "./pg-common.mjs";
+import { backupMeetsExpected, dbName, decryptFile, encryptionKey, isEncrypted, parseArgs, psql, redactUrl, resolveExpectedMigration, run, sha256File } from "./pg-common.mjs";
 import { verifyDatabase } from "./db-verify.mjs";
 
-export async function restore({ file, target, confirmOverwrite, key, verify = true }) {
+export async function restore({ file, target, confirmOverwrite, key, verify = true, expectMigration }) {
+  // Resolve before touching anything, so a mistyped --expect-migration refuses up front.
+  const expected = verify ? resolveExpectedMigration(expectMigration) : null;
   if (!fs.existsSync(file)) throw new Error(`backup file not found: ${file}`);
   const manifestFile = `${file}.json`;
   const manifest = fs.existsSync(manifestFile) ? JSON.parse(fs.readFileSync(manifestFile, "utf8")) : null;
   if (manifest) {
     const sha = await sha256File(file);
     if (sha !== manifest.sha256) throw new Error("backup checksum does not match its manifest: the file is corrupted or was modified");
+    // Before the target is touched: a backup older than the expected migration can never pass verification.
+    if (verify && !backupMeetsExpected(manifest.latestMigration, expected)) {
+      throw new Error(`backup's newest migration is ${manifest.latestMigration}, older than the expected ${expected}; nothing was restored. If this is a backup of an older release (e.g. the pre-upgrade backup), pass --expect-migration ${manifest.latestMigration}`);
+    }
   } else console.warn("WARNING: no manifest next to the backup: checksum and row counts cannot be compared");
 
   const db = dbName(target);
@@ -56,7 +64,7 @@ export async function restore({ file, target, confirmOverwrite, key, verify = tr
   }
   const result = { database: db, restoredFrom: path.basename(file), durationMs: Date.now() - t0, verified: null };
   if (verify) {
-    const v = await verifyDatabase(target);
+    const v = await verifyDatabase(target, { expectMigration: expected });
     const mismatched = manifest ? Object.entries(manifest.counts ?? {}).filter(([t, n]) => v.info.tables[t]?.count !== n).map(([t, n]) => `${t}: restored ${v.info.tables[t]?.count} vs backup ${n}`) : [];
     result.verified = { ok: v.ok && !mismatched.length, problems: [...v.problems, ...mismatched], invariants: v.info.invariants, latestMigration: v.info.latestMigration };
     if (!result.verified.ok) throw Object.assign(new Error(`restored database FAILED verification: ${result.verified.problems.join("; ")}`), { result });
@@ -67,8 +75,8 @@ export async function restore({ file, target, confirmOverwrite, key, verify = tr
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const args = parseArgs(process.argv.slice(2));
   (async () => {
-    if (!args.file || !args.target) throw new Error("usage: pg-restore.mjs --file <backup> --target postgresql://... [--confirm-overwrite <db>] [--skip-verify]");
-    const r = await restore({ file: args.file, target: args.target, confirmOverwrite: args["confirm-overwrite"], key: encryptionKey(), verify: !args["skip-verify"] });
+    if (!args.file || !args.target) throw new Error("usage: pg-restore.mjs --file <backup> --target postgresql://... [--confirm-overwrite <db>] [--skip-verify] [--expect-migration <name>]");
+    const r = await restore({ file: args.file, target: args.target, confirmOverwrite: args["confirm-overwrite"], key: encryptionKey(), verify: !args["skip-verify"], expectMigration: args["expect-migration"] });
     console.log(JSON.stringify({ level: "info", msg: "restore complete", ...r }, null, 2));
   })().catch((e) => {
     console.error(`RESTORE FAILED: ${redactUrl(e.message)}`);

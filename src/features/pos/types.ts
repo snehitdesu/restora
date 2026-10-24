@@ -54,4 +54,8 @@ export type OrderDTO = {
   items: OrderItemDTO[];
   payments?: PaymentDTO[];
   kots?: Array<{ id: string; number: number; status: string }>;
+  /** A guest QR order paid online in full, but confirmed after the fulfilment window: not sent; staff send or refund it. */
+  heldForReview?: boolean;
+  /** Desktop only: outcome of a cloud-mirrored action (not present on counter sales). */
+  sync?: { state: string; outcome?: string; detail?: string; opId?: string };
 };

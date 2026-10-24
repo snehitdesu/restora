@@ -14,7 +14,9 @@ import { type AccessContext, ForbiddenError, NotFoundError, ValidationError, Una
 import { passwordProblems, PASSWORD_MIN_LENGTH } from "@/constants/password";
 import { createStaff, issuePasswordLink, setUserActive } from "@/server/services/staff";
 import { issuePasswordToken, INVALID_TOKEN_MESSAGE, PASSWORD_TOKEN_TTL_MS } from "@/server/auth/passwordTokens";
-import { completePasswordToken, requestPasswordReset, changePassword, setPasswordLinkDelivery, RESET_ACCEPTED_MESSAGE } from "@/server/auth/account";
+import { completePasswordToken, requestPasswordReset, changePassword, setPasswordLinkDelivery, RESET_ACCEPTED_MESSAGE, RESET_MANAGER_MESSAGE } from "@/server/auth/account";
+import { settleAfterCommit } from "@/server/services/afterCommit";
+import { runAfterResponse } from "@/server/api/afterResponse";
 import { SESSION_COOKIE } from "@/constants/auth";
 import { POST as resetRoute } from "@/app/api/auth/password/reset/route";
 import { POST as completeRoute } from "@/app/api/auth/password/complete/route";
@@ -33,6 +35,12 @@ async function user(org: string, tag: string, memberships: Array<{ role: string;
   const u = await prisma.user.create({ data: { organizationId: org, email: `${tag}-${RUN}@pw.test`, name: tag, passwordHash: password === "x" ? "x" : await hashPassword(password) } });
   for (const m of memberships) await prisma.membership.create({ data: { organizationId: org, userId: u.id, outletId: m.outletId, role: m.role } });
   return u.id;
+}
+
+/** Reset links are only emailed to a confirmed address. */
+async function verified(id: string) {
+  await prisma.user.update({ where: { id }, data: { emailVerifiedAt: new Date() } });
+  return id;
 }
 
 const ip = () => `10.9.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250) + 1}`;
@@ -109,7 +117,7 @@ describe("staff setup link", () => {
     const stale = await createSession(prisma, created.id);
 
     const done = await completePasswordToken(prisma, { token, password: GOOD }, { ip: "1.2.3.4" });
-    expect(done).toEqual({ email: created.email, purpose: "SETUP" });
+    expect(done).toEqual({ email: created.email, purpose: "SETUP", notice: "not_verified" });
     expect(await validateToken(prisma, stale.token)).toBeNull();
     const stored = await prisma.user.findUniqueOrThrow({ where: { id: created.id } });
     expect(stored.passwordHash).not.toContain(GOOD);
@@ -210,7 +218,7 @@ describe("self-service reset", () => {
   it("with a delivery channel: link is delivered, resets the password, revokes all sessions, and is single-use", async () => {
     const sent: Array<{ to: string; token: string }> = [];
     setPasswordLinkDelivery(async (m) => { sent.push({ to: m.to, token: m.token }); });
-    const id = await user(orgId, "resetme", [{ role: "CASHIER", outletId: outletA }], GOOD);
+    const id = await verified(await user(orgId, "resetme", [{ role: "CASHIER", outletId: outletA }], GOOD));
     const s1 = await createSession(prisma, id);
     await requestPasswordReset(prisma, { email: `RESETME-${RUN}@pw.test` });
     await requestPasswordReset(prisma, { email: `nobody2-${RUN}@pw.test` });
@@ -272,13 +280,52 @@ describe("password routes", () => {
     const unknown = await json(await resetRoute(req("/api/auth/password/reset", { email: `ghost-${RUN}@pw.test` })));
     expect(known).toEqual(unknown);
     expect(known.status).toBe(202);
-    expect(known.body.data.message).toBe(RESET_ACCEPTED_MESSAGE);
+    // No email set up in this deployment: the page must not promise a link that cannot be sent.
+    expect(known.body.data).toEqual({ delivery: "manager", message: RESET_MANAGER_MESSAGE });
     expect((await resetRoute(req("/api/auth/password/reset", { email: `ghost-${RUN}@pw.test` }, { origin: "https://evil.example" }))).status).toBe(403);
     expect((await resetRoute(req("/api/auth/password/reset", { email: "not-an-email" }))).status).toBe(422);
     const statuses: number[] = [];
     for (let i = 0; i < 6; i++) statuses.push((await resetRoute(req("/api/auth/password/reset", { email: `flood-${RUN}@pw.test` }))).status);
     expect(statuses.slice(0, 5).every((s) => s === 202)).toBe(true);
     expect(statuses[5]).toBe(429);
+  });
+
+  it("reset: with email set up, answers before the lookup and send finish, the same for known and unknown accounts", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const sent: string[] = [];
+    setPasswordLinkDelivery(async (m) => {
+      await gate; // a slow mail provider
+      sent.push(m.to);
+    });
+    const id = await verified(await user(orgId, "routeslow", [{ role: "CASHIER", outletId: outletA }], GOOD));
+    const known = await json(await resetRoute(req("/api/auth/password/reset", { email: `routeslow-${RUN}@pw.test` })));
+    const unknown = await json(await resetRoute(req("/api/auth/password/reset", { email: `ghost-slow-${RUN}@pw.test` })));
+    // Both answered while the send was still blocked: response time cannot depend on the account.
+    expect(known).toEqual(unknown);
+    expect(known.body.data).toEqual({ delivery: "email", message: RESET_ACCEPTED_MESSAGE });
+    expect(sent).toHaveLength(0);
+    release();
+    await settleAfterCommit();
+    expect(sent).toEqual([`routeslow-${RUN}@pw.test`]);
+    // The request row was written before the send; the delivery is its own row (the audit log is append-only).
+    const request = await prisma.auditLog.findFirstOrThrow({ where: { entityId: id, action: "PASSWORD_RESET_REQUEST" } });
+    expect(JSON.parse(request.after!)).toMatchObject({ delivered: false });
+    const delivered = await prisma.auditLog.findFirstOrThrow({ where: { entityId: id, action: "PASSWORD_RESET_DELIVERED" } });
+    expect(JSON.parse(delivered.after!)).toMatchObject({ delivered: true });
+  });
+
+  it("reset: work that fails after the response (database down) is logged and never escapes", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      runAfterResponse("password-reset-request", async () => {
+        throw new Error("database is locked");
+      });
+      await expect(settleAfterCommit()).resolves.toBeUndefined();
+      expect(errors.mock.calls.flat().map(String).join("\n")).toContain("post-commit side effect failed");
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("complete: sets the password from a link; bad tokens get the uniform 422", async () => {
@@ -290,7 +337,7 @@ describe("password routes", () => {
     expect(weak.status).toBe(422);
     expect(weak.body.error.details.fieldErrors.password.length).toBeGreaterThan(0);
     const ok = await json(await completeRoute(req("/api/auth/password/complete", { token: created.setup.token, password: GOOD })));
-    expect(ok).toEqual({ status: 200, body: { ok: true, data: { email: created.email, purpose: "SETUP" } } });
+    expect(ok).toEqual({ status: 200, body: { ok: true, data: { email: created.email, purpose: "SETUP", notice: "not_verified" } } });
     expect((await completeRoute(req("/api/auth/password/complete", { token: created.setup.token, password: GOOD }, { origin: "https://evil.example" }))).status).toBe(403);
   });
 
@@ -312,8 +359,9 @@ describe("password routes", () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) => vi.spyOn(console, m));
     try {
       setPasswordLinkDelivery(async () => { throw new Error("smtp down"); });
-      await user(orgId, "logcheck", [{ role: "CASHIER", outletId: outletA }], GOOD);
+      await verified(await user(orgId, "logcheck", [{ role: "CASHIER", outletId: outletA }], GOOD));
       await resetRoute(req("/api/auth/password/reset", { email: `logcheck-${RUN}@pw.test` }));
+      await settleAfterCommit(); // the reset runs after the response
       const created = await createStaff(owner, { email: `log2-${RUN}@pw.test`, name: "Log Hire", role: "CASHIER", outletId: outletA });
       await completeRoute(req("/api/auth/password/complete", { token: created.setup.token, password: GOOD2 }));
       const logged = spies.flatMap((s) => s.mock.calls.flat().map(String)).join("\n");

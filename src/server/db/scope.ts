@@ -57,13 +57,6 @@ export function assertOutletAccess(ctx: AccessContext, outletId: string): void {
   }
 }
 
-/** Throw if a loaded row belongs to another organization. */
-export function assertSameOrg(ctx: AccessContext, row: { organizationId: string } | null): void {
-  if (!row || row.organizationId !== ctx.organizationId) {
-    throw new ForbiddenError("Cross-organization access denied");
-  }
-}
-
 export class ForbiddenError extends Error {
   status = 403;
   constructor(message = "Forbidden") {

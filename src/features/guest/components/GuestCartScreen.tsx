@@ -4,9 +4,10 @@ import Link from "next/link";
 import { useState } from "react";
 import { formatMoney } from "@/lib/format";
 import { needsConfiguration } from "@/features/pos/modifiers";
-import { GUEST_MAX_QTY, useServerQuote, useStorefront, type Quote } from "@/features/guest/storefront";
+import { GUEST_MAX_QTY, guestSeat, useServerQuote, useStorefront, type Quote } from "@/features/guest/storefront";
 import { OfflineBanner, TopBar } from "@/features/guest/components/Chrome";
 import { Alert, Spinner, Stepper } from "@/features/guest/components/Bits";
+import { CouponBox } from "@/features/guest/components/GuestOffers";
 import { SfIcon } from "@/features/guest/components/SfIcon";
 
 /** Subtotal / GST / total — the server's figures when known, else the estimate (labelled). */
@@ -18,6 +19,12 @@ export function Totals({ quote, estimate, loading }: { quote: Quote | null; esti
         <dt>Subtotal</dt>
         <dd>{formatMoney(quote ? quote.subtotal : estimate.subtotal)}</dd>
       </div>
+      {quote && Number(quote.discount ?? 0) > 0 && (
+        <div>
+          <dt>Discount{quote.coupon?.ok ? ` (${quote.coupon.code})` : ""}</dt>
+          <dd data-testid="cart-discount">− {formatMoney(quote.discount ?? 0)}</dd>
+        </div>
+      )}
       {quote && taxes.length > 0 ? (
         taxes.map((t) => (
           <div key={t.ratePct}>
@@ -63,7 +70,7 @@ export function GuestCartScreen() {
           <div>
             <h1 className="sf-page-title">Your order</h1>
             <p className="sf-page-sub">
-              Table {data.table.code} · {count} {count === 1 ? "item" : "items"}
+              {guestSeat(data.table)} · {count} {count === 1 ? "item" : "items"}
             </p>
           </div>
         </div>
@@ -167,6 +174,8 @@ export function GuestCartScreen() {
               <textarea id="guest-order-note" name="notes" className="sf-textarea" maxLength={300} rows={2} value={cart.notes} onChange={(e) => dispatch({ type: "setNotes", notes: e.target.value.slice(0, 300) })} placeholder="Allergies, timing, anything we should know" />
             </label>
 
+            <CouponBox quote={quote} loading={loading} />
+
             <section className="sf-card" aria-label="Bill summary">
               <Totals quote={quote} estimate={estimate} loading={loading} />
               <p className="sf-note">
@@ -216,7 +225,7 @@ export function GuestCartScreen() {
                   {loading || !quote ? "Checking your cart…" : closed ? "Ordering is closed" : "Remove unavailable items to continue"}
                 </button>
               ) : (
-                <Link href={`${base}/checkout`} className="sf-btn sf-btn-primary sf-btn-lg sf-btn-block">
+                <Link prefetch href={`${base}/checkout`} className="sf-btn sf-btn-primary sf-btn-lg sf-btn-block">
                   Proceed to checkout · {formatMoney(quote!.total)}
                 </Link>
               )}

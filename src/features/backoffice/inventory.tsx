@@ -9,7 +9,7 @@
  * unit.
  */
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouterWithWatchdog } from "@/lib/navigation";
 import { useMemo, useState } from "react";
 import { api } from "@/lib/api/client";
 import { createKeyedSubmitter } from "@/lib/idempotency";
@@ -43,7 +43,7 @@ export type LedgerRow = { id: string; createdAt: string; materialId: string; mat
 type TransferLine = { id: string; materialId: string; requestedQty: string; dispatchedQty: string; receivedQty: string; damagedQty: string };
 type Transfer = Doc & { fromOutletId: string; toOutletId: string; notes: string | null; dispatchedAt: string | null; receivedAt: string | null; lines?: TransferLine[]; _count?: { lines: number } };
 type IssueLine = { id: string; materialId: string; qty: string };
-type Issue = Doc & { outletId: string; fromDepartmentId: string | null; toDepartmentId: string | null; notes: string | null; issuedAt: string | null; lines?: IssueLine[]; _count?: { lines: number } };
+type Issue = Doc & { outletId: string; indentId?: string | null; fromDepartmentId: string | null; toDepartmentId: string | null; notes: string | null; issuedAt: string | null; lines?: IssueLine[]; _count?: { lines: number } };
 type CountLine = { id: string; materialId: string; bookQty: string; physicalQty: string; variance: string; costImpact: string | null };
 type StockCount = Doc & { outletId: string; departmentId: string | null; frozenAt: string | null; approvedAt: string | null; lines?: CountLine[]; _count?: { lines: number } };
 type WastageLine = { id: string; materialId: string; qty: string; estCost: string | null };
@@ -103,7 +103,7 @@ function DepartmentSelect({ depts, value, onChange, empty = "—", required }: {
 type StockView = "all" | "low" | "negative";
 
 export function StockScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { outletId, can } = useShell();
   const showCost = useCanSeeCost();
   const [dialog, setDialog] = useState<null | "opening" | "adjust">(null);
@@ -424,7 +424,7 @@ function CreateTransferDialog({ open, onClose, onDone }: { open: boolean; onClos
 }
 
 export function TransfersScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const outletName = useOutletName();
   const [open, setOpen] = useState(false);
@@ -538,7 +538,10 @@ export function TransferDetail({ id }: { id: string }) {
 
 const issueFields: LineField[] = [{ key: "qty", label: "Qty", required: true, min: 0 }];
 
-function CreateIssueDialog({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: (id: string) => void }) {
+/** An issue made from an approved indent: the lines start as what is still outstanding, in base units. */
+export type IndentToIssue = { id: string; number: string; outstanding: Array<{ materialId: string; qty: number }> };
+
+export function CreateIssueDialog({ open, onClose, onDone, indent }: { open: boolean; onClose: () => void; onDone: (id: string) => void; indent?: IndentToIssue }) {
   const [submitKeyed] = useState(() => createKeyedSubmitter("iss"));
   const outletId = useOutletId();
   const materials = useMaterials(open);
@@ -546,15 +549,16 @@ function CreateIssueDialog({ open, onClose, onDone }: { open: boolean; onClose: 
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [notes, setNotes] = useState("");
-  const [lines, setLines] = useState<LineDraft[]>([emptyLine(issueFields)]);
+  const fresh = () => (indent?.outstanding.length ? indent.outstanding.map((o) => ({ ...emptyLine(issueFields), materialId: o.materialId, qty: String(o.qty) })) : [emptyLine(issueFields)]);
+  const [lines, setLines] = useState<LineDraft[]>(fresh);
   return (
-    <FormDialog open={open} onClose={onClose} title="New stock issue" size="lg" submitLabel="Create issue (draft)"
-      description="An issue moves stock from one department (or stock not yet assigned to one) to another. Posting writes an ISSUE row out of the source and one into the destination at the same cost; the outlet's total stock does not change."
+    <FormDialog open={open} onClose={onClose} title={indent ? `Issue stock for indent ${indent.number}` : "New stock issue"} size="lg" submitLabel="Create issue (draft)"
+      description={indent ? `Quantities start at what the indent still needs, in each material's base unit. The indent closes by itself once everything it asked for has been issued.` : "An issue moves stock from one department (or stock not yet assigned to one) to another. Posting writes an ISSUE row out of the source and one into the destination at the same cost; the outlet's total stock does not change."}
       onSubmit={() => {
-        const body = { outletId, fromDepartmentId: opt(from), toDepartmentId: opt(to), notes: opt(notes), lines: toApiLines(lines, issueFields) };
+        const body = { outletId, indentId: indent?.id, fromDepartmentId: opt(from), toDepartmentId: opt(to), notes: opt(notes), lines: toApiLines(lines, issueFields) };
         return submitKeyed(body, (idempotencyKey) => api<Issue>("/api/inventory/issues", { method: "POST", body, idempotencyKey }));
       }}
-      onDone={(r) => { setLines([emptyLine(issueFields)]); onDone(r.id); }}>
+      onDone={(r) => { setLines(fresh()); onDone(r.id); }}>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="From department" name="fromDepartmentId" hint="Empty = stock not assigned to a department (where goods receipts land)"><DepartmentSelect depts={depts.data} value={from} onChange={setFrom} empty="Unassigned stock" /></Field>
         <Field label="To department" name="toDepartmentId" required><DepartmentSelect depts={depts.data} value={to} onChange={setTo} empty="Select…" required /></Field>
@@ -566,7 +570,7 @@ function CreateIssueDialog({ open, onClose, onDone }: { open: boolean; onClose: 
 }
 
 export function IssuesScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const depts = useDepartments(outletId);
   const [open, setOpen] = useState(false);
@@ -604,7 +608,7 @@ export function IssueDetail({ id }: { id: string }) {
                 }} />
             } />
           <Card className="mb-4">
-            <Details cols={4} items={[["From", deptName(depts.data, d.fromDepartmentId)], ["To", deptName(depts.data, d.toDepartmentId)], ["Created", formatDateTime(d.createdAt, outlet?.timezone)], ["Issued", formatDateTime(d.issuedAt, outlet?.timezone)], ["Notes", d.notes]]} />
+            <Details cols={4} items={[["From", deptName(depts.data, d.fromDepartmentId)], ["To", deptName(depts.data, d.toDepartmentId)], ["Created", formatDateTime(d.createdAt, outlet?.timezone)], ["Issued", formatDateTime(d.issuedAt, outlet?.timezone)], ["Fulfils indent", d.indentId ? <Link key="ind" href={`/procurement/indents/${d.indentId}`} className="font-medium text-brand-600 hover:underline">Open the indent</Link> : null], ["Notes", d.notes]]} />
           </Card>
           <DataTable label="Issue lines" rows={d.lines ?? []} rowKey={(l) => l.id}
             columns={[{ key: "m", header: "Material", cell: (l) => materialLabel(materials.byId, l.materialId) }, { key: "q", header: "Qty", numeric: true, cell: (l) => `${formatQty(l.qty)} ${unitOf(materials.byId, l.materialId)}` }]} />
@@ -632,7 +636,7 @@ function CreateCountDialog({ open, onClose, onDone }: { open: boolean; onClose: 
 }
 
 export function StockCountsScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const depts = useDepartments(outletId);
   const [open, setOpen] = useState(false);
@@ -797,7 +801,7 @@ function CreateWastageDialog({ open, onClose, onDone }: { open: boolean; onClose
 }
 
 export function WastageScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet } = useShell();
   const showCost = useCanSeeCost();
   const [open, setOpen] = useState(false);
@@ -891,7 +895,7 @@ function CreateBatchDialog({ open, onClose, onDone }: { open: boolean; onClose: 
 }
 
 export function ProductionScreen() {
-  const router = useRouter();
+  const router = useRouterWithWatchdog();
   const { can, outlet, outletId } = useShell();
   const materials = useMaterials();
   const depts = useDepartments(outletId);

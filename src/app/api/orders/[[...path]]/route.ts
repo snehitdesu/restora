@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/server/db/client";
 import { createRouter } from "@/server/api/router";
 import { createOrder, placeOrder, addOrderItem, updateOrderItem, applyDiscount, submitOrder, fireOrderItems, cancelOrder, getOrder, listOrders, addOrderRound, removeOrderItem, requestBill } from "@/server/services/orders";
+import { transferOrderTable, setOrderTable, listQrOrdersForTables, mergeOrders, splitOrder } from "@/server/services/orderOps";
 import { getOrderBill } from "@/server/services/bill";
 import { issueInvoice, setOrderBuyer } from "@/server/services/invoicing";
 import { runAfterCommit } from "@/server/services/afterCommit";
@@ -30,6 +31,8 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
       return placeOrder(ctx, input as never).then((o) => ((input as { submit?: unknown }).submit === true && !o.replayed ? kotsCreated(ctx, o.id, o) : o));
     },
   },
+  // Guest QR orders that may still need a table (the common QR carries none); before ":id" so it is not read as an order id.
+  { method: "GET", path: "qr-tables", handler: ({ ctx, query }) => listQrOrdersForTables(ctx, query) },
   { method: "GET", path: ":id", handler: ({ ctx, params }) => getOrder(prisma, ctx, params.id) },
   // Bill / receipt (view, print, reprint): a rendering of the server's order — identical on every request.
   { method: "GET", path: ":id/bill", handler: ({ ctx, params }) => getOrderBill(prisma, ctx, params.id) },
@@ -46,5 +49,11 @@ export const { GET, POST, PATCH, DELETE } = createRouter([
   { method: "POST", path: ":id/request-bill", handler: ({ ctx, params }) => requestBill(ctx, params.id) },
   { method: "POST", path: ":id/submit", handler: ({ ctx, params }) => submitOrder(ctx, params.id).then((r) => kotsCreated(ctx, params.id, r)) },
   { method: "POST", path: ":id/fire", handler: ({ ctx, params }) => fireOrderItems(ctx, params.id).then((r) => (r.length ? kotsCreated(ctx, params.id, r) : r)) },
+  // Floor operations: move to another table, fold another order in, take lines off onto a new bill (Idempotency-Key makes the split retry-safe).
+  { method: "POST", path: ":id/transfer", handler: ({ ctx, params, body }) => transferOrderTable(ctx, params.id, body as never) },
+  // Set the table of an order with none (common QR), or change it; a running order at a table is moved as above.
+  { method: "POST", path: ":id/table", handler: ({ ctx, params, body }) => setOrderTable(ctx, params.id, body as never) },
+  { method: "POST", path: ":id/merge", handler: ({ ctx, params, body }) => mergeOrders(ctx, params.id, body as never) },
+  { method: "POST", path: ":id/split", handler: ({ ctx, params, body, req }) => splitOrder(ctx, params.id, body as never, req.headers.get("idempotency-key") ?? undefined) },
   { method: "POST", path: ":id/cancel", reauth: "order.void", handler: ({ ctx, params, body }) => cancelOrder(ctx, params.id, z.object({ reason: z.string().min(3).max(500) }).parse(body).reason) },
 ]);

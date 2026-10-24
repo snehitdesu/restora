@@ -281,14 +281,19 @@ async function verifyAsarIntegrity() {
 async function main() {
   if (!isWin && !isMac) throw new Error("desktop:verify runs on Windows or macOS (the packaged targets)");
   if (!fs.existsSync(EXE)) throw new Error(`${path.relative(root, EXE)} not found; run npm run desktop:pack first`);
+  let completed = false;
   try {
     await verifyFuses();
     await verifyUpgrade();
     await verifyFirstRun();
     await verifyAttacks();
     await verifyAsarIntegrity();
+    completed = true;
   } finally {
-    fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+    // A failed run keeps its disposable data folders: their logs (logs/main.log, logs/server.log) are the
+    // only record of why the packaged app did not start (a lost log once left a start-up timeout unexplained).
+    if (completed && results.every((r) => r.ok)) fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+    else console.log(`Kept the test data and app logs for inspection: ${work}`);
   }
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} packaged-app checks passed`);

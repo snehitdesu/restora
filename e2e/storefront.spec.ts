@@ -69,7 +69,9 @@ test.describe("customer storefront", () => {
       await noSideScroll(g, `cart @${w}`);
       await g.getByRole("link", { name: /^Proceed to checkout/ }).click();
       await expect(g.getByRole("heading", { name: "Checkout" })).toBeVisible();
-      await expect(g.getByRole("radio", { name: /Cash/ })).toBeChecked();
+      // QR orders are paid online before they reach the kitchen: the only choice offered is the (test) online payment.
+      await expect(g.getByRole("radio", { name: /Simulated online payment/ })).toBeChecked();
+      await expect(g.getByRole("radio", { name: /Cash/ })).toHaveCount(0);
       await noSideScroll(g, `checkout @${w}`);
       await guest.context.close();
     }
@@ -106,8 +108,17 @@ test.describe("customer storefront", () => {
       await g.getByRole("button", { name: "Place order" }).click();
       await g.waitForURL(/\/o\/[^/#]+#k=/);
       const id = decodeURIComponent(new URL(g.url()).pathname.split("/").pop()!);
-      expect((await order(page.request, id)).total).toBe("47.25");
-      await expect(g.getByRole("heading", { name: "Order received" })).toBeVisible();
+      let o = await order(page.request, id);
+      expect(o.total).toBe("47.25");
+      // Not in the kitchen until the online payment for the server's total is verified.
+      expect(o.kots ?? []).toHaveLength(0);
+      const gw = g.getByRole("region", { name: "Test payment gateway" });
+      await expect(gw).toContainText(money(47.25));
+      await gw.getByRole("button", { name: "Approve payment" }).click();
+      await expect(g.getByRole("heading", { name: "Order confirmed" })).toBeVisible();
+      o = await order(page.request, id);
+      expect(o.status).toBe("PAID");
+      expect(o.kots).toHaveLength(1);
     } finally {
       await apiCall(manager, "POST", `/api/menu/outlets/${outlet.id}/items/${chai.id}`, { price: null });
       await apiCall(manager, "POST", `/api/menu/outlets/${outlet.id}/items/${tikka.id}`, { soldOut: false });
@@ -161,6 +172,50 @@ test.describe("customer storefront", () => {
     const onTable = (await apiData<{ items: Array<{ id: string }> }>(page.request, `/api/orders?outletId=${outlet.id}&tableId=${tableId}&take=50`)).items.map((o) => o.id);
     expect(onTable).toEqual(expect.arrayContaining([idA, idB]));
     for (const d of [a, b, c]) await d.context.close();
+  });
+
+  test("SF-005 a tapped category is highlighted once (no cycling through the ones scrolled past); compact controls keep 44 px hit areas", async ({ page, browser }) => {
+    const outlet = await outletByCode(page.request, CENTRAL);
+    const { token } = await tableToken(outlet.id, "F5");
+    const guest = await phone(browser, 360, 740);
+    const g = guest.page;
+    try {
+      await g.goto(`/t/${token}`);
+      const tabs = g.getByRole("navigation", { name: "Menu categories" });
+      await expect(tabs).toBeVisible();
+      const names = await tabs.getByRole("button").allTextContents();
+      expect(names.length).toBeGreaterThan(2);
+      const last = names[names.length - 1];
+      await g.evaluate(() => {
+        const w = window as unknown as { __seq: string[] };
+        w.__seq = [];
+        new MutationObserver(() => {
+          const a = document.querySelector('.sf-tab[aria-current="true"]')?.textContent ?? "";
+          if (w.__seq[w.__seq.length - 1] !== a) w.__seq.push(a);
+        }).observe(document.querySelector(".sf-tabs")!, { subtree: true, attributes: true, attributeFilter: ["aria-current"] });
+      });
+      await tabs.getByRole("button", { name: last }).click();
+      await expect(g.getByRole("heading", { level: 2, name: last })).toBeInViewport();
+      await g.waitForTimeout(800); // the smooth scroll has settled
+      expect(await g.evaluate(() => (window as unknown as { __seq: string[] }).__seq)).toEqual([last]);
+
+      // a tap 3 px outside the drawn tab / Add button still lands on it
+      const hit = await g.evaluate(() => {
+        const probe = (el: Element | null) => {
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          const x = r.left + r.width / 2;
+          const on = (y: number) => { const t = document.elementFromPoint(x, y); return Boolean(t && (t === el || el.contains(t))); };
+          return { height: r.height, above: on(r.top - 3), below: on(r.bottom + 2) };
+        };
+        const add = [...document.querySelectorAll(".sf-add")].find((b) => { const r = b.getBoundingClientRect(); return r.top > 160 && r.bottom < innerHeight - 100; }) ?? null;
+        return { tab: probe(document.querySelector('.sf-tab[aria-current="true"]')), add: probe(add) };
+      });
+      expect(hit.tab).toMatchObject({ above: true, below: true });
+      expect(hit.add!.height).toBeGreaterThanOrEqual(44);
+    } finally {
+      await guest.context.close();
+    }
   });
 
   test("SF-004 double tap = one order; closed hours stop ordering but not browsing; a disabled QR fails safely", async ({ page, browser }) => {

@@ -92,6 +92,21 @@ export async function runInTx<T>(db: Client, fn: (tx: Tx) => Promise<T>, opts: T
 
 const SQLITE_WRITE_KEY = "sqlite:write";
 
+/**
+ * Transaction-scoped lock on `key` for a read-then-decide check that its isolation
+ * level does not protect (a count under READ COMMITTED). PostgreSQL: an advisory
+ * lock, so transactions taking the same key pass this point one after the other
+ * across every process and instance; it is released when the transaction commits
+ * or rolls back, so a retry or a failure never leaves it held. Once it is granted,
+ * every earlier holder has committed and the next statement sees its rows.
+ * SQLite: a no-op — a transaction that has written holds the only write lock, and
+ * runInTx already queues every write.
+ */
+export async function lockInTx(tx: Tx, key: string): Promise<void> {
+  if (!onPostgres()) return;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+}
+
 /** Throw a clear error on an illegal state transition. */
 export function assertTransition<T extends string>(table: Record<T, T[]>, from: T, to: T, label: string): void {
   if (!canTransition(table, from, to)) {

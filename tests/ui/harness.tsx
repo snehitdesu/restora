@@ -42,15 +42,15 @@ export const OUT_A = "out-a";
 export const OUT_B = "out-b";
 export const ME = "u1";
 
-export function shell(permissions: Permission[], outletId = OUT_A, orgWide = false): ShellData {
+export function shell(permissions: Permission[], outletId = OUT_A, orgWide = false, desktop = false): ShellData {
   return {
-    user: { id: ME, name: "Asha", email: "a@x" }, roles: ["MANAGER"], orgWide, permissions, outletId,
+    user: { id: ME, name: "Asha", email: "a@x" }, roles: ["MANAGER"], orgWide, desktop, permissions, outletId,
     outlets: [{ id: OUT_A, code: "A1", name: "Andheri", timezone: "Asia/Kolkata" }, { id: OUT_B, code: "B1", name: "Bandra", timezone: "Asia/Kolkata" }],
   };
 }
 
-export const renderAs = (ui: React.ReactNode, permissions: Permission[], opts: { outletId?: string; orgWide?: boolean } = {}) =>
-  render(<ToastProvider><ShellProvider shell={shell(permissions, opts.outletId ?? OUT_A, opts.orgWide)}>{ui}</ShellProvider></ToastProvider>);
+export const renderAs = (ui: React.ReactNode, permissions: Permission[], opts: { outletId?: string; orgWide?: boolean; desktop?: boolean } = {}) =>
+  render(<ToastProvider><ShellProvider shell={shell(permissions, opts.outletId ?? OUT_A, opts.orgWide, opts.desktop)}>{ui}</ShellProvider></ToastProvider>);
 
 export const posts = () => state.calls.filter((c) => c.method !== "GET");
 export const gets = (path: string) => state.calls.filter((c) => c.method === "GET" && c.path === path);

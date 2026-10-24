@@ -293,7 +293,7 @@ async function boot() {
     NEXT_TELEMETRY_DISABLED: "1",
     DATABASE_URL: sqliteUrl(paths.dbFile),
     ...prismaEngineEnv(),
-    AUTH_SECRET: authSecret, EXPORT_DIR: paths.exports, RATE_LIMIT_STORE: "memory", AHAROS_DESKTOP: "1" });
+    AUTH_SECRET: authSecret, EXPORT_DIR: paths.exports, RATE_LIMIT_STORE: "memory", AHAROS_DESKTOP: "1", AHAROS_INSTALL_ID: config.installId, AHAROS_SECURE_STORAGE: codec.available ? "1" : "0" });
 
   setSplashStatus("Checking restaurant database…");
   const tool = new DbTool(serverDir, toolEnv(), log);

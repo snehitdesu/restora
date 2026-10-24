@@ -160,14 +160,13 @@ describe("production configuration (Phase 9)", () => {
     expect(() => validateProductionEnv({ ...base, PUBLIC_BASE_URL: "https://pos.example.com", ALERT_WEBHOOK_URL: "https://hooks.example.com/x", METRICS_TOKEN: "m".repeat(32), LOG_LEVEL: "warn" })).not.toThrow();
   });
 
-  it("Razorpay must be fully configured; test keys are flagged; the emulator override is refused", () => {
+  it("legacy Razorpay keys must be complete; test keys are flagged; live keys are refused on mock / demo deployments", () => {
     const rzp = { PAYMENT_PROVIDER: "razorpay", RAZORPAY_KEY_ID: "rzp_live_AbC123", RAZORPAY_KEY_SECRET: "live-secret-value", RAZORPAY_WEBHOOK_SECRET: "webhook-secret-value" };
     expect(() => validateProductionEnv({ ...base, ...rzp })).not.toThrow();
     fails({ ...rzp, RAZORPAY_KEY_ID: "" }, /RAZORPAY_KEY_ID must be a Razorpay key id/);
     fails({ ...rzp, RAZORPAY_KEY_ID: "pk_live_123" }, /RAZORPAY_KEY_ID must be a Razorpay key id/);
     fails({ ...rzp, RAZORPAY_KEY_SECRET: "" }, /RAZORPAY_KEY_SECRET is required/);
     fails({ ...rzp, RAZORPAY_WEBHOOK_SECRET: "" }, /RAZORPAY_WEBHOOK_SECRET is required/);
-    fails({ ...rzp, RAZORPAY_API_BASE: "http://localhost:9" }, /RAZORPAY_API_BASE/);
     let msg = "";
     try {
       validateProductionEnv({ ...base, ...rzp, RAZORPAY_KEY_SECRET: "", RAZORPAY_KEY_ID: "rzp_live_shown?no" });
@@ -187,6 +186,31 @@ describe("production configuration (Phase 9)", () => {
     expect(() => validateProductionEnv({ ...base, VERCEL: "1", CRON_SECRET: "a-sufficiently-long-cron-secret-value" })).not.toThrow();
     expect(productionEnvWarnings({ ...base, VERCEL: "1", DEMO_DEPLOYMENT: "true" }).join("\n")).toMatch(/DEMO_DEPLOYMENT=true/);
     expect(productionEnvWarnings({ ...base, VERCEL: "1" }).join("\n")).toMatch(/VERCEL=1/);
+  });
+
+  it("online payment provider: no unknown names, never the UPI bank emulator in production; Razorpay and SBI are announced as unavailable", () => {
+    fails({ PAYMENT_PROVIDER: "stripe" }, /PAYMENT_PROVIDER must be one of sbi_upi, upi_emulator, mock, razorpay/);
+    fails({ PAYMENT_PROVIDER: "upi_emulator" }, /PAYMENT_PROVIDER=upi_emulator \(test bank emulator\) is refused in production/);
+    for (const name of ["UPI_EMULATOR_BASE", "UPI_EMULATOR_API_KEY", "UPI_EMULATOR_MERCHANT_ID", "UPI_EMULATOR_WEBHOOK_SECRET"]) fails({ PAYMENT_PROVIDER: "sbi_upi", [name]: "x" }, new RegExp(`${name} \\(test bank emulator\\) must not be set in production`));
+    // A non-public test deployment may run the emulator (and says so on every boot).
+    expect(() => validateProductionEnv({ ...base, PAYMENT_PROVIDER: "upi_emulator", UPI_EMULATOR_BASE: "http://127.0.0.1:9", ALLOW_MOCK_PROVIDERS: "true" })).not.toThrow();
+    expect(productionEnvWarnings({ ...base, PAYMENT_PROVIDER: "upi_emulator", ALLOW_MOCK_PROVIDERS: "true" }).join("\n")).toMatch(/TEST bank emulator, no real money/);
+    // ...but never on Vercel Production, whatever opt-in is set.
+    fails({ VERCEL_ENV: "production", PAYMENT_PROVIDER: "upi_emulator", UPI_EMULATOR_BASE: "http://127.0.0.1:9", ALLOW_MOCK_PROVIDERS: "true" }, /ALLOW_MOCK_PROVIDERS must not be true on a Vercel Production deployment/);
+    fails({ VERCEL_ENV: "production", PAYMENT_PROVIDER: "upi_emulator", ALLOW_MOCK_PROVIDERS: "true" }, /PAYMENT_PROVIDER=upi_emulator is a test adapter and is refused on a Vercel Production deployment/);
+    expect(() => validateProductionEnv({ ...base, VERCEL_ENV: "preview", PAYMENT_PROVIDER: "upi_emulator", ALLOW_MOCK_PROVIDERS: "true" })).not.toThrow();
+    // SBI is selectable (it boots) but reports itself as not implemented: online payment stays unavailable.
+    expect(() => validateProductionEnv({ ...base, PAYMENT_PROVIDER: "sbi_upi" })).not.toThrow();
+    expect(productionEnvWarnings({ ...base, PAYMENT_PROVIDER: "sbi_upi" }).join("\n")).toMatch(/SBI UPI adapter is not implemented yet/);
+    // Razorpay boots (legacy settlement / refunds) but is announced as retired for new payments.
+    expect(productionEnvWarnings({ ...base, PAYMENT_PROVIDER: "razorpay", RAZORPAY_KEY_ID: "rzp_live_AbC123", RAZORPAY_KEY_SECRET: "s", RAZORPAY_WEBHOOK_SECRET: "w" }).join("\n")).toMatch(/Razorpay is retired for new online payments/);
+    // Legacy keys, when present, must be complete whatever the provider.
+    fails({ PAYMENT_PROVIDER: "sbi_upi", RAZORPAY_KEY_ID: "rzp_live_AbC123" }, /RAZORPAY_KEY_SECRET is required with RAZORPAY_KEY_ID/);
+    // The fulfilment window and the recheck window are bounded.
+    fails({ GUEST_FULFILMENT_WINDOW_MINUTES: "0" }, /GUEST_FULFILMENT_WINDOW_MINUTES/);
+    fails({ GUEST_FULFILMENT_WINDOW_MINUTES: "600" }, /GUEST_FULFILMENT_WINDOW_MINUTES/);
+    fails({ PAYMENT_RECHECK_MAX_AGE_HOURS: "1000" }, /PAYMENT_RECHECK_MAX_AGE_HOURS/);
+    expect(() => validateProductionEnv({ ...base, GUEST_FULFILMENT_WINDOW_MINUTES: "15", PAYMENT_RECHECK_MAX_AGE_HOURS: "26" })).not.toThrow();
   });
 
   it("names variables and reasons only — never a value — and warns about risky defaults", () => {
@@ -209,6 +233,15 @@ describe("production configuration (Phase 9)", () => {
     expect(set).not.toMatch(/PUBLIC_BASE_URL is unset|NEXT_PUBLIC_SITE_URL is unset/);
     expect(productionEnvWarnings({ ...base, DATABASE_URL: "file:./x.db", AHAROS_DESKTOP: "1" })).toEqual([]);
     expect(productionEnvWarnings({ NODE_ENV: "development" })).toEqual([]);
+  });
+
+  it("the shared rate-limit store is accepted, and a PostgreSQL deployment still counting per process is warned about", () => {
+    expect(() => validateProductionEnv({ ...base, RATE_LIMIT_STORE: "database" })).not.toThrow();
+    expect(() => validateProductionEnv({ ...base, RATE_LIMIT_STORE: "Memory" })).not.toThrow();
+    fails({ RATE_LIMIT_STORE: "redis" }, /RATE_LIMIT_STORE must be "memory".*"database"/);
+    expect(productionEnvWarnings({ ...base }).join("\n")).toMatch(/RATE_LIMIT_STORE is not "database"/);
+    expect(productionEnvWarnings({ ...base, RATE_LIMIT_STORE: "database" }).join("\n")).not.toMatch(/RATE_LIMIT_STORE/);
+    expect(productionEnvWarnings({ ...base, DATABASE_URL: "file:./x.db" }).join("\n")).not.toMatch(/RATE_LIMIT_STORE/); // SQLite is one instance
   });
 });
 
@@ -286,6 +319,17 @@ describe("health, readiness and graceful shutdown", () => {
     c.restore();
     expect(order).toEqual(["first", "second"]);
     expect(isDraining()).toBe(true); // stays down: the process is about to exit
+  });
+
+  it("after the drain the process keeps refusing for the grace period, so requests that were not read yet get a 503, not a reset", async () => {
+    const c = capture();
+    const t0 = Date.now();
+    const done = shutdown("TEST", { delayMs: 0, timeoutMs: 5_000, graceMs: 250 });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(beginRequest()).toBeNull(); // nothing was in flight, yet it is still refusing while it waits
+    await done;
+    c.restore();
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(240);
   });
 
   it("a hung shutdown task cannot block exit beyond the deadline", async () => {

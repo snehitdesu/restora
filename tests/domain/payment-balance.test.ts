@@ -217,4 +217,23 @@ describe("payment balance invariant", () => {
     expect(settled.filter((v) => v.orderSettled)).toHaveLength(1);
     expect(await successfulTotal(s.id)).toBe(100);
   });
+
+  // 2026-10-19: settlement counted only SUCCESS payments while the balance rule (and the bill) count a partly
+  // refunded (PARTIAL) payment at its full amount. A split bill with a part refunded before settlement then took
+  // the exact remainder, yet never became PAID, and no further payment was allowed: a stuck order.
+  it("a split bill whose first part was partly refunded settles when the remainder is paid", async () => {
+    const o = await order();
+    const first = await createPayment(ctx, o.id, { method: "CASH", amount: 40 });
+    await verifyPayment(ctx, first.id);
+    expect((await refundPayment(ctx, first.id, { amount: 10 })).payment.status).toBe("PARTIAL");
+    await expect(createPayment(ctx, o.id, { method: "CASH", amount: 61 })).rejects.toBeInstanceOf(ValidationError); // 60 outstanding
+    const rest = await createPayment(ctx, o.id, { method: "UPI", amount: 60 });
+    expect((await verifyPayment(ctx, rest.id)).orderSettled).toBe(true);
+    const settled = await prisma.order.findUniqueOrThrow({ where: { id: o.id } });
+    expect(settled.status).toBe("PAID");
+    expect(settled.paidAt).not.toBeNull();
+    expect(await prisma.taxInvoice.count({ where: { orderId: o.id } })).toBe(1);
+    expect(await successfulTotal(o.id)).toBe(100);
+    await expect(createPayment(ctx, o.id, { method: "CASH", amount: 1 })).rejects.toThrow(/PAID order/);
+  });
 });

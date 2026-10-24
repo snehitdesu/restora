@@ -40,11 +40,10 @@ housekeeping runs on the same daily tick, not hourly.
 
 ## 1. Create (do not migrate yet)
 
-1. A **new** PostgreSQL 16 database (Vercel Postgres / Neon / similar). Empty.
+1. The current demo database is already a PostgreSQL 16 database with Coders' Cafe loaded. It is not empty. Do not create a second one, and do not treat this one as disposable without a new explicit decision.
 2. A Vercel project pointed at this repository. Framework: Next.js. Build:
    `npm run build` (already in `package.json`). Install: `npm ci`.
-3. Do **not** click Deploy until environment variables in §2 are set **and**
-   §3 has been approved and run.
+3. Do **not** click Deploy until the environment variables in §2 are set on that project. §3 must not be run again against the current database.
 
 ## 2. Environment variable names
 
@@ -58,20 +57,19 @@ Set these on the Vercel project. Values are never recorded here.
 | `AUTH_SECRET` | ≥ 32 random characters, **not** the development placeholder |
 | `CRON_SECRET` | ≥ random; Vercel Cron sends `Authorization: Bearer <CRON_SECRET>`. Not `dev-cron-secret` |
 | `PUBLIC_BASE_URL` | `https://<this-deployment>` — table QR codes and callbacks |
-| `DEMO_DEPLOYMENT` | `true` — demo banner; **refuses live Razorpay keys** and **refuses `ALLOW_MOCK_PROVIDERS`** |
+| `DEMO_DEPLOYMENT` | `true` — demo banner; **refuses live (legacy) Razorpay keys** and **refuses `ALLOW_MOCK_PROVIDERS`** |
 
-### Required for simulated payments
+### Online payments on a public demo (changed 2026-10-20)
 
-Use **Razorpay test mode**. Do not set `ALLOW_MOCK_PROVIDERS` on this public demo. Mock adapters approve any payment and are refused together with `DEMO_DEPLOYMENT`. `rzp_test_…` keys only. Never `rzp_live_`.
-
-| Name | Why |
-|---|---|
-| `PAYMENT_PROVIDER` | `razorpay` |
-| `RAZORPAY_KEY_ID` | must start with `rzp_test_` |
-| `RAZORPAY_KEY_SECRET` | test secret |
-| `RAZORPAY_WEBHOOK_SECRET` | test webhook secret |
-
-Startup **refuses** `rzp_live_` when `ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT` is set.
+Razorpay test mode is **no longer available**: Razorpay is retired for new
+payments (`docs/payments-razorpay.md`), and the direct SBI UPI adapter is not
+implemented yet (`docs/sbi-upi-integration.md`). The test bank emulator and the
+mock adapters need `ALLOW_MOCK_PROVIDERS`, which a `DEMO_DEPLOYMENT` refuses.
+So on a public demo, online payment — and therefore guest QR ordering — shows
+as **unavailable**; demonstrate the POS, kitchen and back office with staff
+orders, and the QR checkout only on a non-public test deployment (with the
+emulator) or after SBI UAT. Startup still **refuses** `rzp_live_` keys when
+`ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT` is set.
 
 ### Strongly recommended
 
@@ -90,18 +88,41 @@ Startup **refuses** `rzp_live_` when `ALLOW_MOCK_PROVIDERS` or `DEMO_DEPLOYMENT`
 | `ALLOW_DEMO_SEED` | Startup refuses it in production (the seed wipes data) |
 | `ALLOW_MOCK_PROVIDERS` | Startup refuses it together with `DEMO_DEPLOYMENT` (mock adapters approve any payment) |
 | `RATE_LIMIT_DISABLED` | Startup refuses `true` |
-| `RAZORPAY_API_BASE` | Test emulator only |
+| `UPI_EMULATOR_*` / `PAYMENT_PROVIDER=upi_emulator` | Test bank only; refused in production |
 | `RAZORPAY_KEY_ID` live (`rzp_live_`) | Real charges |
 | `DEMO_DATABASE_CONFIRMED` / `DEMO_STAFF_PASSWORD` | CLI seed only, never the app |
+
+### Shared rate limits (needs the approved migrations)
+
+Each Vercel instance has its own memory, so with the default
+`RATE_LIMIT_STORE=memory` the limits are counted per instance (startup logs a
+warning on PostgreSQL). The shared store is the `RateLimitWindow` table, created
+by `20261021100000_append_only_rate_limit` (which also adds the append-only
+triggers on `AuditLog` and `InventoryLedger`). This release needs five
+PostgreSQL migrations the hosted demo does not have yet:
+`20261017100000_growth_crm`, `20261018100000_floor_ops`,
+`20261019100000_purchasing_rules_expiry`, `20261020100000_staff_ops`,
+`20261021100000_append_only_rate_limit`. Apply them **with approval**, after a
+backup and a read-only `prisma migrate status`; then set
+`RATE_LIMIT_STORE=database`. The growth, floor and staff features need their
+tables, so deploy the code only after the migrations (see §4).
+
+(`20261017100000_rate_limit_buckets`, written on 2026-10-13 before the branches
+were reconciled, was superseded by `RateLimitWindow` and is not part of this
+release; it was never applied to the hosted database.)
 
 ### Optional / unused on Vercel demo
 
 `EXPORT_DIR`, `METRICS_TOKEN`, `ALERT_WEBHOOK_URL`, `BACKUP_*`, `WORKER_DISABLED`
 (already implied by `VERCEL=1`).
 
-## 3. Database (approval required — do not run yet)
+## 3. Database (do not run against the current demo)
 
-Against the **confirmed empty demo database only**:
+The current demo database already has Coders' Cafe: one organization, one outlet, four staff users, the starter menu, and tables T01–T10. Orders and payments were empty at the last read-only check. `npm run db:seed:cafe` without `--reset` sees that organization and changes nothing. `--reset` deletes that organization and every row scoped to it, then rebuilds users, passwords, menu, and QR tokens. Do not run `--reset`. Do not run `db:push`, `db:reset`, `setup`, or `prisma/seed.ts`.
+
+`prisma migrate status` last reported 12 migrations and an up-to-date schema. Do not run `npm run db:pg:deploy` unless a later read-only status shows a pending migration.
+
+The commands below are only for a **new, empty, disposable** database that you have explicitly approved. They are not the next step for the current demo.
 
 ```bash
 # 1. migrations (owner role). NEVER prisma db push / migrate reset / migrate dev.
@@ -136,10 +157,11 @@ local `Demo@12345` value):
 1. Confirm §2 variables are on the Vercel project.
 2. Deploy the current git revision (no force).
 3. Smoke: `GET /api/health/live` → 200; `GET /api/health/ready` → 200
-   (migrations include `20261016100000_integrations_control_room`).
+   (migrations include `20261021100000_append_only_rate_limit`).
 4. Sign in as owner with the unique password from §3.
 5. Open Tables → a T01–T10 QR → guest menu (Coders' Cafe, unchanged) → cart →
-   order → Razorpay test-mode payment (no live charge) → kitchen KDS.
+   checkout shows "online payment isn't available" (expected until SBI is live);
+   place a staff order at the POS → kitchen KDS.
 6. Confirm the demo banner is visible and a live Razorpay key cannot be saved
    in this environment.
 

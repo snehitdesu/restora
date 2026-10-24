@@ -206,7 +206,7 @@ describe("KDS lifecycle", () => {
     expect(ticketLabel(ticket({}))).toBe("Table T6");
     expect(ticketLabel(ticket({ order: { ...ticket({}).order!, channel: "TAKEAWAY", table: null } }))).toBe("Takeaway");
     expect(ticketLabel(ticket({ order: { ...ticket({}).order!, channel: "QR" } }))).toBe("Table T6 · QR");
-    expect(ticketLabel(ticket({ order: { ...ticket({}).order!, channel: "QR", table: null } }))).toBe("QR order");
+    expect(ticketLabel(ticket({ order: { ...ticket({}).order!, channel: "QR", table: null } }))).toBe("QR · no table yet"); // common QR: unassigned, said plainly
   });
 });
 

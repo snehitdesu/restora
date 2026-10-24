@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { prisma } from "@/server/db/client";
 import { loginWithPassword } from "@/server/auth/login";
-import { insecureOriginProblem, setSessionCookie } from "@/server/auth/cookies";
+import { insecureOriginProblem, setSessionCookie, SESSION_COOKIE } from "@/server/auth/cookies";
 import { ok, fail } from "@/server/api/respond";
 import { assertSameOrigin } from "@/server/api/router";
 import { clientIp, enforceRateLimit, RATE_POLICIES } from "@/server/api/rateLimit";
@@ -33,7 +33,7 @@ async function login(req: NextRequest, requestId: string) {
     const email = typeof (body as { email?: unknown })?.email === "string" ? (body as { email: string }).email.toLowerCase().trim().slice(0, 200) : "";
     if (email) await enforceRateLimit(RATE_POLICIES.loginPerEmail, email);
     const userAgent = req.headers.get("user-agent") ?? undefined;
-    const { session, user } = await loginWithPassword(prisma, body as never, { ip, userAgent });
+    const { session, user } = await loginWithPassword(prisma, body as never, { ip, userAgent }, { replacesToken: req.cookies.get(SESSION_COOKIE)?.value });
     await setSessionCookie(session.token, session.expiresAt);
     const res = ok({ user, expiresAt: session.expiresAt });
     const durationMs = performance.now() - started;

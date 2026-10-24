@@ -1,3 +1,90 @@
+# RESTORA release notes
+
+## Unreleased: everything since 1.0.0-rc.1 (Groups 1-9), 2026-10-09
+
+Not tagged yet: it ships when the release checklist (`docs/release-checklist.md`) is done on the release candidate, in particular the external items
+(hosting, providers, signing). Feature-by-feature state: `docs/master-feature-audit.md`; evidence: `docs/stabilization-report.md` §8.
+
+**Added.** Inventory and purchasing: reorder engine with POs and indents from it, vendor approval gate, department-to-department issues, purchase-order approval
+rules (small orders approve themselves, large ones need two people) and line review, one queue for POs and indents, expiry list, CSV import, brand / vendor
+contacts / cuisine tags. Kitchen and money: production batches and worksheet, manual sales, consumption variance, money desk and day close, menu
+engineering, department P&L, daily costing, stock matrix, QR labels. Integrations: Tally / Zoho / Google Sheets sync, aggregator finance and on / off, nightly
+POS re-pull, control room. Growth: consent-gated messaging and e-mail (Resend), loyalty tiers, coupons, referrals, feedback loop, campaigns, lifecycle
+automations, 9 AM summary, guest offers and rating pages. Floor and mobile: held bills, move / merge / split a bill, booking notes on tickets, "table ready"
+message, measured dish prep times and late-ticket alerts, upsell hints, universal search, owner approvals on the phone. Staff: roster, checklists, hours and
+sales-per-staff reports, invitation e-mail. Guests: order the same again and split the bill between phones. Alerts: purchase approval, reservation, low stock
+and overdue vendor bills. Reports: sales by cuisine tag.
+
+**Fixed.** Kitchen tickets now record when they were accepted, started, made ready and served; before, nothing wrote those times, so the dish prep-time report and the
+late-ticket alerts had nothing to measure on real tickets.
+
+**Changed.** `AuditLog` and `InventoryLedger` are now refused by the database itself (triggers). Rate limits can be shared between instances. Password forms keep
+what was typed before the page finished loading. Graceful shutdown keeps answering 503 briefly after the drain instead of resetting unread connections. Vendor-due
+alerts go to people who can pay vendors (`vendor.pay`), not to everyone with `finance.view`. The browser E2E suites on SQLite and PostgreSQL are CI release gates.
+
+**Upgrade notes.** Five new migrations in both histories (`growth_crm`, `floor_ops`, `purchasing_rules_expiry`, `staff_ops`, `append_only_rate_limit`): apply
+with `npm run db:pg:deploy` (never `db push`). The last one adds triggers, so the migrating role must own the tables, and a disposable-database wipe (demo seed,
+test fixtures) must go through `withAppendOnlyGuardsOff`; never run the demo seed on a real database. New environment variables: `RATE_LIMIT_STORE`
+(`database` recommended with more than one instance), `SHUTDOWN_REFUSE_GRACE_MS` (default 300). Provider connections (messaging, e-mail, accounting, Sheets,
+aggregators) are per-organization settings in Integrations; nothing is sent until one is connected, and `PUBLIC_BASE_URL` must be set for links in messages.
+
+**Known limitations.** Only mocks and emulators have run for every external provider (`docs/stabilization-report.md` §8.4). Row-level security is not applied.
+The desktop apps are unsigned. 20 audit rows are not built (native apps, offline captain, e-invoice, own ordering website, optional modules).
+
+## DRAFT 1.0.0-rc.2 — changes since Production's build `a80caa9` (2026-10-10)
+
+**Not released, not tagged, version not bumped** (`package.json` still says
+`1.0.0-rc.1`). Written 2026-10-21 from `git log a80caa9..HEAD`; it ships only after
+the owner authorizes rc.2 (`docs/launch-readiness-2026-10-21.md` §7, release gate).
+Everything in the section above is also new relative to `a80caa9`.
+
+**Changed (guest-visible).** Table-QR orders are **online-payment only**: a guest
+cannot choose pay-at-the-counter, and an order reaches the kitchen only after its
+payment is verified. With no live online provider (SBI UPI is not built yet) guest QR
+ordering is refused with "please order with the staff". Production's current build
+`a80caa9` still accepts QR orders paid at the counter. Razorpay is retired for new
+checkouts (kept server-side only to settle and refund older Razorpay payments).
+
+**Added.** SBI UPI adapter **stub** (refuses every call until built from SBI's
+specification), a UPI bank emulator for tests, the authenticated pending-payment
+recovery tick `/api/cron/payments`, a late-payment hold (payments verified more than
+`GUEST_FULFILMENT_WINDOW_MINUTES` after ordering are held for staff; default 10 —
+**pending owner approval**). Cloud Sync for linked desktops and table-QR scanning;
+verified-email password recovery, owner recovery codes and a second trusted owner;
+draft recipes flagged *estimated* (cannot be approved until confirmed).
+
+**Added (2026-10-21, later).** One **restaurant QR** for every table
+(`docs/common-qr-ordering.md`): guests order without choosing a table, staff
+assign it (POS → Open orders → QR tables), the kitchen shows "no table yet"
+until then. Table QR codes keep working. Migration `20261026100000_outlet_common_qr`.
+
+**Security.** Table QR tokens are 144-bit random; the seeds no longer store
+derivable tokens; `qr:audit` reports derivable tokens (exit 2) and an empty database
+(exit 3); production label generation refuses while derivable tokens remain.
+**Existing tokens are not changed by an upgrade** — Production's must be rotated
+(`docs/qr-token-rotation.md`).
+
+**Fixed.** Kitchen-board polls no longer stall SQLite writes; a guest order replay that
+races its original returns that order; a slow guest order is never reported as failed;
+partly refunded payments count when settling; line discounts need `order.discount`;
+the packaged desktop server no longer preloads every route at start-up; unavailable
+costs show as unavailable, never ₹0.00.
+
+**Upgrade notes.** Ten PostgreSQL migrations after `a80caa9`, all additive
+(`20261017100000_growth_crm` … `20261026100000_outlet_common_qr`): schema before code,
+`npm run db:pg:deploy`, following `docs/production-migration-preflight.md` (verify the
+pre-upgrade backup with `--expect-migration 20261016100000_integrations_control_room`).
+Environment: `PAYMENT_PROVIDER` (`sbi_upi` in Production; `mock` / `upi_emulator` are
+refused there), `CRON_SECRET` (also guards `/api/cron/payments`), optional
+`GUEST_FULFILMENT_WINDOW_MINUTES`, `SBI_UPI_ENVIRONMENT`; `.env.example` lists all.
+
+**Known limitations.** No online guest payment exists until SBI UPI is implemented and
+certified. Desktop installers unsigned (Windows) / ad-hoc signed, not notarized (macOS).
+Capacity measured only on a laptop lab. Recipe quantities are estimates; no ingredient
+prices.
+
+---
+
 # RESTORA 1.0.0-rc.1 — release notes
 
 _Release candidate, 2026-10-05. "The Operating System for Restaurants."_

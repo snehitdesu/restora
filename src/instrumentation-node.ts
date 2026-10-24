@@ -5,10 +5,12 @@
  * 1. Production env validation — throws (the server refuses to start) on
  *    missing / unsafe configuration; risky-but-allowed settings are logged as
  *    warnings on every boot. A no-op outside production.
- * 2. Signal handling — SIGTERM / SIGINT drain in-flight API requests and
+ * 2. Password-reset delivery — registers Resend when it is configured. The
+ *    reset route registers it again so a separate serverless bundle has it.
+ * 3. Signal handling — SIGTERM / SIGINT drain in-flight API requests and
  *    background work before Next.js closes the server (server/ops/lifecycle.ts);
  *    unhandled rejections / uncaught exceptions are logged, never silent.
- * 3. Background work (never during `next build`, which also loads
+ * 4. Background work (never during `next build`, which also loads
  *    instrumentation but serves nothing):
  *      - export recovery: stale RUNNING -> FAILED, PENDING re-queued, expired purged;
  *      - the maintenance / outbox worker (server/ops/worker.ts);
@@ -28,6 +30,9 @@ export async function registerNode(): Promise<void> {
   for (const w of productionEnvWarnings()) log.warn(`configuration: ${w}`, { event: "config_warning" });
   if (process.env.NEXT_PHASE === "phase-production-build") return;
 
+  const { registerPasswordResetDelivery } = await import("@/server/auth/account");
+  registerPasswordResetDelivery();
+
   const { installSignalHandlers, markReady, onShutdown } = await import("@/server/ops/lifecycle");
   installSignalHandlers();
 
@@ -40,6 +45,12 @@ export async function registerNode(): Promise<void> {
   onShutdown("post-commit-side-effects", settleAfterCommit);
   onShutdown("export-runner", () => getBackgroundExportRunner().idle());
   onShutdown("database", () => prisma.$disconnect());
+
+  if (process.env.AHAROS_DESKTOP === "1") {
+    // Installed desktop only: keep the local cache in step with the cloud (QR orders in, staff actions out).
+    const { startCloudSync } = await import("@/server/sync/scheduler");
+    onShutdown("cloud-sync", startCloudSync());
+  }
 
   setImmediate(() => {
     recoverExportJobs()

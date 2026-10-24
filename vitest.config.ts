@@ -1,11 +1,14 @@
 import { defineConfig } from "vitest/config";
 import path from "node:path";
+import { sqliteTestDbPath } from "./vitest.global-setup";
 
-// Tests run against a dedicated SQLite file so they never touch dev.db.
+// Tests run against a dedicated SQLite file so they never touch dev.db: one per
+// vitest process (prisma/test-<pid>.db), so two runs in the same checkout never
+// rebuild each other's database. vitest.global-setup.ts reads the same path.
 // TEST_DATABASE_URL=postgresql://... runs the same suite against PostgreSQL
 // (see docs/postgres.md; requires the client generated from prisma/postgres).
-const testDbPath = path.join(process.cwd(), "prisma", "test.db").replace(/\\/g, "/");
-const testDbUrl = process.env.TEST_DATABASE_URL ?? `file:${testDbPath}`;
+process.env.VITEST_SQLITE_DB ??= sqliteTestDbPath(process.pid);
+const testDbUrl = process.env.TEST_DATABASE_URL ?? `file:${process.env.VITEST_SQLITE_DB.replace(/\\/g, "/")}`;
 
 export default defineConfig({
   // React components in UI tests (tsconfig keeps jsx: "preserve" for Next).
@@ -21,6 +24,7 @@ export default defineConfig({
     setupFiles: ["./tests/setup-after-commit.ts"],
     env: {
       DATABASE_URL: testDbUrl,
+      VITEST_SQLITE_DB: process.env.VITEST_SQLITE_DB,
       // Integration-secret encryption and sessions need a key; a fresh checkout / CI has no .env.
       // Test-only value, never used outside the vitest processes.
       AUTH_SECRET: process.env.AUTH_SECRET || "vitest-only-auth-secret-never-used-in-production-0000",

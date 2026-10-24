@@ -8,7 +8,7 @@
  * allows from the current status.
  */
 import { useState } from "react";
-import { api } from "@/lib/api/client";
+import { api, describeError } from "@/lib/api/client";
 import { useQuery, usePaged } from "@/lib/hooks/useApi";
 import { useShell, useOutletId } from "@/lib/shellContext";
 import { formatDateTime, formatElapsed, isoDay, shortRef } from "@/lib/format";
@@ -20,10 +20,11 @@ import { DataTable, Pager } from "@/components/ui/Table";
 import { PageHeader, StatusBadge, Stat, Tabs } from "@/components/ui/Page";
 import { DateRangeFilter, FilterBar, SelectFilter, rangeToQuery, type DateRange } from "@/components/ui/Filters";
 import { ActionButton } from "@/components/ui/Confirm";
+import { useToast } from "@/components/ui/Toast";
 
 type TableRow = { id: string; code: string; capacity: number; status: string; floor?: { name: string } | null };
 export type Reservation = { id: string; customerId: string | null; customer?: { name: string; phone: string | null } | null; tableId: string | null; partySize: number; reservedAt: string; status: ReservationStatus; notes: string | null };
-type WaitEntry = { id: string; customerName: string; phone: string | null; partySize: number; status: WaitlistStatus; estWaitMins: number; createdAt: string };
+type WaitEntry = { id: string; customerName: string; phone: string | null; partySize: number; status: WaitlistStatus; estWaitMins: number; createdAt: string; notifiedAt: string | null; notifyCount: number };
 
 function useTables(outletId: string | null) {
   return useQuery<TableRow[]>(outletId ? "/api/master/tables" : null, { outletId: outletId ?? undefined });
@@ -178,10 +179,27 @@ function AddWaitDialog({ open, onClose, onDone }: { open: boolean; onClose: () =
 
 function Waitlist() {
   const { outletId } = useShell();
+  const toast = useToast();
   const [open, setOpen] = useState(false);
+  const [telling, setTelling] = useState<string | null>(null);
   const [seating, setSeating] = useState<WaitEntry | null>(null);
   const q = useQuery<WaitEntry[]>(outletId ? "/api/reservations/waitlist" : null, { outletId: outletId ?? undefined });
   const post = (id: string, action: string) => () => api(`/api/reservations/waitlist/${id}/${action}`, { method: "POST", body: {} });
+  /** "Your table is ready" by message. When none could be sent the reason is shown as it is: the host tells them in person. */
+  async function tell(r: WaitEntry) {
+    if (telling) return;
+    setTelling(r.id);
+    try {
+      const res = await api<{ sent: boolean; channel?: string; reason?: string }>(`/api/reservations/waitlist/${r.id}/notify`, { method: "POST", body: {} });
+      if (res.sent) toast.show(`${r.customerName} was told by ${res.channel === "WHATSAPP" ? "WhatsApp" : "SMS"}`, "ok");
+      else toast.show(res.reason ?? "The message could not be sent. Tell them in person.", "bad");
+      q.reload();
+    } catch (e) {
+      toast.show(describeError(e), "bad");
+    } finally {
+      setTelling(null);
+    }
+  }
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -196,12 +214,13 @@ function Waitlist() {
           { key: "n", header: "Name", cell: (r) => <span><span className="font-medium text-ink-900">{r.customerName}</span>{r.phone && <span className="block text-xs text-ink-500">{r.phone}</span>}</span> },
           { key: "p", header: "Party", numeric: true, cell: (r) => r.partySize },
           { key: "w", header: "Waiting", numeric: true, cell: (r) => <span className={Date.now() - new Date(r.createdAt).getTime() > r.estWaitMins * 60000 ? "text-bad-500" : ""}>{formatElapsed(r.createdAt)} / {r.estWaitMins}m</span> },
-          { key: "s", header: "Status", cell: (r) => <StatusBadge status={r.status} /> },
+          { key: "s", header: "Status", cell: (r) => <span><StatusBadge status={r.status} />{r.notifiedAt && <span className="mt-0.5 block text-xs text-ink-500" data-testid={`told-${r.id}`}>Told {formatElapsed(r.notifiedAt)} ago{r.notifyCount > 1 ? ` (${r.notifyCount}×)` : ""}</span>}</span> },
           {
             key: "a", header: "", cell: (r) => {
               const next = WAITLIST_TRANSITIONS[r.status] ?? [];
               return (
                 <div className="flex flex-wrap justify-end gap-1">
+                  {r.status === "WAITING" && r.phone && <Button size="sm" loading={telling === r.id} onClick={() => void tell(r)} aria-label={`Tell ${r.customerName} the table is ready`}>{r.notifiedAt ? "Tell again" : "Table ready"}</Button>}
                   {next.includes("ARRIVED") && <ActionButton size="sm" action={post(r.id, "arrived")} onDone={q.reload} success="Marked arrived">Arrived</ActionButton>}
                   {next.includes("SEATED") && <Button size="sm" variant="primary" onClick={() => setSeating(r)}>Seat</Button>}
                   {next.includes("LEFT") && <ActionButton size="sm" action={post(r.id, "left")} onDone={q.reload} success="Marked left">Left</ActionButton>}

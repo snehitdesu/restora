@@ -41,7 +41,7 @@ import { authenticateWebhook, outletMismatch, rejectForTenant, tenantEventId, ty
 import { verifyPayment, refundPayment } from "@/server/services/payment";
 import { raiseAnomaly } from "@/server/services/anomaly";
 import { MockPOSProvider, PetpoojaPOSProvider, type POSProvider } from "@/integrations/pos";
-import { MockPaymentProvider, RazorpayPaymentProvider, type PaymentProvider, type PaymentWebhookEvent } from "@/integrations/payment";
+import { MockPaymentProvider, RazorpayPaymentProvider, SbiUpiPaymentProvider, UpiEmulatorPaymentProvider, type PaymentProvider, type PaymentWebhookEvent } from "@/integrations/payment";
 import { MockAggregatorProvider, type AggregatorProvider } from "@/integrations/aggregator";
 import { D, money } from "@/domain/money";
 import { mockProvidersAllowed } from "@/integrations/policy";
@@ -80,6 +80,10 @@ export function resolveProvider(kind: WebhookKind, name: string): POSProvider | 
     if (n === "petpooja") return new PetpoojaPOSProvider();
   } else if (kind === "PAYMENT") {
     if (n === "mock") return mock(new MockPaymentProvider());
+    if (n === "upi_emulator") return mock(new UpiEmulatorPaymentProvider());
+    // Not implemented: refuses every callback (401) until built from SBI's specification (integrations/payment/sbiUpi.ts).
+    if (n === "sbi_upi") return new SbiUpiPaymentProvider();
+    // Legacy only: settles / refunds Razorpay payments created before Razorpay was retired for new checkouts.
     if (n === "razorpay") return new RazorpayPaymentProvider();
   } else if (["mock", "zomato", "swiggy"].includes(n)) {
     // Only mock aggregator adapters exist; real partner APIs are not integrated.

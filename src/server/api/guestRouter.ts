@@ -49,13 +49,19 @@ export function createGuestRouter(routes: GuestRoute[]) {
   const dispatch = (method: Method) => async (req: NextRequest, context: { params: Promise<{ path?: string[] }> }) => {
     const started = performance.now();
     const requestId = newRequestId(req.headers.get("x-request-id"));
-    const path = req.nextUrl.pathname;
+    // Guest URLs carry bearer tokens (table QR, feedback, unsubscribe), so logs
+    // get the matched route pattern (".../t/:token"), never the raw path.
+    let path = "(guest api)";
     let status = 500;
     let res: Response;
     try {
       const segs = (await context.params).path ?? [];
+      const parts = req.nextUrl.pathname.split("/");
+      const mount = parts.slice(0, parts.length - segs.length).join("/");
+      path = `${mount}/(unmatched)`;
       const hit = compiled.map((r) => ({ r, params: match(segs, r.segs) })).find((c) => c.params && c.r.method === method);
       if (!hit) throw new NotFoundError("Unknown endpoint");
+      path = `${mount}/${hit.r.path}`;
       const ip = clientIp(req);
       await enforceRateLimit(hit.r.ipPolicy ?? (method === "GET" ? RATE_POLICIES.guestReadPerIp : RATE_POLICIES.guestWritePerIp), ip);
 

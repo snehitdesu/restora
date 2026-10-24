@@ -21,6 +21,12 @@ export const CAFE_TABLE_CODES = STARTER_TABLE_CODES;
 
 export type QrIssueMode = "local" | "production";
 
+/** Local-only sheet purpose: each stamps the sheet with its PURPOSE_LABELS line ahead of the usual local notice. */
+export type QrPurpose = "investor-demo" | "local-test";
+export const INVESTOR_DEMO_LABEL = "LOCAL INVESTOR DEMO — NOT FOR CUSTOMER USE.";
+export const LOCAL_TEST_LABEL = "LOCAL TEST — NOT FOR CUSTOMER USE.";
+const PURPOSE_LABELS: Record<QrPurpose, string> = { "investor-demo": INVESTOR_DEMO_LABEL, "local-test": LOCAL_TEST_LABEL };
+
 export class TableQrError extends Error {
   constructor(message: string) {
     super(message);
@@ -122,6 +128,35 @@ export function qrBaseUrlProblem(raw: string, mode: QrIssueMode): string | null 
   return null;
 }
 
+/**
+ * True only for this computer (localhost, 127.0.0.0/8, ::1) or an RFC 1918
+ * LAN address (10/8, 172.16/12, 192.168/16). Unspecified, link-local, CGNAT,
+ * mDNS (.local) and every public name or IP return false.
+ */
+export function isLocalDestinationHost(hostname: string): boolean {
+  const host = bareHost(hostname);
+  if (host === "localhost" || host === "::1") return true;
+  const v4 = parseIpv4(host);
+  if (!v4) return false;
+  const [a, b] = v4;
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+/**
+ * Why this base URL cannot be used for a --purpose (investor-demo / local-test)
+ * sheet. These sheets must point at this computer or the local network, so a
+ * public host is refused even though plain local mode would accept it.
+ */
+export function qrPurposeBaseUrlProblem(raw: string): string | null {
+  const problem = qrBaseUrlProblem(raw, "local");
+  if (problem) return problem;
+  const u = new URL(raw.trim());
+  if (!isLocalDestinationHost(u.hostname)) {
+    return "--purpose sheets must use localhost, a loopback address, or a private LAN address (10.x, 172.16-31.x, 192.168.x); public hosts are refused";
+  }
+  return null;
+}
+
 export function normalizeQrOrigin(raw: string): string {
   return new URL(raw.trim()).origin;
 }
@@ -157,7 +192,12 @@ export type TableQrPack = {
   manifest: TableQrManifest;
 };
 
-function localNotice(origin: string): string {
+function localNotice(origin: string, purpose?: QrPurpose): string {
+  const base = baseLocalNotice(origin);
+  return purpose ? `${PURPOSE_LABELS[purpose]} ${base}` : base;
+}
+
+function baseLocalNotice(origin: string): string {
   const host = bareHost(new URL(origin).hostname);
   if (LOOPBACK.has(host)) {
     return "LOCAL TEST — NOT FOR CUSTOMER PRINTING. This address is this computer; a phone cannot open it, and these codes are not ready to print.";
@@ -226,9 +266,15 @@ export function buildTableQrPack(input: {
   tables: ReadonlyArray<TableQrSource>;
   expectedCodes?: readonly string[];
   now?: Date;
+  purpose?: QrPurpose;
 }): TableQrPack {
   const problem = qrBaseUrlProblem(input.baseUrl, input.mode);
   if (problem) throw new TableQrError(problem);
+  if (input.purpose && input.mode !== "local") throw new TableQrError("--purpose is for local sheets only");
+  if (input.purpose) {
+    const purposeProblem = qrPurposeBaseUrlProblem(input.baseUrl);
+    if (purposeProblem) throw new TableQrError(purposeProblem);
+  }
   const origin = normalizeQrOrigin(input.baseUrl);
   const expected = input.expectedCodes ?? CAFE_TABLE_CODES;
   const byCode = new Map<string, { code: string; qrToken: string }>();
@@ -254,7 +300,7 @@ export function buildTableQrPack(input: {
     return { code, url, svg };
   });
   const printReady = input.mode === "production";
-  const notice = printReady ? null : localNotice(origin);
+  const notice = printReady ? null : localNotice(origin, input.purpose);
   const manifest: TableQrManifest = {
     restaurant: input.restaurantName,
     mode: input.mode,
@@ -382,18 +428,36 @@ function assertWritablePack(pack: TableQrPack): void {
   }
 }
 
+/**
+ * Rename, retrying briefly when Windows reports a transient lock: antivirus or
+ * the search indexer can hold a handle on files that were just written, and a
+ * directory rename then fails with EPERM / EBUSY / EACCES for a moment.
+ */
+export function renameWithRetry(from: string, to: string, attempts = 8): void {
+  for (let i = 1; ; i++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (i >= attempts || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * i); // 25, 50, … ms
+    }
+  }
+}
+
 /** Swap a finished temp directory into place. A failed write never publishes a partial directory. */
 function publishDir(tmp: string, abs: string): void {
   if (!fs.existsSync(abs)) {
-    fs.renameSync(tmp, abs);
+    renameWithRetry(tmp, abs);
     return;
   }
   const backup = `${tmp}.previous`;
-  fs.renameSync(abs, backup);
+  renameWithRetry(abs, backup);
   try {
-    fs.renameSync(tmp, abs);
+    renameWithRetry(tmp, abs);
   } catch (e) {
-    try { fs.renameSync(backup, abs); } catch { /* the previous directory remains at the backup path */ }
+    try { renameWithRetry(backup, abs); } catch { /* the previous directory remains at the backup path */ }
     throw e;
   }
   fs.rmSync(backup, { recursive: true, force: true });
@@ -425,33 +489,35 @@ export function writeTableQrFiles(dir: string, pack: TableQrPack): string {
   return abs;
 }
 
-/** Keys parseQrArgs reads. An index signature keeps this assignable from `process.env`. */
-export type QrEnvironment = {
-  PUBLIC_BASE_URL?: string;
-  [key: string]: string | undefined;
-};
+export type ParsedQrArgs = { help: true } | { help: false; mode: QrIssueMode; baseUrl: string; outDir: string; purpose?: QrPurpose };
 
-export type ParsedQrArgs = { help: true } | { help: false; mode: QrIssueMode; baseUrl: string; outDir: string };
-
-export const QR_CLI_HELP = `Usage: npm run qr:tables -- [--mode local|production] [--base-url URL] [--out DIR]
+export const QR_CLI_HELP = `Usage: npm run qr:tables -- --base-url URL [--mode local|production] [--out DIR] [--purpose investor-demo|local-test]
 
 Reads Coders' Cafe table tokens T01–T10 from the database and writes QR labels
 for the existing guest menu route /t/<token>. Does not create or rotate tokens.
 
+  --base-url URL      Required on every run. The origin printed into each QR code.
+                      PUBLIC_BASE_URL and localhost are never used as a fallback.
   --mode local        Default. Writes a local test sheet marked not for customer printing.
   --mode production   Requires a public https base URL. Refuses localhost and private addresses.
-  --base-url URL      Overrides PUBLIC_BASE_URL. Local mode defaults to http://localhost:3000.
   --out DIR           Relative output directory. Defaults to artifacts/table-qr/<mode>.
+  --purpose investor-demo|local-test
+                      Local mode only. Labels the sheet LOCAL INVESTOR DEMO — NOT FOR CUSTOMER USE
+                      or LOCAL TEST — NOT FOR CUSTOMER USE. The --base-url must be localhost,
+                      a loopback address, or a private LAN address; public hosts are refused.
+
+Examples:
+  npm run qr:tables -- --base-url http://localhost:3000
+  npm run qr:tables -- --base-url http://192.168.1.20:3000 --purpose investor-demo
+  npm run qr:tables -- --mode production --base-url https://pos.example.com
 `;
 
 /** Operator arguments only. There is no flag for a table id, outlet id, token, or price. */
-export function parseQrArgs(
-  argv: string[],
-  env: QrEnvironment = process.env,
-): ParsedQrArgs {
+export function parseQrArgs(argv: string[]): ParsedQrArgs {
   let mode: QrIssueMode = "local";
-  let baseUrl = env.PUBLIC_BASE_URL?.trim() || "";
+  let baseUrl = "";
   let outDir = "";
+  let purpose: QrPurpose | undefined;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") return { help: true };
@@ -467,14 +533,25 @@ export function parseQrArgs(
       const value = argv[++i];
       if (!value) throw new TableQrError("--out requires a directory");
       outDir = value;
+    } else if (arg === "--purpose") {
+      const value = argv[++i];
+      if (value !== "investor-demo" && value !== "local-test") throw new TableQrError("--purpose must be investor-demo or local-test");
+      purpose = value;
     } else {
       throw new TableQrError(`Unknown argument ${arg}. Table, outlet, token, and price cannot be passed on the command line.`);
     }
   }
+  if (purpose && mode !== "local") throw new TableQrError("--purpose is for local sheets only");
+  // Fail closed: the QR origin is never taken from PUBLIC_BASE_URL or a localhost default.
   if (!baseUrl) {
-    if (mode === "local") baseUrl = "http://localhost:3000";
-    else throw new TableQrError("Production mode requires --base-url or PUBLIC_BASE_URL set to a public https URL");
+    throw new TableQrError(mode === "production"
+      ? "An explicit --base-url is required: production mode needs a public https URL. PUBLIC_BASE_URL is not used."
+      : "An explicit --base-url is required (for example --base-url http://localhost:3000). PUBLIC_BASE_URL is not used.");
+  }
+  if (purpose) {
+    const problem = qrPurposeBaseUrlProblem(baseUrl);
+    if (problem) throw new TableQrError(problem);
   }
   if (!outDir) outDir = mode === "production" ? "artifacts/table-qr/production" : "artifacts/table-qr/local";
-  return { help: false, mode, baseUrl, outDir };
+  return purpose ? { help: false, mode, baseUrl, outDir, purpose } : { help: false, mode, baseUrl, outDir };
 }

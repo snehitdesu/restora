@@ -22,11 +22,35 @@ describe("downloads", () => {
   const load = () => import("@/site/release");
 
   it("offers nothing to download until a release host is configured", async () => {
+    vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("RESTORA_DOWNLOAD_BASE_URL", "");
     const r = await load();
     expect(r.downloadBase()).toBeNull();
     expect(r.artifactUrl("windows")).toBeNull();
+    expect(r.artifactUrl("windows-portable")).toBeNull();
     expect(r.targetStatus("windows").available).toBe(false);
+    expect(r.targetStatus("windows-portable").available).toBe(false);
+    expect(r.targetStatus("windows").href).toBe("/download/windows");
+    expect(r.targetStatus("windows-portable").href).toBe("/download/windows-portable");
+  });
+
+  it("names the built Windows installers and links only those files", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("RESTORA_DOWNLOAD_BASE_URL", "https://downloads.example.com/restora/v1");
+    const r = await load();
+    expect(r.release.version).toBe("1.0.0-rc.1");
+    expect(r.TARGETS.windows.artifact).toMatchObject({ file: "RESTORA-Setup-1.0.0-rc.1.exe", bytes: 136792602 });
+    expect(r.TARGETS["windows-portable"].artifact).toMatchObject({ file: "RESTORA-Portable-1.0.0-rc.1.exe", bytes: 136579941 });
+    expect(r.artifactUrl("windows")).toBe("https://downloads.example.com/restora/v1/RESTORA-Setup-1.0.0-rc.1.exe");
+    expect(r.artifactUrl("windows-portable")).toBe("https://downloads.example.com/restora/v1/RESTORA-Portable-1.0.0-rc.1.exe");
+    expect(r.targetStatus("windows").available).toBe(true);
+    expect(r.targetStatus("windows-portable").available).toBe(true);
+    expect(r.artifactUrl("mac-arm64")).toBeNull();
+    expect(r.targetStatus("mac-arm64").available).toBe(false);
+    const setup = path.join(root, "dist-desktop", "RESTORA-Setup-1.0.0-rc.1.exe");
+    const portable = path.join(root, "dist-desktop", "RESTORA-Portable-1.0.0-rc.1.exe");
+    if (fs.existsSync(setup)) expect(fs.statSync(setup).size).toBe(136792602);
+    if (fs.existsSync(portable)) expect(fs.statSync(portable).size).toBe(136579941);
   });
 
   it("links built artifacts under the configured host, and never unbuilt ones", async () => {

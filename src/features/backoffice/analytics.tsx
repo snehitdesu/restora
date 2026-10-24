@@ -29,8 +29,8 @@ type ItemRow = { menuItemId: string | null; name: string; qty: number; grossReve
 type CategoryRow = Omit<ItemRow, "menuItemId" | "name"> & { category: string; items: number };
 type VariantRow = ItemRow & { variantId: string; item: string; variant: string };
 type ModifierRow = { optionId: string | null; modifier: string; lines: number; qty: number; addOnValue: number };
-type ConsumptionRow = { materialId: string; material: string; unit: string; saleQty: number; productionQty: number; issueQty: number; wastageQty: number; consumedValue: number; wastageValue: number; wastagePct: number };
-type AgeingRow = { outletId: string; materialId: string; material: string; unit: string; onHand: number; value: number; usedQty: number; lastUsedAt: string | null; daysOfCover: number | null; status: "DEAD" | "SLOW" | "OK"; lookbackDays: number };
+type ConsumptionRow = { materialId: string; material: string; unit: string; saleQty: number; productionQty: number; issueQty: number; wastageQty: number; consumedValue: number; wastageValue: number; consumedValueComplete: boolean; wastageValueComplete: boolean; wastagePct: number };
+type AgeingRow = { outletId: string; materialId: string; material: string; unit: string; onHand: number; value: number; valueKnown: boolean; usedQty: number; lastUsedAt: string | null; daysOfCover: number | null; status: "DEAD" | "SLOW" | "OK"; lookbackDays: number };
 type MovementRow = { txnType: string; entries: number; inValue: number; outValue: number; netValue: number };
 type NegativeRow = { materialId: string; material: string; unit: string; quantity: number };
 type Insight = { code: string; severity: "INFO" | "WARNING" | "CRITICAL"; category: string; title: string; detail: string; link: string };
@@ -241,6 +241,13 @@ function MenuPanel({ q }: { q: Q }) {
   );
 }
 
+/** A ledger value that may be missing costs: ₹0 with no cost is "No cost", a partly costed one is marked incomplete. */
+function StockValue({ value, complete }: { value: number; complete: boolean }) {
+  if (complete) return <>{formatMoney(value)}</>;
+  if (value === 0) return <span title="No purchase cost at this outlet when this stock moved"><Badge tone="warn">No cost</Badge></span>;
+  return <span title="Part of this stock moved with no purchase cost at this outlet: the real value is higher">{formatMoney(value)} <Badge tone="warn">Incomplete</Badge></span>;
+}
+
 function InventoryPanel({ q }: { q: Q }) {
   const value = useQuery<number>("/api/analytics/inventory-value", { outletId: q.outletId });
   const cons = useQuery<ConsumptionRow[]>("/api/analytics/consumption", q);
@@ -250,12 +257,15 @@ function InventoryPanel({ q }: { q: Q }) {
   const dead = (ageing.data ?? []).filter((r) => r.status === "DEAD");
   const wasted = (cons.data ?? []).reduce((a, r) => a + r.wastageValue, 0);
   const used = (cons.data ?? []).reduce((a, r) => a + r.consumedValue, 0);
+  // Stock moved while a material had no cost is valued at ₹0 in the ledger: the totals leave it out, and say so.
+  const uncostedUse = (cons.data ?? []).filter((r) => !r.consumedValueComplete).length;
+  const uncostedWaste = (cons.data ?? []).filter((r) => !r.wastageValueComplete).length;
   return (
     <div className="space-y-4">
       <section aria-label="Inventory summary" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <MetricCard emphasis tone="accent" label="Stock value (now)" value={value.data === undefined ? "…" : formatMoney(value.data)} hint="On hand × weighted-average cost" />
-        <MetricCard tone="brand" label="Consumed" value={formatMoney(used)} hint="Sales, production and issues in the period" />
-        <MetricCard tone={wasted > 0 ? "warn" : "ok"} label="Wastage" value={formatMoney(wasted)} hint={used + wasted > 0 ? `${formatPct((wasted / (used + wasted)) * 100)} of stock used` : undefined} />
+        <MetricCard tone="brand" label="Consumed" value={formatMoney(used)} hint={uncostedUse ? `Incomplete: ${uncostedUse} material(s) had no cost at this outlet` : "Sales, production and issues in the period"} />
+        <MetricCard tone={wasted > 0 ? "warn" : "ok"} label="Wastage" value={formatMoney(wasted)} hint={uncostedWaste ? `Incomplete: ${uncostedWaste} material(s) had no cost at this outlet` : used + wasted > 0 ? `${formatPct((wasted / (used + wasted)) * 100)} of stock used` : undefined} />
         <MetricCard tone={(neg.data?.length ?? 0) > 0 ? "bad" : "ok"} label="Negative stock" value={neg.data ? neg.data.length : "…"} hint="Materials below zero in the ledger" />
       </section>
       <Card title="Consumption & wastage by material" bodyClassName="">
@@ -265,8 +275,8 @@ function InventoryPanel({ q }: { q: Q }) {
             { key: "s", header: "Sold", numeric: true, cell: (r) => `${formatQty(r.saleQty)} ${r.unit}` },
             { key: "p", header: "Production / issued", numeric: true, cell: (r) => `${formatQty(r.productionQty + r.issueQty)} ${r.unit}` },
             { key: "w", header: "Wasted", numeric: true, cell: (r) => `${formatQty(r.wastageQty)} ${r.unit}` },
-            { key: "c", header: "Consumed value", numeric: true, cell: (r) => formatMoney(r.consumedValue) },
-            { key: "v", header: "Wastage value", numeric: true, cell: (r) => formatMoney(r.wastageValue) },
+            { key: "c", header: "Consumed value", numeric: true, cell: (r) => <StockValue value={r.consumedValue} complete={r.consumedValueComplete} /> },
+            { key: "v", header: "Wastage value", numeric: true, cell: (r) => <StockValue value={r.wastageValue} complete={r.wastageValueComplete} /> },
             { key: "x", header: "Wastage %", numeric: true, cell: (r) => <span className={r.wastagePct >= 10 ? "text-bad-600" : ""}>{formatPct(r.wastagePct)}</span> },
           ]} />
       </Card>
@@ -276,7 +286,7 @@ function InventoryPanel({ q }: { q: Q }) {
             { key: "m", header: "Material", cell: (r) => r.material },
             { key: "s", header: "Status", cell: (r) => <Badge tone={r.status === "DEAD" ? "bad" : "warn"}>{r.status === "DEAD" ? "Dead" : "Slow"}</Badge> },
             { key: "o", header: "On hand", numeric: true, cell: (r) => `${formatQty(r.onHand)} ${r.unit}` },
-            { key: "v", header: "Value", numeric: true, cell: (r) => formatMoney(r.value) },
+            { key: "v", header: "Value", numeric: true, cell: (r) => <StockValue value={r.value} complete={r.valueKnown} /> },
             { key: "u", header: "Used (window)", numeric: true, cell: (r) => `${formatQty(r.usedQty)} ${r.unit}` },
             { key: "c", header: "Days of cover", numeric: true, cell: (r) => (r.daysOfCover === null ? "—" : r.daysOfCover) },
             { key: "l", header: "Last used", cell: (r) => formatDateTime(r.lastUsedAt) },

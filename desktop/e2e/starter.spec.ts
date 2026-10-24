@@ -8,9 +8,13 @@
  *  STARTER-002 first run with "Start with the Coders' Cafe menu": 8 categories,
  *              64 items, sizes, pizza add-ons, tables T01–T10 with QR codes;
  *              owner creates manager / chef / cashier through the real staff
- *              flow; Table 07's QR → real menu → cart → order (guest phone) →
- *              manager accepts → KOT → chef cooks → cashier takes cash → bill,
- *              finance, analytics, audit: exactly one of each; RBAC per role.
+ *              flow; Table 07's QR → real menu → cart → checkout (guest phone),
+ *              where the order cannot be placed: a guest QR order reaches the
+ *              kitchen only after a verified online payment, and the desktop has
+ *              no payment gateway. The guest orders with the staff instead:
+ *              manager rings it up for T07 → KOT → chef cooks → cashier takes
+ *              cash → bill, finance, analytics, audit: exactly one of each;
+ *              RBAC per role.
  *
  * The owner works in the Electron window; the other devices are Chromium
  * browsers pointed at the desktop app's own loopback server (the same machine,
@@ -139,7 +143,7 @@ test("STARTER-001 existing install with an empty menu: the owner imports the Cod
   }
 });
 
-test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → order → KOT → kitchen → cash → bill, finance, analytics; every role", async () => {
+test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → checkout refused (no payment gateway) → staff order → KOT → kitchen → cash → bill, finance, analytics; every role", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "aharos starter fresh-"));
   dirs.push(dir);
   const app = await launch(dir);
@@ -151,7 +155,7 @@ test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → order �
     const outletId = (await ok<{ access: { outletIds: string[] } }>(owner, "GET", "/api/auth/me")).access.outletIds[0];
 
     // Tables T01–T10, each with its own QR; T07's link opens on this computer.
-    const tables = await ok<Array<{ code: string; qrToken: string | null }>>(owner, "GET", `/api/master/tables?outletId=${outletId}`);
+    const tables = await ok<Array<{ id: string; code: string; qrToken: string | null }>>(owner, "GET", `/api/master/tables?outletId=${outletId}`);
     expect(tables.map((t) => t.code).sort()).toEqual(["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09", "T10"]);
     expect(new Set(tables.map((t) => t.qrToken)).size).toBe(10); // each table its own QR
     const t07 = tables.find((t) => t.code === "T07")!;
@@ -199,34 +203,54 @@ test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → order �
 
     const before = await ok<{ orders: number; revenue: number }>(owner, "GET", `/api/analytics/sales-summary?outletId=${outletId}`);
 
-    // Customer's phone: scan Table 07 → real menu → cart → order (pay at the counter).
+    // Customer's phone: scan Table 07 → real menu → cart (priced by the server) → checkout.
     const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
     const guest = await phone.newPage();
     await guest.goto(t07Link);
-    await expect(guest.getByLabel("Table T07")).toBeVisible();
+    await expect(guest.getByLabel("Table T07").first()).toBeVisible();
     await guest.getByRole("button", { name: "Add Loaded Veg Nachos" }).click();
     await guest.getByRole("button", { name: "Add Veg Arrabita Penne" }).click();
-    await guest.getByRole("button", { name: /View cart/ }).click();
-    const cart = guest.getByRole("dialog", { name: "Your order" });
-    await expect(cart.getByLabel("Estimated total")).toContainText(inr(351.75)); // 150 + 185 = 335 + 5% GST
-    await cart.getByRole("button", { name: "Place order" }).click();
-    await guest.waitForURL(/\/o\/[^/#]+#k=/);
-    const orderId = decodeURIComponent(new URL(guest.url()).pathname.split("/").pop()!);
-    const ref = orderId.slice(-6).toUpperCase();
-    await expect(guest.getByTestId("order-stage")).toHaveText("Waiting for the restaurant to accept");
+    await guest.getByRole("link", { name: /^View cart/ }).click();
+    await expect(guest.getByTestId("cart-total")).toHaveText(inr(351.75)); // 150 + 185 = 335 + 5% GST
+    await guest.getByRole("link", { name: /^Proceed to checkout/ }).click();
+    // A guest QR order goes to the kitchen only after a verified online payment, and the desktop has no
+    // payment gateway (its server gets only allow-listed OS variables): the order cannot be placed here.
+    await expect(guest.getByRole("status").filter({ hasText: "Online payment isn't available right now" })).toContainText("Please order with the staff.");
+    await expect(guest.getByRole("button", { name: /^Place order & pay/ })).toBeDisabled();
+    // The server refuses it too, however it is asked (pay at the counter, or online): nothing is created.
+    const menu = await ok<{ menu: Array<{ id: string; name: string }>; payment: { online: boolean } }>(guest, "GET", `/api/qr/t/${t07.qrToken}`);
+    expect(menu.payment.online).toBe(false);
+    const lines = ["Loaded Veg Nachos", "Veg Arrabita Penne"].map((n) => ({ menuItemId: menu.menu.find((i) => i.name === n)!.id, qty: 1 }));
+    for (const [paymentMethod, message] of [["CASH", /paid online before they go to the kitchen/], ["ONLINE", /Online payment isn't available right now/]] as const) {
+      const r = await guest.evaluate(
+        async ([u, b, k]) => {
+          const res = await fetch(u, { method: "POST", headers: { "content-type": "application/json", "idempotency-key": k }, body: JSON.stringify(b) });
+          return { status: res.status, body: (await res.json().catch(() => null)) as { error?: { message: string } } | null };
+        },
+        [`/api/qr/t/${t07.qrToken}/orders`, { items: lines, paymentMethod }, `starter-002-${paymentMethod.toLowerCase()}`] as const
+      );
+      expect(r.status, paymentMethod).toBe(422);
+      expect(r.body?.error?.message).toMatch(message);
+    }
+    expect((await ok<{ items: unknown[] }>(owner, "GET", `/api/orders?outletId=${outletId}&tableId=${t07.id}`)).items).toHaveLength(0);
 
-    // Manager accepts the QR order at the POS → one KOT.
+    // So the guest orders with the staff: the manager rings it up for T07 at the POS and sends it to the kitchen.
     await manager.goto("/pos");
-    const openOrders = manager.getByRole("button", { name: /^Open orders, \d+ new QR order/ });
-    await expect(openOrders).toBeVisible({ timeout: 20_000 });
-    await openOrders.click();
-    await manager.getByRole("dialog", { name: "Open orders" }).getByRole("button", { name: new RegExp(`#${ref}.*Table T07`) }).click();
+    await manager.getByRole("button", { name: /Choose table|^Table / }).first().click();
+    const choose = manager.getByRole("dialog", { name: "Choose table" });
+    await choose.getByRole("button", { name: /^Table T07,/ }).click();
+    await expect(choose).toBeHidden();
+    await manager.getByRole("button", { name: `Loaded Veg Nachos, ${inr(150)}` }).click();
+    await manager.getByRole("button", { name: `Veg Arrabita Penne, ${inr(185)}` }).click();
+    const created = manager.waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/orders");
     await manager.getByRole("button", { name: "Send to kitchen" }).click();
-    await expect(guest.getByTestId("order-stage")).toHaveText("Sent to the kitchen", { timeout: 20_000 });
+    const orderId = ((await (await created).json()) as { data: { id: string } }).data.id;
+    const sent = await ok<{ status: string; source: string; total: string; kots: unknown[] }>(owner, "GET", `/api/orders/${orderId}`);
+    expect([sent.status, sent.source, Number(sent.total), sent.kots.length]).toEqual(["SENT", "POS", 351.75, 1]);
 
     // Chef: KDS accept → start → ready → served.
     await chef.goto("/kitchen");
-    const ticket = chef.getByRole("article", { name: /Table T07 · QR$/ });
+    const ticket = chef.getByRole("article", { name: /Table T07$/ });
     await expect(ticket).toContainText("Loaded Veg Nachos");
     await expect(ticket).toContainText("Veg Arrabita Penne");
     for (const b of ["Accept", "Start", "Ready", "Served"]) await ticket.getByRole("button", { name: b }).click();
@@ -246,11 +270,11 @@ test("STARTER-002 first run with the Coders' Cafe menu: Table 07 QR → order �
     await pay.getByRole("button", { name: `Charge ${inr(351.75)}` }).click();
     await expect(pay.getByText("Paid in full")).toBeVisible();
     await pay.getByRole("button", { name: "Done" }).click();
-    await expect(guest.getByTestId("bill-payment-status")).toHaveText("Paid", { timeout: 20_000 });
 
     // Exactly one order / payment / KOT / invoice / finance row; analytics moved by the total; audited.
     const o = await ok<{ status: string; total: string; invoiceNo: string | null; payments: Array<{ method: string; status: string; amount: string }>; kots: unknown[] }>(owner, "GET", `/api/orders/${orderId}`);
     expect(o.status).toBe("PAID");
+    expect((await ok<{ items: Array<{ id: string }> }>(owner, "GET", `/api/orders?outletId=${outletId}&tableId=${t07.id}`)).items.map((x) => x.id)).toEqual([orderId]);
     expect(Number(o.total)).toBe(351.75);
     expect(o.payments.filter((p) => p.status === "SUCCESS").map((p) => [p.method, Number(p.amount)])).toEqual([["CASH", 351.75]]);
     expect(o.kots).toHaveLength(1);

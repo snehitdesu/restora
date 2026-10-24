@@ -129,4 +129,13 @@ describe("middleware", () => {
     expect(middleware(req("/api/health")).status).toBe(200); // probes carry no session
     expect(middleware(req("/api/cron/worker")).status).toBe(200); // cron authenticates with CRON_SECRET in the route
   });
+
+  it("lets linked desktops reach the sync API without a session cookie (the route checks the device token)", () => {
+    const bearer = (path: string) => new NextRequest(`http://localhost${path}`, { headers: { authorization: "Bearer dev_token" } });
+    expect(middleware(req("/api/sync/pair/complete")).status).toBe(200);
+    expect(middleware(req("/api/sync/enroll")).status).toBe(200);
+    expect(middleware(bearer("/api/sync/orders?outletId=o1")).status).toBe(200);
+    expect(middleware(bearer("/api/sync/ops")).status).toBe(200);
+    expect(middleware(req("/api/syncx")).status).toBe(401); // prefix match stays exact
+  });
 });

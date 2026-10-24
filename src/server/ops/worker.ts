@@ -16,7 +16,7 @@
  *     twice; the delivery's idempotency key prevents duplicates at creation.
  *  2. Stuck work (crash between "row written" and "outcome recorded", older
  *     than OUTBOX_STUCK_SECONDS, default 300):
- *       - PENDING AGGREGATOR_STATUS -> FAILED + due now (a status push is safe to repeat);
+ *       - PENDING AGGREGATOR_STATUS / AGGREGATOR_ITEM -> FAILED + due now (a status or on/off push is safe to repeat);
  *       - PENDING MESSAGE -> FAILED, NOT auto-retried (it may have reached the
  *         provider: re-sending could text the guest twice) — manual retry;
  *       - PENDING ACCOUNTING_SYNC -> FAILED; Zoho Books is retried (the journal is looked up
@@ -28,6 +28,13 @@
  *     retry (pos.checkIdempotency); here they are only counted and alerted.
  *  3. Hourly housekeeping — expired sessions and password links older than 7
  *     days are deleted; backup freshness (BACKUP_STATUS_FILE) is checked.
+ *  4. Pending online payments, LAST (it waits on banks): gateway payments still
+ *     PENDING a few minutes after checkout are re-asked at the bank
+ *     (services/paymentRecovery.ts) within a call and time budget, so a slow
+ *     bank never delays the work above or overruns a cron function. A capture
+ *     the guest's browser never reported is settled (and its QR order released
+ *     to the kitchen, or held if late) through payment.verifyPayment; anything
+ *     undecided, or a bank that does not answer, leaves the payment PENDING.
  *
  * A failing tick (e.g. database down) is logged + alerted and the next tick
  * tries again; the worker never crashes the process. Graceful shutdown stops
@@ -40,6 +47,8 @@ import { systemContext } from "@/server/auth/context";
 import { purgeExpiredSessions } from "@/server/auth/session";
 import { deliverMessage } from "@/server/services/messaging";
 import { pushAggregatorStatus } from "@/server/services/aggregatorSync";
+import { deliverItemAvailability } from "@/server/services/aggregatorMenu";
+import { sweepRateLimitWindows } from "@/server/api/rateLimitDb";
 import { deliverAccountingSync, recoverInterruptedAccountingSync } from "@/server/services/accountingSync";
 import { failStaleExportJobs } from "@/server/services/exportJobs";
 import { webhookClaimStaleMs } from "@/server/services/pos";
@@ -49,6 +58,7 @@ import { inc } from "@/server/observability/metrics";
 import { raiseAlert } from "@/server/observability/alerts";
 import { onShutdown } from "@/server/ops/lifecycle";
 import { runScheduledJobs } from "@/server/ops/scheduled";
+import { recheckPendingPayments, type RecheckResult } from "@/server/services/paymentRecovery";
 
 const envInt = (name: string, d: number, min = 1) => {
   const n = Number(process.env[name]);
@@ -62,12 +72,12 @@ const BATCH = 50;
 export const INTERRUPTED_MESSAGE = "Interrupted before the outcome was recorded (server restart?); check the provider before retrying";
 export const INTERRUPTED_PRINT = "Interrupted before printing (server restart?); print again from the print queue if still needed";
 
-export type TickResult = { retried: number; sent: number; givenUp: number; stuckDeliveries: number; stuckPrints: number; staleExports: number; stuckWebhooks: number; housekeeping?: { sessions: number; passwordTokens: number } };
+export type TickResult = { retried: number; sent: number; givenUp: number; stuckDeliveries: number; stuckPrints: number; staleExports: number; stuckWebhooks: number; housekeeping?: { sessions: number; passwordTokens: number }; paymentRecheck?: RecheckResult };
 
 /** 1. Re-send due deliveries. */
 export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Date()) {
   const due = await db.integrationDelivery.findMany({
-    where: { status: "FAILED", kind: { in: ["MESSAGE", "AGGREGATOR_STATUS", "ACCOUNTING_SYNC"] }, nextAttemptAt: { lte: now } },
+    where: { status: "FAILED", kind: { in: ["MESSAGE", "AGGREGATOR_STATUS", "AGGREGATOR_ITEM", "ACCOUNTING_SYNC"] }, nextAttemptAt: { lte: now } },
     orderBy: { nextAttemptAt: "asc" },
     take: BATCH,
   });
@@ -86,6 +96,7 @@ export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Da
       let after: { status: string; attempts: number; maxAttempts: number; nextAttemptAt: Date | null } | null = null;
       if (d.kind === "MESSAGE") after = await deliverMessage(ctx, d.id, db);
       else if (d.kind === "ACCOUNTING_SYNC") after = await deliverAccountingSync(d.id, db);
+      else if (d.kind === "AGGREGATOR_ITEM") after = await deliverItemAvailability(ctx, d.id, db);
       else if (d.sourceId) after = await pushAggregatorStatus(ctx, d.sourceId, (JSON.parse(d.payload) as { status: "READY" }).status, db);
       if (after && (after.status === "SENT" || after.status === "DELIVERED")) sent++;
       else if (after && after.status === "FAILED" && !after.nextAttemptAt) {
@@ -111,7 +122,7 @@ export async function retryDueDeliveries(db: PrismaClient = prisma, now = new Da
 export async function recoverStuckWork(db: PrismaClient = prisma, now = new Date()) {
   const cutoff = new Date(now.getTime() - stuckMs());
   const aggregator = await db.integrationDelivery.updateMany({
-    where: { status: "PENDING", kind: "AGGREGATOR_STATUS", updatedAt: { lt: cutoff } },
+    where: { status: "PENDING", kind: { in: ["AGGREGATOR_STATUS", "AGGREGATOR_ITEM"] }, updatedAt: { lt: cutoff } },
     data: { status: "FAILED", lastError: INTERRUPTED_MESSAGE, nextAttemptAt: now },
   });
   const messages = await db.integrationDelivery.updateMany({
@@ -132,11 +143,17 @@ export async function recoverStuckWork(db: PrismaClient = prisma, now = new Date
   return { stuckDeliveries, stuckPrints: prints.count, staleExports, stuckWebhooks };
 }
 
-/** 3a. Delete expired sessions and long-expired password links. */
+/** 3a. Delete expired sessions, long-expired password links and ended rate-limit windows. */
 export async function housekeeping(db: PrismaClient = prisma, now = new Date()) {
   const sessions = await purgeExpiredSessions(db);
   const tokens = await db.passwordToken.deleteMany({ where: { expiresAt: { lt: new Date(now.getTime() - 7 * 24 * 3600_000) } } });
-  if (sessions || tokens.count) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count });
+  // The table only matters with RATE_LIMIT_STORE=database; a database that has not
+  // applied its migration yet must not stop the rest of housekeeping.
+  const rateLimitWindows = await sweepRateLimitWindows(db, now.getTime()).catch((e) => {
+    log.warn("rate-limit windows were not swept", { event: "housekeeping_rate_limit_skipped", error: e instanceof Error ? e.name : "Error" });
+    return 0;
+  });
+  if (sessions || tokens.count || rateLimitWindows) log.info("housekeeping", { event: "housekeeping", sessions, passwordTokens: tokens.count, rateLimitWindows });
   return { sessions, passwordTokens: tokens.count };
 }
 
@@ -171,7 +188,10 @@ export async function checkBackupFreshness(now = new Date()): Promise<"ok" | "st
 
 let lastHousekeeping = 0;
 /** One worker pass (exported for tests and for the ops script). */
-export async function runWorkerTick(db: PrismaClient = prisma, now = new Date(), opts: { housekeeping?: boolean } = {}): Promise<TickResult> {
+/** Default time a tick may spend asking banks about pending payments (the in-process tick runs every 30 s and never overlaps). */
+export const PAYMENT_RECHECK_BUDGET_MS = 20_000;
+
+export async function runWorkerTick(db: PrismaClient = prisma, now = new Date(), opts: { housekeeping?: boolean; paymentRecheck?: { deadlineAt?: number; maxCalls?: number } | false } = {}): Promise<TickResult> {
   const r = await retryDueDeliveries(db, now);
   const s = await recoverStuckWork(db, now);
   const result: TickResult = { ...r, ...s };
@@ -182,6 +202,14 @@ export async function runWorkerTick(db: PrismaClient = prisma, now = new Date(),
     lastHousekeeping = now.getTime();
     result.housekeeping = await housekeeping(db, now);
     await checkBackupFreshness(now);
+  }
+  if (opts.paymentRecheck !== false) {
+    try {
+      result.paymentRecheck = await recheckPendingPayments(db, now, { deadlineAt: opts.paymentRecheck?.deadlineAt ?? Date.now() + PAYMENT_RECHECK_BUDGET_MS, maxCalls: opts.paymentRecheck?.maxCalls });
+    } catch (e) {
+      inc("restora_job_failures_total", { type: "payment_recheck" });
+      log.error("pending payment recheck failed", { event: "payment_recheck_failed", error: e });
+    }
   }
   return result;
 }

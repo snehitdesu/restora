@@ -1,5 +1,41 @@
 # Production readiness — Aharos
 
+## Current position (2026-10-20) — not ready for Production
+
+**Branch `release/coders-cafe-2026-10-13` is ready for a local investor demo
+only. It is not ready for SBI UAT or for a Production deployment.** Counter POS,
+KDS and back-office workflows are verified locally (unit / integration tests and
+browser E2E on local databases), but nothing on this branch has been deployed
+or verified in Production. Production, as last observed, runs `main` `a80caa9`.
+
+Open blockers, all outside the codebase (order and owners:
+`docs/owner-go-live-checklist.md`):
+
+- **Online guest payment does not exist yet.** The SBI adapter (`sbi_upi`) is a
+  stub that refuses every call; guest QR ordering is therefore refused. It needs
+  SBI's specification, onboarding, UAT and sign-off
+  (`docs/sbi-upi-integration.md`). The local UPI emulator and `mock` provider are
+  for a disposable local demo only and are refused in Production.
+- **Production database:** no Production `DATABASE_URL` on record; backup not
+  proven; this branch carries ten migrations newer than `a80caa9`'s schema,
+  none applied to Production by this work (`docs/payment-safety.md` §7).
+- **Production table QR tokens** are the legacy, derivable ones: audit and an
+  owner-approved rotation, then new printed cards, before guests use them
+  (`docs/qr-token-rotation.md`).
+- **Payment-recovery scheduler** on Vercel not configured or proven
+  (`docs/payment-safety.md` §3).
+- **Owner decisions:** the late-payment window (10 minutes is a proposed default,
+  not approved), the recovery scheduler / Vercel plan, the release.
+- **Legacy Razorpay** read-only audit blocked (`docs/payments-razorpay.md`).
+- **Physical bill printer** not verified (`docs/physical-printer-test.md`).
+
+The sections below are dated history. In particular, the 2026-10-01 verdict
+("ready for a controlled production deployment once the MUST items are done")
+predates the retirement of Razorpay and the SBI requirement, and is **not** the
+current status.
+
+---
+
 _Audit of 2026-10-01 (production verification & hardening pass). Every "verified"
 item below was executed, not inferred; see PROJECT_STATUS.md for exact results._
 
@@ -12,7 +48,39 @@ Supersedes the per-item status below where they differ:
 - **Observability** ("can be added after"): structured redacting JSON logs with request ids, metrics, alert webhook — done (Phase 9).
 - **M4 (HTTPS), M5 (proxy hops), M6 (one instance), M9 (secrets/providers), M10 (EXPORT_DIR)** remain per-deployment configuration, enforced or warned by startup validation; see `docs/release-checklist.md`.
 
-## Verdict
+## Status update — Groups 6-9 (2026-10-09)
+
+Supersedes the per-item status below where they differ:
+- **M6 rate limits across instances:** `RATE_LIMIT_STORE=database` shares the counters between instances (one atomic upsert per limited request; a database error falls back to per-process counting and is logged). Measured: no difference from the in-memory store at the load test's scale (`docs/production-infrastructure.md` §7.1). Exports are still written to local disk (one instance, or an `EXPORT_DIR` on shared storage).
+- **M7 append-only history:** `AuditLog` and `InventoryLedger` are now refused by the database itself (triggers on both engines, TRUNCATE too on PostgreSQL) in addition to the role grants; they survive backup / restore (drill 10/10 on the current schema, §8.0).
+- **Load:** the end-to-end HTTP load test was re-run on the current build against PostgreSQL 16: no correctness violation (no overpaid or doubly paid order, no duplicate order per key, outbox drained), 0 deadlocks; the only non-200 outcome is the documented `503 Busy` on contended goods-receipt posting.
+- **Browser E2E is a CI release gate** on both SQLite and PostgreSQL (it was a manual gate); desktop build, E2E, packaged-app verification and DMG run on Windows and both macOS architectures.
+- **Accessibility / responsive:** every screen is scanned with axe (WCAG 2.1 A and AA) at a phone and a desktop width and opened at ten viewports (320-1920 px, plus a phone held sideways); serious or critical findings fail the suite.
+- Still external, unchanged: hosting and HTTPS, scheduled backups / WAL archiving on real infrastructure, provider credentials and live runs (Razorpay `rzp_test_` / live, Petpooja, WhatsApp / SMS, Resend, Tally, Zoho, Google Sheets, Zomato / Swiggy), code-signing certificates, a hosted PostgreSQL instance, PostgreSQL row-level security before a second untrusted organization shares a database.
+
+## Status update — completion and authentication pass (2026-10-13, reconciled with Groups 6-9)
+
+See `docs/system-audit.md` (defects D1–D12, gap register, test counts). In short: guest checkout no longer answers 500 for placed orders under load and never loses the staff alert (D1); SQLite lock waits are 503 Busy (D2); the back-office "saved but nothing happened" freeze has a navigation watchdog (D3); forgot-password is honest when no email is configured and no longer leaks account existence through timing (D4, D5); sign-in ends the browser's previous session (D7); shared rate limits are available for multi-instance hosting (D8); checkout refuses a stale shown total (D9). Still external or approval-gated: migrating the original `prisma/dev.db` (plan ready), SBI's UPI API specification and UAT access (Razorpay is retired for new payments, `docs/sbi-upi-integration.md`), Resend credentials, the hosted demo (no URL), installer testing on a disposable Windows machine, code signing.
+
+## Status update — recovery, finance and sync audit (2026-10-19)
+
+- **Owner recovery** (verified email + offline recovery codes + a second owner): see `docs/security.md` §2. A sole owner sees a dashboard notice until recovery is set up.
+- **Fixed, with regression tests:**
+  - A linked desktop could not take payment for a cloud order: the hosted edge middleware answered 401 to its `Authorization: Bearer` device token (no cookie) on `/api/payments`. The middleware now lets a Bearer header through; the router validates the device token as before (`tests/api/middleware-matcher.test.ts`, `tests/sync/cloud-sync-api.test.ts`).
+  - Settlement counted only SUCCESS payments, the balance rule SUCCESS + PARTIAL: a split bill with a partly refunded part could never become PAID (`tests/domain/payment-balance.test.ts`).
+  - A per-line discount (`PATCH /api/orders/items/:id`) needed only `order.modify` (a captain could discount), was not audited and was not capped (`tests/domain/order-ops.test.ts` T6).
+  - Guest QR order: 2 fewer database round trips for one line, 4 fewer per extra line (32 → 30 operations; +9 → +5 per line), held by `tests/perf/guest-order-statements.test.ts`.
+- **Guest order latency on the hosted Preview:** 22.9 s for one line (measured 2026-10-19), about 0.47 s per statement because the functions run in `iad1` and the database is in Singapore (`ap-southeast-1`); a one-line order is ~47 SQL statements after this change. Reducing statements further gives seconds; co-locating the functions with the database (`sin1`) would remove most of the ~0.4 s per statement. **Not changed:** the region setting also applies to Production — owner approval needed. Scope (checked 2026-10-19 via the Vercel API): the project setting `functionDefaultRegions = ["iad1"]` applies to every *new* deployment, Production and Preview alike, so changing it would move the next Production deploy. A `"regions": ["sin1"]` key in `vercel.json` applies only to deployments built from commits that contain it: on the release branch it would move only that branch's Previews, but it reaches Production when the branch is merged. The live Production deployment (`a80caa9`) is immutable and keeps `iad1` either way. Production's database location is not recorded here (a warm `SELECT 1` from `iad1` takes ~210 ms, so it is also far from `iad1`); confirm it before choosing a Production region.
+- **Verified on the hosted Preview (commit 4fb126f, isolated Neon test branch, 2026-10-19):**
+  - Owner recovery in a real browser (Playwright, 19/20 checks; the 20th was a stale status line after saving codes, fixed in 4076953): signed-out pages redirect; forgot-password states that email reset is not available; an unknown email with a guessed code gets the uniform 422; a bogus verification link is refused and the token leaves the address bar; codes are generated only after the password, shown once (10, no-store), redeemed with lower-case and spaces, single use; the old session is revoked, the old password fails and the new one works.
+  - One labelled demo QR order (cash, 1 line): 19.2 s end to end (server 18.3 s); a replay of the same key returned the same order in 3.8 s; one order, one KOT, one staff alert.
+  - Cloud Sync with the installed desktop (isolated data folder) through a pairing code from the hosted owner: LINKED; the demo order arrived once in the desktop POS and KDS (same items, total, tax); a reused pairing code was refused; a cash payment taken on the desktop reached the cloud with the device token alone (the middleware fix) and settled the hosted order once (one payment, one invoice); a KDS change made during a cloud outage was queued, survived a desktop restart and was applied once after reconnection (sent twice in a race, one receipt); revoking the device from the cloud put the desktop in AUTH_REQUIRED.
+  - Found there and fixed in 5e1758c (desktop rebuild needed): the desktop's 15 s cloud timeout fired before a ~15 s cloud settlement and told the cashier "temporarily unavailable" for a paid bill; writes now wait 45 s.
+  - Not verifiable here: real email delivery (no `RESEND_API_KEY` / `RESEND_FROM` / `PUBLIC_BASE_URL` on the Preview, no controlled mailbox).
+- **Preview-only `RAZORPAY_WEBHOOK_SECRET` — origin established (investigated 2026-10-19):** Vercel record `oslMduoXKrXWRoiw`, type Sensitive, target **Preview only**, git branch **`release/coders-cafe-2026-10-13` only**, created 2026-10-19 05:38:06 UTC by the project owner's CLI token and never edited since. It was created by the Cloud Sync test session after the owner chose "Add placeholder (Recommended)" when that session asked how to fix the Preview's boot failure (`PAYMENT_PROVIDER=razorpay` is shared with Preview, but the webhook secret existed only for Production, so startup validation refused to boot). The value is 32 random bytes generated in that session and never printed or stored; no one holds it, so no Razorpay webhook can be configured with it. Consumer: `RazorpayPaymentProvider.verifyWebhook` (`src/integrations/payment/index.ts`) behind `POST /api/webhooks/payment/razorpay`, after the per-tenant binding in `src/server/services/webhookTenant.ts` (a tenant's own webhook secret, when set, takes precedence). Effect: on that branch's Previews every unsigned or foreign-signed Razorpay delivery is 401 — Preview webhooks are deliberately inert (the Preview is also behind Vercel Authentication, so Razorpay could not reach it anyway). The shared `RAZORPAY_KEY_ID` is a test key (the Preview logs the "TEST key" configuration warning). Production's own record (`LlIIEOFhjXOkXGfv`, Production only, 2026-10-10) is separate and was not touched. No rotation was needed; if a test-mode webhook is ever pointed at a Preview, replace this placeholder with the secret set in the Razorpay test dashboard. Signature, replay, tenant isolation and failure behaviour re-verified locally: `tests/domain/webhook-tenant.test.ts`, `tests/domain/webhooks-reconciliation.test.ts`, `tests/integrations/razorpay.test.ts`, `tests/api/integrations-routes.test.ts` (49/49).
+- **Decided (2026-10-19) — kitchen display idle exemption kept, and narrowed:** a kitchen screen must stay visible during service, so the KDS ticket poll (`GET /api/kitchen/kots`) keeps the session alive — but only for a kitchen-only account (every role `KITCHEN`), decided server-side. A manager, owner, cashier or mixed-role account watching the KDS gets no exemption (previously any account's KDS poll counted as activity), and the campaign detail page's 8 s refresh is now background polling too. Details and tests: `docs/security.md` → *Kitchen display idle exemption*. Deployment note: sign kitchen screens in with a dedicated KITCHEN-only account.
+
+## Verdict of the 2026-10-01 audit (historical — superseded by "Current position" above)
 
 **Ready for a controlled production deployment once the MUST items below are done.**
 The application itself (auth, RBAC, tenant/outlet isolation, workflows, POS/KDS,
@@ -53,12 +121,12 @@ Small production-security gaps from the audit, now closed at the application lay
 
 | # | Item | Why | Status |
 |---|------|-----|--------|
-| M1 | **Account provisioning.** New staff got an unusable placeholder password with no invite / set-password / reset flow, so nobody could sign in to a fresh production database. | Nobody can sign in to a fresh production database. | ✅ done (Phase 5A): `npm run bootstrap:owner` creates the first organization, outlet and OWNER on an **empty** database only (config via `BOOTSTRAP_*` env, password via `--password-stdin` or a hidden prompt); new staff get a one-time setup link (Team → Add staff), managers can issue a fresh link (Team → Password link); `/account/password` changes a password and signs out other sessions. **Still open:** no email/SMS delivery — self-service `/forgot-password` records the request but sends nothing until a delivery provider is registered (`setPasswordLinkDelivery`); links are handed over by a manager. |
+| M1 | **Account provisioning.** New staff got an unusable placeholder password with no invite / set-password / reset flow, so nobody could sign in to a fresh production database. | Nobody can sign in to a fresh production database. | ✅ done (Phase 5A): `npm run bootstrap:owner` creates the first organization, outlet and OWNER on an **empty** database only (config via `BOOTSTRAP_*` env, password via `--password-stdin` or a hidden prompt); new staff get a one-time setup link (Team → Add staff), managers can issue a fresh link (Team → Password link); `/account/password` changes a password and signs out other sessions. Password-reset email is sent through Resend when `RESEND_API_KEY`, `RESEND_FROM` and `PUBLIC_BASE_URL` are set (`setPasswordLinkDelivery`). Otherwise `/forgot-password` records the request and sends nothing; a manager issues the link. There is still no SMS delivery. |
 | M2 | **Upgrade Next.js** (15.1.4 had a critical RCE in the React flight protocol, a middleware authorization bypass, Windows/Image-optimizer RCEs, SSRF, cache poisoning). | Remote code execution. | ✅ done: next 15.5.27, react/react-dom 19.0.8 (lockfile updated). **Run `npm ci` after stopping the dev server** — local node_modules still has 15.1.4. |
 | M3 | **Switch the schema to PostgreSQL and commit a PostgreSQL migration history.** `prisma/schema.prisma` is SQLite; the PostgreSQL schema and `baseline.sql` live in `/prisma/postgres/`, which is **git-ignored**. | Production migrations must be version-controlled and replayable. | ✅ H5: PostgreSQL history committed in `prisma/postgres/migrations` (baseline `20261004130000_baseline`, explicit `@db.Decimal` precision); `npm run db:pg:deploy` = `migrate deploy`; verified on fresh PostgreSQL 16 databases (deploy, no drift, full suite). H6: the CI `postgres` job runs deploy → status → drift (shadow) → full suite; configured and actionlint-clean, **not yet executed on GitHub**. |
 | M4 | **HTTPS termination** (reverse proxy / load balancer). | The session cookie is `Secure` in production: over plain HTTP the browser drops it and **login silently fails**. HSTS is sent. | infra |
 | M5 | **Set `TRUSTED_PROXY_HOPS`** to the number of proxies in front of the app (default 1). | Client IP for login rate limits and audit entries. | code ✅ (was trusting the client-controlled left side of X-Forwarded-For) — config per deployment |
-| M6 | **Run exactly ONE app instance.** | Rate limits are in-memory and export files are on local disk; more instances silently weaken limits and break export downloads. | constraint until a shared store exists |
+| M6 | **Run ONE app instance, or set `RATE_LIMIT_STORE=database`.** | Export files are on local disk and break downloads across instances; rate limits are per process unless the shared store is selected. | shared rate-limit store ✅ (`RateLimitWindow`, `tests/api/rate-limit-store.test.ts`; keys hashed, `tests/auth/auth-matrix.test.ts`); exports stay single-instance |
 | M7 | **Database roles:** the app connects as a non-superuser, non-owner role with DML grants only; migrations run as a separate owner role. `REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog", "InventoryLedger" FROM <app role>` (verified: the app never updates or deletes these rows). | Least privilege; append-only audit/ledger enforced by the database. | infra/SQL (no RLS plumbing needed) |
 | M8 | **Backups:** automated PostgreSQL backups with point-in-time recovery, and one restore rehearsal. | Orders, payments and stock are the business record. | infra |
 | M9 | **Secrets & providers:** real `PAYMENT_WEBHOOK_SECRET` / `PETPOOJA_WEBHOOK_SECRET` / `AGGREGATOR_WEBHOOK_SECRET` (long random); `PAYMENT_PROVIDER` / `POS_PROVIDER` set to real providers or left mock **only** if card/UPI gateway flows are not used. Mock providers are now refused in production by every factory unless `ALLOW_MOCK_PROVIDERS=true`. Do **not** set `ALLOW_DEMO_SEED` or `ALLOW_MOCK_PROVIDERS` in production. | Mock gateways approve anything. | code ✅ — config per deployment |
@@ -72,7 +140,7 @@ Small production-security gaps from the audit, now closed at the application lay
 | Row-Level Security (docs/postgres-rls.md) | Defense in depth. **Required before hosting a second, untrusted organization in the same database**; not required for a single-organization deployment where application-layer isolation (tested) applies. |
 | Shared rate-limit store (Redis) + object storage for exports | Prerequisite for >1 instance. |
 | Validation-before-authorization ordering | Services Zod-parse input before `assertCan`, so an unauthorized caller with a malformed body gets 422 (schema details) instead of 403. No data read or written. Low. |
-| Idle session timeout / session rotation | Sessions are 7-day absolute (`SESSION_TTL_SECONDS`), revoked on logout and deactivation; no idle timeout. |
+| Session rotation | Sessions are 7-day absolute (`SESSION_TTL_SECONDS`), revoked on logout and deactivation (a new sign-in also revokes that browser's previous session), and revoked server-side after 15 minutes without meaningful activity (`SESSION_IDLE_TIMEOUT_SECONDS`; background polling does not extend it, except the kitchen display's ticket poll for kitchen-only accounts — see `docs/security.md` *Kitchen display idle exemption*; `src/server/auth/session.ts`). The token itself is not rotated during a session. |
 | Script CSP with nonces | CSP restricts all sources to same-origin (see `docs/exports.md`), but `script-src` still allows `'unsafe-inline'` for Next.js hydration. |
 | Structured logging + request ids, error monitoring (Sentry or similar), uptime alerts | Today: `console.error` for 5xx only. The mock notifier logs recipients (PII) to stdout **in dev/test only** (it is refused in production unless explicitly opted in). Prisma logs handled unique-constraint conflicts as errors (noise). |
 | `npm audit` leftovers | `postcss` (Next's pinned build-time copy; needs attacker-controlled CSS at build time) and `deepmerge-ts` via the Prisma CLI (deploy-time). Not reachable at runtime; revisit on the next Next/Prisma upgrade. |

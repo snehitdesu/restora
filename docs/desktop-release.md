@@ -20,6 +20,11 @@ from Windows, and an Intel DMG cannot be produced on Apple Silicon). CI builds b
 `.github/workflows/ci.yml` job `desktop-macos` (arm64 + x64 runners) runs the
 desktop E2E, `desktop:verify` and the DMG build and uploads each DMG.
 
+_Update 2026-10-21:_ item (1) below is resolved in CI: run 39492234842 on
+`e7fedf8` built both DMGs (arm64 and x64; desktop E2E 9/9, `desktop:verify`
+24/24 each), unsigned and not published. Item (2) (Developer ID signing and
+notarization) is still open, and nobody has installed a DMG on a real Mac.
+
 Not yet done for macOS: **(1)** no macOS package has been produced yet. Every
 `desktop-macos` run up to 6bca43c built the payload and passed the desktop E2E on
 both arches, then failed at "Package: RESTORA.app" with `<repo> not a file`: the
@@ -126,6 +131,111 @@ The database is at a migration boundary (the failed migration rolled back).
   automatically** (`desktop/runtime/restore.ts`, `RestoreRolledBackError`).
 - Logs never contain passwords or the install secret; they contain e-mail
   addresses of setup/restore actors and blocked URLs (first 200 characters).
+
+## One version, one binary (finding 2026-10-19)
+`src/site/release-manifest.json` publishes `1.0.0-rc.1` as the 2026-10-06 build
+(Setup 136,792,602 bytes, sha256 `67ec34c5…`). The local `dist-desktop/` holds a
+2026-10-15 rebuild (Cloud Sync) under the **same** version (Setup 137,822,088
+bytes), so `tests/site/website.test.ts` fails locally (CI has no `dist-desktop`,
+so CI is green). Two different binaries must never share a version: an upgrade
+check, a support report or a future updater cannot tell them apart. Before the
+next distributed build, bump `package.json` `version` (e.g. `1.0.0-rc.2`),
+rebuild, and regenerate the manifest (size + sha256) from that exact file; the
+test then passes against it. The test and the existing installers were left
+unchanged.
+
+**Resolved locally 2026-10-20.** The manifest is the correct record: the draft
+GitHub release `v1.0.0-rc.1` (created 2026-10-10, not published) holds exactly
+those two files, and GitHub's asset digests equal the manifest's sha256 values
+(Setup `67ec34c5…`, Portable `3a1415ad…`). The manifest was therefore kept. The
+mislabelled 2026-10-15 rebuild was moved, not deleted, to
+`dist-desktop/unreleased-2026-10-15-build-labelled-rc.1/` (with a README holding
+both sets of sizes/hashes), so `dist-desktop/` no longer offers a file under the
+rc.1 name that is not rc.1. No rc.2 was built: the next release's contents are
+the uncommitted review work, which is not yet approved. When it is:
+
+1. Bump `package.json` `version` to `1.0.0-rc.2` (and the rc.1 literals in
+   `tests/site/website.test.ts` together with the manifest).
+2. `npm run desktop:dist` on a clean checkout of the approved commit (no dev server
+   running; see the desktop build hazards in this file).
+3. `npm run desktop:verify`, then `node scripts/site/release-manifest.mjs`.
+4. Independently check `certutil -hashfile dist-desktop\RESTORA-Setup-1.0.0-rc.2.exe SHA256`
+   (and Portable) against the manifest, upload both to a new draft release, and
+   compare GitHub's asset digests before publishing.
+5. The installed copy on this PC reports 1.0.0-rc.1 but is the 2026-10-15 build:
+   install rc.2 over it once released.
+
+## Start-up time (measured 2026-10-19, installed 1.0.0-rc.1 build of 2026-10-15)
+Measured from the app's own `Startup timings` log line on this machine (8 GB RAM,
+under 1 GB free during the runs), with isolated data folders (`AHAROS_DATA_DIR`):
+
+| Launch | Database + all 28 migrations | Local server ready | Window / first page |
+|---|---|---|---|
+| Clean first launch (empty folder) | 1.2 s (then the first-run setup window; the server starts after setup) | — | — |
+| Set-up install, 12:03 | 2.2 s | 32.4 s | 33.5 s |
+| Same install restarted, 12:14 | 2.0 s | 19.3 s | 41.7 s |
+
+One-time database initialization is not the cost: the packaged Next.js server
+boot (17–30 s here) is, plus a window / first-page gap that varied from 1 s to
+22 s. The earlier "~72 s first launch" figure therefore mostly measures the
+server boot and the setup flow. Next step before optimizing: profile the
+standalone server start (module loading from `resources/server`, antivirus
+scanning of the unpacked files, cold disk cache) on a machine with free memory.
+
+### 2026-10-20 packaging check (unpacked build only, nothing published)
+- `npm run desktop:pack` failed with "No standalone build found": a stray
+  `package.json` / `package-lock.json` in the user's home folder made Next.js
+  infer that folder as the workspace root, so the standalone server was written to
+  `.next-desktop/standalone/Downloads/food/`. `next.config.mjs` now pins
+  `outputFileTracingRoot` to the checkout (test
+  `tests/config/next-tracing-root.test.ts`); packaging then succeeded.
+- `npm run desktop:verify` on that package: **23/23 checks passed** (fuses, DPAPI
+  secret, upgrade from the previous release with a verified pre-migration backup,
+  sign-in and data intact, first run, debugger / `RUN_AS_NODE` / tampered-asar
+  refusals). The packaged server was ready **2.9 s** after the database step.
+- The run immediately before it, the first launch of the freshly unpacked files,
+  timed out after 120 s waiting for the server's health check; that run's log was
+  deleted by `desktop:verify`'s cleanup (it now keeps the folder when a check
+  fails). Investigation on 2026-10-21 (below). No installer (`desktop:dist`) was
+  built: the version is still `1.0.0-rc.1` and an rc.2 needs the release decision
+  described above.
+
+### 2026-10-21 first-launch timeout investigation
+Measured with the packaged server (`resources/server`) started with the app's
+environment, event-loop gap monitoring and CPU profiles, plus seven full
+`desktop:verify` runs. The original >120 s failure was **not reproduced** (three
+attempts right after `desktop:pack`); two causes of slow starts were proven:
+
+1. **Next.js preloaded every route at start-up (fixed).** Next 15's default
+   `experimental.preloadEntriesOnStart` loads all 164 routes and evaluates every
+   module when the server starts. That blocked the server's event loop for
+   2.6–4.3 s in one stretch, so the launcher's first health check failed on
+   **every** start with "database ping timed out" (the database answers in
+   ~50 ms; the timer and the answer were both stuck behind the blocked loop), and
+   a critical "database unavailable" alert was logged. In one stalled warm start
+   the health check answered only after 48.8 s (the launcher gives up at 60 s).
+   With it off (desktop build only; `next.config.mjs`, enforced by
+   `desktop/scripts/build.mjs`, test `tests/config/next-desktop-preload.test.ts`):
+   first health check succeeds every time, health at 1.6–2.1 s instead of
+   4.0–7.6 s (once 5.3 s, when the process itself was slow to launch), total start-up blocking ~2.0 s instead of ≥ 4.1–6.6 s.
+2. **Reading freshly written files is very slow the first time (outside the
+   app).** Right after `desktop:pack`, reading every file of the package once took
+   **108 s** (2,972 files, 457 MB, ≈ 4 MB/s; `.js` files slowest); a second read
+   took 2.5 s. Launching straight after packaging took 28.8 s (before the fix) and
+   31.2 s (after) to serve; after that one pre-read, the same launch served in
+   **1.7 s**. A control test with identical bytes saved as `.js` and `.dat`
+   showed intermittent first-read penalties for `.js` only, and electron-builder
+   itself once failed with `EPERM` renaming its just-extracted folder. This is
+   consistent with on-access antivirus scanning (Defender real-time protection is
+   on), but it is **not proven**: Defender's own counters are not readable here
+   without administrator rights (`New-MpPerformanceRecording` would show it).
+   An installer writes the same fresh files, so a real first launch after
+   installation can pay this cost too; it is within the 60 s limit in every run
+   measured after the fix, but on slower PCs it is untested.
+
+Launch times after the fix (`Aharos server ready on loopback`): warm 2.1 s,
+fresh copy 2.7 s, straight after packaging 31.2 s, after packaging + pre-read
+1.7 s; upgrade from the previous release with data preserved passed in every run.
 
 ## Code signing — NOT configured (installers are unsigned)
 No certificate exists in this repository or CI. Unsigned installers trigger

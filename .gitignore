@@ -43,6 +43,9 @@ npm-debug.log*
 /e2e/.results-investor/
 /e2e/.report/
 /e2e/.report-investor/
+/e2e/.results-acceptance/
+/e2e/.report-acceptance/
+/e2e/.evidence-acceptance/
 
 # stray local databases / TypeScript incremental build info
 /*.db
@@ -61,6 +64,8 @@ npm-debug.log*
 
 # Generated table-QR sheets (live tokens; local output is not customer print)
 /artifacts/table-qr/
+# Legacy demo images that point at the live Production site (scripts/qr/demo-assets.ts)
+/artifacts/coders-cafe-qr/
 
 # Local agent tooling and generated promo renders (not application source)
 /.agents/

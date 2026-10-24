@@ -52,7 +52,14 @@ export async function createSession(
 }
 
 /** A live session as seen by the request that presented its token. */
-export type ActiveSession = { id: string; userId: string; reauthScope: string | null; reauthExpiresAt: Date | null };
+export type ActiveSession = {
+  id: string;
+  userId: string;
+  reauthScope: string | null;
+  reauthExpiresAt: Date | null;
+  /** The persisted start of the idle window as of this request (lets recordSessionActivity skip a write it does not need). */
+  lastActivityAt?: Date;
+};
 
 /**
  * Validate a raw token. Returns the session if it exists, is not revoked, has
@@ -79,10 +86,29 @@ export async function validateSession(
     await expireIdleSession(db, session.id, session.userId, now);
     return null;
   }
+  let lastActivityAt = new Date(last);
   if (opts.activity && now.getTime() - last >= ACTIVITY_WRITE_INTERVAL_MS) {
     await db.session.updateMany({ where: { id: session.id, revokedAt: null }, data: { lastActivityAt: now } });
+    lastActivityAt = now;
   }
-  return { id: session.id, userId: session.userId, reauthScope: session.reauthScope, reauthExpiresAt: session.reauthExpiresAt };
+  return { id: session.id, userId: session.userId, reauthScope: session.reauthScope, reauthExpiresAt: session.reauthExpiresAt, lastActivityAt };
+}
+
+/**
+ * Slide the idle window of an already-validated session (same once-a-minute
+ * throttle as validateSession). Used only for the kitchen-display exemption,
+ * where the decision depends on WHO is polling, known after validation.
+ *
+ * When validation already saw a recent activity time, nothing is written: an
+ * UPDATE takes SQLite's single write lock even when it matches no row, and the
+ * board polls every few seconds from every kitchen screen. Those lock waits sat
+ * outside the queued write path and, about ten screens at once, stalled the
+ * ticket updates behind them until the busy timeout (5 s) and answered 503.
+ */
+export async function recordSessionActivity(db: Client, session: Pick<ActiveSession, "id" | "lastActivityAt">, now = new Date()): Promise<void> {
+  if (session.lastActivityAt && now.getTime() - session.lastActivityAt.getTime() < ACTIVITY_WRITE_INTERVAL_MS) return;
+  const stale = new Date(now.getTime() - ACTIVITY_WRITE_INTERVAL_MS);
+  await db.session.updateMany({ where: { id: session.id, revokedAt: null, OR: [{ lastActivityAt: null }, { lastActivityAt: { lte: stale } }] }, data: { lastActivityAt: now } });
 }
 
 async function expireIdleSession(db: Client, sessionId: string, userId: string, now: Date) {

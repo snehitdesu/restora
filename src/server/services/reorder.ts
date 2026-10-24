@@ -297,7 +297,7 @@ async function loadConverter(db: Client, org: string, materials: Map<string, { b
 async function loadIncoming(db: Client, org: string, outletId: string, materialIds: string[], asOf: Date, factorOf: (materialId: string, unitId: string | null) => Dec | null) {
   const [poLines, indentLines, grnLines] = await Promise.all([
     db.purchaseOrderLine.findMany({
-      where: { organizationId: org, materialId: { in: materialIds }, po: { outletId, status: { in: [...OPEN_PO_STATES] }, createdAt: { lte: asOf } } },
+      where: { organizationId: org, materialId: { in: materialIds }, lineStatus: "ACTIVE", po: { outletId, status: { in: [...OPEN_PO_STATES] }, createdAt: { lte: asOf } } },
       select: { materialId: true, qty: true, receivedQty: true, unitId: true, po: { select: { id: true, number: true, status: true } } },
     }),
     db.purchaseIndentLine.findMany({

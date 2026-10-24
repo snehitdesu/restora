@@ -4,7 +4,9 @@
  * URL, and a local sheet is never marked ready to print.
  */
 import fs from "node:fs";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { prisma } from "@/server/db/client";
 import { systemContext } from "@/server/auth/context";
@@ -14,17 +16,22 @@ import { createMenuItem } from "@/server/services/menu";
 import { confirmGuestPayment, getGuestOrder, guestMenu, placeGuestOrder, quoteGuestCart, resolveTable } from "@/server/services/guestOrdering";
 import {
   CAFE_TABLE_CODES,
+  INVESTOR_DEMO_LABEL,
+  LOCAL_TEST_LABEL,
   TableQrError,
   buildTableQrPack,
   guestOrderingUrl,
+  isLocalDestinationHost,
   isNonPublicHost,
   normalizeQrOrigin,
   parseQrArgs,
   qrBaseUrlProblem,
+  qrPurposeBaseUrlProblem,
+  renameWithRetry,
   writeTableQrFiles,
 } from "@/server/qr/tableLabels";
 import { loadCafeTableRows, runQrGenerate } from "../../scripts/qr/generate-table-qrs";
-import { findCafe } from "../../prisma/coders-cafe/seed";
+import { findCafe, legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
 
 const RUN = Date.now().toString(36);
 const PUBLIC = "https://menus.example.com";
@@ -154,14 +161,171 @@ describe("table QR URL validation", () => {
     expect(qrBaseUrlProblem("https://[2606:4700:4700::1111]", "production")).toBeNull();
   });
 
-  it("defaults local mode to this computer and rejects table, outlet, token, and price arguments", () => {
-    expect(parseQrArgs([], {})).toEqual({ help: false, mode: "local", baseUrl: "http://localhost:3000", outDir: "artifacts/table-qr/local" });
-    expect(parseQrArgs(["--mode", "production"], { PUBLIC_BASE_URL: PUBLIC })).toMatchObject({ help: false, mode: "production", baseUrl: PUBLIC, outDir: "artifacts/table-qr/production" });
-    expect(parseQrArgs(["--help"], {})).toEqual({ help: true });
-    expect(() => parseQrArgs(["--mode", "production"], {})).toThrow(/public https/);
+  it("accepts an explicit local or production URL and rejects table, outlet, token, and price arguments", () => {
+    expect(parseQrArgs(["--base-url", "http://localhost:3000"])).toEqual({ help: false, mode: "local", baseUrl: "http://localhost:3000", outDir: "artifacts/table-qr/local" });
+    expect(parseQrArgs(["--mode", "production", "--base-url", PUBLIC])).toEqual({ help: false, mode: "production", baseUrl: PUBLIC, outDir: "artifacts/table-qr/production" });
+    expect(parseQrArgs(["--help"])).toEqual({ help: true });
     for (const flag of ["--table", "--outlet", "--token", "--price", "T01"]) {
-      expect(() => parseQrArgs([flag], {})).toThrow(TableQrError);
+      expect(() => parseQrArgs([flag, "--base-url", "http://localhost:3000"])).toThrow(TableQrError);
     }
+  });
+
+  describe("--base-url is required on every run", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("fails without --base-url when PUBLIC_BASE_URL is absent", () => {
+      vi.stubEnv("PUBLIC_BASE_URL", undefined);
+      for (const argv of [[], ["--mode", "local"], ["--mode", "production"], ["--purpose", "local-test"], ["--out", "artifacts/table-qr/x"]]) {
+        expect(() => parseQrArgs(argv), argv.join(" ")).toThrow(/explicit --base-url is required/);
+      }
+    });
+
+    it("fails without --base-url even when PUBLIC_BASE_URL is set", () => {
+      for (const env of [PUBLIC, "http://localhost:3000", "http://192.168.1.4:3000"]) {
+        vi.stubEnv("PUBLIC_BASE_URL", env);
+        for (const argv of [[], ["--mode", "local"], ["--mode", "production"], ["--purpose", "investor-demo"]]) {
+          expect(() => parseQrArgs(argv), `${env} ${argv.join(" ")}`).toThrow(/explicit --base-url is required/);
+        }
+      }
+    });
+
+    it("uses the explicit URL, never PUBLIC_BASE_URL", () => {
+      vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+      expect(parseQrArgs(["--base-url", "http://localhost:3000"])).toMatchObject({ mode: "local", baseUrl: "http://localhost:3000" });
+      vi.stubEnv("PUBLIC_BASE_URL", "http://localhost:3000");
+      expect(parseQrArgs(["--mode", "production", "--base-url", PUBLIC])).toMatchObject({ mode: "production", baseUrl: PUBLIC });
+    });
+
+    it("refuses an empty --base-url value", () => {
+      expect(() => parseQrArgs(["--base-url"])).toThrow(/--base-url requires a URL/);
+      expect(() => parseQrArgs(["--base-url", ""])).toThrow(/--base-url requires a URL/);
+    });
+
+    it("refuses a missing --base-url before reading tokens or writing files", async () => {
+      vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+      const out = `artifacts/table-qr/refuse-missing-${RUN}`;
+      const db = {
+        organization: { findFirst: () => Promise.reject(new Error("database should not be read")) },
+      };
+      await expect(runQrGenerate(["--out", out], db as never)).rejects.toThrow(/explicit --base-url is required/);
+      await expect(runQrGenerate(["--mode", "production", "--out", out], db as never)).rejects.toThrow(/explicit --base-url is required/);
+      expect(fs.existsSync(out)).toBe(false);
+    });
+  });
+
+  it("--purpose investor-demo labels a local sheet and is refused for production", () => {
+    expect(parseQrArgs(["--base-url", "http://192.168.1.20:3000", "--purpose", "investor-demo"])).toEqual({ help: false, mode: "local", baseUrl: "http://192.168.1.20:3000", outDir: "artifacts/table-qr/local", purpose: "investor-demo" });
+    expect(() => parseQrArgs(["--purpose", "launch"])).toThrow(TableQrError);
+    expect(() => parseQrArgs(["--mode", "production", "--base-url", PUBLIC, "--purpose", "investor-demo"])).toThrow(/local sheets only/);
+    expect(() => buildTableQrPack({ mode: "production", baseUrl: PUBLIC, restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "investor-demo" })).toThrow(/local sheets only/);
+    const pack = buildTableQrPack({ mode: "local", baseUrl: "http://192.168.1.20:3000", restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "investor-demo" });
+    expect(pack.printReady).toBe(false);
+    expect(pack.notice).toMatch(/^LOCAL INVESTOR DEMO — NOT FOR CUSTOMER USE\. LOCAL TEST — NOT FOR CUSTOMER PRINTING\./);
+    expect(pack.html).toContain(INVESTOR_DEMO_LABEL);
+    expect(pack.manifest.notice).toBe(pack.notice);
+    const test = buildTableQrPack({ mode: "local", baseUrl: "http://192.168.1.20:3000", restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "local-test" });
+    expect(test.notice?.startsWith(`${LOCAL_TEST_LABEL} `)).toBe(true);
+    expect(test.html).toContain(LOCAL_TEST_LABEL);
+    expect(parseQrArgs(["--purpose", "local-test", "--base-url", "http://localhost:3000"])).toMatchObject({ mode: "local", purpose: "local-test" });
+  });
+
+  it("--purpose fails closed: explicit --base-url required, PUBLIC_BASE_URL ignored, only local destinations", () => {
+    // Missing base URL: no localhost default and no PUBLIC_BASE_URL fallback.
+    expect(() => parseQrArgs(["--purpose", "investor-demo"])).toThrow(/explicit --base-url/);
+    vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+    expect(() => parseQrArgs(["--purpose", "local-test"])).toThrow(/explicit --base-url/);
+    // An explicit local URL wins and PUBLIC_BASE_URL is not consulted.
+    expect(parseQrArgs(["--purpose", "local-test", "--base-url", "http://127.0.0.1:3000"])).toMatchObject({ baseUrl: "http://127.0.0.1:3000", purpose: "local-test" });
+    vi.unstubAllEnvs();
+
+    const allowed = [
+      "http://localhost:3000",
+      "http://LOCALHOST:3000/",
+      "http://127.0.0.1:3000",
+      "http://127.1.2.3",
+      "http://[::1]:3000",
+      "http://10.0.0.5:3000",
+      "http://172.16.0.1:3000",
+      "http://172.31.255.254:3000",
+      "http://192.168.1.4:3000",
+      "https://192.168.1.4:3443",
+    ];
+    for (const url of allowed) {
+      expect(qrPurposeBaseUrlProblem(url), url).toBeNull();
+      expect(parseQrArgs(["--base-url", url, "--purpose", "investor-demo"]), url).toMatchObject({ purpose: "investor-demo" });
+    }
+
+    const refused = [
+      // public hostnames
+      PUBLIC,
+      "https://restora-beta-six.vercel.app",
+      "http://localhost.example.com:3000",
+      "http://127.0.0.1.nip.io:3000",
+      "http://cafe.local:3000",
+      "http://app.localhost:3000",
+      // public IPs
+      "http://8.8.8.8:3000",
+      "http://1.1.1.1",
+      "http://172.32.0.1:3000",
+      "http://192.169.1.4:3000",
+      "http://11.0.0.1",
+      "http://[2606:4700::1111]:3000",
+      // non-routable but not a usable local destination
+      "http://0.0.0.0:3000",
+      "http://[::]:3000",
+      "http://169.254.1.1",
+      "http://100.64.0.1",
+      "http://[fd00::1]:3000",
+      "http://[::ffff:8.8.8.8]",
+      // malformed / not an origin
+      "",
+      "   ",
+      "not a url",
+      "localhost:3000",
+      "//localhost:3000",
+      "ftp://localhost",
+      "file:///C:/menu",
+      "javascript:alert(1)",
+      "http://user:pw@localhost:3000",
+      "http://user@192.168.1.4:3000",
+      "http://localhost:3000/t/abc",
+      "http://localhost:3000/app",
+      "http://localhost:3000/?x=1",
+      "http://localhost:3000/#frag",
+      "http://999.1.1.1",
+    ];
+    for (const url of refused) {
+      expect(qrPurposeBaseUrlProblem(url), url).not.toBeNull();
+      if (url.trim()) expect(() => parseQrArgs(["--base-url", url, "--purpose", "local-test"]), url).toThrow(TableQrError);
+      expect(() => buildTableQrPack({ mode: "local", baseUrl: url, restaurantName: "Coders' Cafe", tables: rowsFor(), purpose: "investor-demo" }), url).toThrow(TableQrError);
+    }
+
+    // URL parsing, not string prefixes: alternate spellings resolve to the real host.
+    expect(qrPurposeBaseUrlProblem("http://0x7f.0.0.1:3000")).toBeNull();
+    expect(qrPurposeBaseUrlProblem("http://localhost:3000@8.8.8.8")).not.toBeNull();
+    expect(qrPurposeBaseUrlProblem("http://192.168.1.4.evil.com")).not.toBeNull();
+    expect(qrPurposeBaseUrlProblem("http://134744072")).not.toBeNull(); // 8.8.8.8 as one integer
+
+    // Plain local mode (no --purpose) still accepts a public origin; production needs its explicit URL.
+    expect(qrBaseUrlProblem(PUBLIC, "local")).toBeNull();
+    expect(parseQrArgs(["--mode", "production", "--base-url", PUBLIC])).toMatchObject({ mode: "production", baseUrl: PUBLIC });
+    expect(isLocalDestinationHost("[::1]")).toBe(true);
+    expect(isLocalDestinationHost("menus.example.com")).toBe(false);
+  });
+
+  it("refuses a public --purpose run before reading tokens or writing files", async () => {
+    const out = `artifacts/table-qr/refuse-purpose-${RUN}`;
+    const db = {
+      organization: { findFirst: () => Promise.reject(new Error("database should not be read")) },
+    };
+    vi.stubEnv("PUBLIC_BASE_URL", PUBLIC);
+    await expect(runQrGenerate(["--purpose", "investor-demo", "--out", out], db as never)).rejects.toThrow(/explicit --base-url/);
+    vi.unstubAllEnvs();
+    await expect(runQrGenerate(["--purpose", "investor-demo", "--base-url", PUBLIC, "--out", out], db as never)).rejects.toThrow(/public hosts are refused/);
+    await expect(runQrGenerate(["--purpose", "local-test", "--base-url", "http://8.8.8.8:3000", "--out", out], db as never)).rejects.toThrow(/public hosts are refused/);
+    expect(fs.existsSync(out)).toBe(false);
   });
 
   it("refuses a production localhost run before writing files or reading tokens", async () => {
@@ -169,8 +333,31 @@ describe("table QR URL validation", () => {
     const db = {
       organization: { findFirst: () => Promise.reject(new Error("database should not be read")) },
     };
-    await expect(runQrGenerate(["--mode", "production", "--base-url", "http://localhost:3000", "--out", out], db as never, {})).rejects.toThrow(/public https/);
+    await expect(runQrGenerate(["--mode", "production", "--base-url", "http://localhost:3000", "--out", out], db as never)).rejects.toThrow(/public https/);
     expect(fs.existsSync(out)).toBe(false);
+  });
+
+  it("refuses production labels while any table still holds a derivable legacy token; local sheets still work", async () => {
+    const rows = CAFE_TABLE_CODES.map((code, i) => ({ code, qrToken: i === 3 ? legacyCafeTableToken(code) : i === 6 ? `CC01-${code}` : tokenFor(code) }));
+    const db = {
+      organization: { findFirst: () => Promise.resolve({ id: "org" }) },
+      outlet: { findFirst: () => Promise.resolve({ id: "outlet" }) },
+      restaurantTable: { findMany: () => Promise.resolve(rows) },
+    };
+    const out = `artifacts/table-qr/refuse-legacy-${RUN}`;
+    try {
+      await expect(runQrGenerate(["--mode", "production", "--base-url", PUBLIC, "--out", out], db as never)).rejects.toThrow(/Tables T04, T07 still hold.*rotate/i);
+      expect(fs.existsSync(out)).toBe(false);
+      for (const argv of [["--base-url", "http://192.168.1.20:3000", "--purpose", "local-test"], ["--base-url", "http://localhost:3000"]]) {
+        const local = await runQrGenerate([...argv, "--out", out], db as never);
+        if (local.help) throw new Error("expected a generated sheet");
+        expect(local.pack.printReady).toBe(false);
+        expect(local.pack.labels).toHaveLength(CAFE_TABLE_CODES.length);
+        expect(fs.existsSync(`${out}/NOT-FOR-CUSTOMER-PRINTING.txt`)).toBe(true);
+      }
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
   });
 });
 
@@ -236,6 +423,37 @@ describe("generated table QR output", () => {
       expect(fs.readdirSync(dir).filter((name) => name.endsWith(".svg")).sort()).toEqual(CAFE_TABLE_CODES.map((code) => `${code}.svg`));
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a directory swap survives a brief Windows lock (EPERM/EBUSY) but not a lasting one or another error", () => {
+    const err = (code: string) => Object.assign(new Error(code), { code });
+    const real = fs.renameSync;
+    let failures = 2;
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+      if (failures-- > 0) throw err(failures ? "EPERM" : "EBUSY");
+      return real(from, to);
+    }) as typeof fs.renameSync);
+    try {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qr-rename-"));
+      fs.mkdirSync(path.join(dir, "a"));
+      renameWithRetry(path.join(dir, "a"), path.join(dir, "b"));
+      expect(fs.existsSync(path.join(dir, "b"))).toBe(true);
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      spy.mockClear();
+      spy.mockImplementation(() => { throw err("EPERM"); });
+      expect(() => renameWithRetry(path.join(dir, "b"), path.join(dir, "c"), 3)).toThrow("EPERM");
+      expect(spy).toHaveBeenCalledTimes(3);
+
+      spy.mockClear();
+      spy.mockImplementation(() => { throw err("ENOENT"); });
+      expect(() => renameWithRetry(path.join(dir, "b"), path.join(dir, "c"))).toThrow("ENOENT");
+      expect(spy).toHaveBeenCalledTimes(1); // not retried
+      spy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    } finally {
+      spy.mockRestore();
     }
   });
 
@@ -339,7 +557,7 @@ describe("table token mapping and checkout protections", () => {
 
     for (const code of CAFE_TABLE_CODES) {
       const token = tokens.get(code)!;
-      expect((await resolveTable(token)).table.code).toBe(code);
+      expect((await resolveTable(token)).table?.code).toBe(code);
       const menu = await guestMenu(token);
       expect(menu.table).toEqual({ code });
       expect(menu.menu.map((item) => item.id)).toEqual([itemId]);
@@ -347,7 +565,7 @@ describe("table token mapping and checkout protections", () => {
       expect(JSON.stringify(menu)).not.toContain(outletId);
       expect(JSON.stringify(menu)).not.toContain(orgId);
     }
-    expect((await resolveTable(tokens.get("T01")!)).table.code).not.toBe("T02");
+    expect((await resolveTable(tokens.get("T01")!)).table?.code).not.toBe("T02");
 
     for (const bad of ["", "T01", "x", "../../etc", "a".repeat(80), "unknown-token-123"]) {
       await expect(resolveTable(bad)).rejects.toBeInstanceOf(NotFoundError);
@@ -402,7 +620,7 @@ describe("table token mapping and checkout protections", () => {
     const view = await getGuestOrder(placed.orderId, placed.accessKey);
     expect(view).toMatchObject({ status: "OPEN", fulfilment: "AWAITING_ACCEPTANCE" });
     const stored = await prisma.order.findUniqueOrThrow({ where: { id: placed.orderId }, include: { kots: true, payments: true } });
-    expect(stored).toMatchObject({ status: "OPEN", source: "QR", channel: "QR", outletId, tableId: (await resolveTable(token)).table.id });
+    expect(stored).toMatchObject({ status: "OPEN", source: "QR", channel: "QR", outletId, tableId: (await resolveTable(token)).table!.id });
     expect(stored.kots).toHaveLength(0);
     expect(stored.payments).toHaveLength(0);
     await expect(confirmGuestPayment(placed.orderId, placed.accessKey, { paymentId: "forged", gateway: { status: "captured" } })).rejects.toBeInstanceOf(NotFoundError);

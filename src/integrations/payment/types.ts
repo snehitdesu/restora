@@ -7,7 +7,20 @@
  * authorized but not captured). The payment must stay PENDING, never FAILED:
  * the guest may still complete it, and a late capture must find it payable.
  */
-export type VerifyResult = { verified: boolean; providerRef?: string; reason?: string; pending?: boolean };
+export type VerifyResult = {
+  verified: boolean;
+  providerRef?: string;
+  reason?: string;
+  pending?: boolean;
+  /**
+   * The bank reported a final success that is NOT this payment as RESTORA created it (another merchant,
+   * reference, amount or currency). Never a success: the payment stays PENDING and staff are alerted,
+   * because money may have moved (payment.verifyPayment raises a HIGH reconciliation anomaly).
+   */
+  mismatch?: string;
+  /** The bank's own reference for the money movement (UPI RRN / UTR), for reconciliation. */
+  bankRef?: string;
+};
 
 /** A gateway webhook event, normalized. */
 export type PaymentWebhookEvent = {
@@ -29,13 +42,19 @@ export type PaymentSettlementRow = { providerRef: string; amount: number; status
 /** What an adapter really is: MOCK never leaves the process; SANDBOX / LIVE talk to the provider's test / live environment. */
 export type IntegrationMode = "MOCK" | "SANDBOX" | "LIVE";
 
-/** A gateway-side checkout (e.g. a Razorpay order) for a server-computed amount. */
+/**
+ * A gateway-side checkout for a server-computed amount. Direct-bank UPI adapters return
+ * `checkout: { kind: "upi_qr", qr, intentUri?, expiresAt, amount (paise), currency }`: the
+ * transaction-specific QR the guest's screen shows; RESTORA stores it (Payment.checkoutData).
+ */
 export type CheckoutRequest = { paymentId: string; orderId: string; amount: number; currency: string };
 export type CheckoutSession = {
   /** The gateway's reference stored on Payment.providerRef (webhooks resolve payments by it). */
   providerRef: string;
   /** Public data the browser checkout needs (never a secret). */
   checkout: Record<string, string | number>;
+  /** When the bank stops accepting payment for this checkout (a UPI QR's validity), if it has one. */
+  expiresAt?: Date;
 };
 
 /** Provider-side state of a payment, for status checks and reconciliation. */

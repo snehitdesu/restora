@@ -10,7 +10,9 @@ import { PATH_HEADER, SESSION_COOKIE } from "@/constants/auth";
 
 // Paths that require a session. Auth + webhook endpoints are intentionally open;
 // /api/qr is the anonymous guest-ordering API (table token / order key checked by its services).
-const OPEN_API_PREFIXES = ["/api/auth", "/api/webhooks", "/api/health", "/api/qr/", "/api/cron/"];
+// /api/sync is called by linked desktops with a device bearer token (no cookie); its router
+// authenticates every non-public route (session or device token) itself.
+const OPEN_API_PREFIXES = ["/api/auth", "/api/webhooks", "/api/health", "/api/qr/", "/api/cron/", "/api/sync/"];
 // Operator pages that need a session (the page itself validates it server-side).
 export const PROTECTED_PAGES = [
   "/dashboard", "/pos", "/kitchen",
@@ -22,13 +24,17 @@ export const PROTECTED_PAGES = [
   "/account",
 ];
 
+// A linked desktop calls hosted APIs (e.g. /api/payments for a cloud order) with its device token as
+// `Authorization: Bearer …` and no cookie; the router validates it (resolveFromDeviceToken). Same shape as its readBearer.
+const BEARER = /^Bearer\s+\S+$/i;
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const hasSession = Boolean(req.cookies.get(SESSION_COOKIE)?.value);
 
   if (pathname.startsWith("/api/")) {
     if (OPEN_API_PREFIXES.some((p) => pathname.startsWith(p))) return NextResponse.next();
-    if (!hasSession) {
+    if (!hasSession && !BEARER.test(req.headers.get("authorization")?.trim() ?? "")) {
       return NextResponse.json({ ok: false, error: { code: "UnauthorizedError", message: "Authentication required" } }, { status: 401 });
     }
     return NextResponse.next();

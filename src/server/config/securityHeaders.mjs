@@ -19,32 +19,28 @@
  */
 
 /**
- * The hosts Razorpay Checkout needs (its script, the payment iframe and its
- * API / telemetry calls). Allowed ONLY on the guest order pages (/o/*), where a
- * guest pays online — never on the back office.
+ * Online payment needs no third-party host: the guest pays by scanning a bank's
+ * UPI QR that RESTORA renders itself (inline SVG), and the page asks RESTORA's
+ * own API whether the bank confirmed it. (The Razorpay Checkout hosts that the
+ * guest order pages used to allow were removed when Razorpay was retired.)
+ * Opening a UPI app from the page is a top-level navigation to a upi:// link,
+ * which CSP does not govern.
+ *
+ * @param {{ dev: boolean }} opts
  */
-export const RAZORPAY_CHECKOUT_HOSTS = {
-  script: ["https://checkout.razorpay.com"],
-  frame: ["https://api.razorpay.com", "https://checkout.razorpay.com"],
-  connect: ["https://api.razorpay.com", "https://lumberjack.razorpay.com"],
-  img: ["https://cdn.razorpay.com"],
-};
-
-/** @param {{ dev: boolean, paymentCheckout?: boolean }} opts */
-export function contentSecurityPolicy({ dev, paymentCheckout = false }) {
-  const rzp = paymentCheckout ? RAZORPAY_CHECKOUT_HOSTS : { script: [], frame: [], connect: [], img: [] };
+export function contentSecurityPolicy({ dev }) {
   /** @type {Record<string, string[]>} */
   const directives = {
     "default-src": ["'self'"],
-    "script-src": ["'self'", "'unsafe-inline'", ...(dev ? ["'unsafe-eval'"] : []), ...rzp.script],
+    "script-src": ["'self'", "'unsafe-inline'", ...(dev ? ["'unsafe-eval'"] : [])],
     "style-src": ["'self'", "'unsafe-inline'"],
-    "img-src": ["'self'", "data:", "blob:", ...rzp.img],
+    "img-src": ["'self'", "data:", "blob:"],
     "font-src": ["'self'", "data:"],
-    "connect-src": ["'self'", ...(dev ? ["ws:", "wss:"] : []), ...rzp.connect],
+    "connect-src": ["'self'", ...(dev ? ["ws:", "wss:"] : [])],
     "worker-src": ["'self'", "blob:"],
     "manifest-src": ["'self'"],
     "media-src": ["'self'"],
-    "frame-src": rzp.frame.length ? rzp.frame : ["'none'"],
+    "frame-src": ["'none'"],
     "frame-ancestors": ["'none'"],
     "object-src": ["'none'"],
     "base-uri": ["'self'"],
@@ -75,26 +71,28 @@ export const PERMISSIONS_POLICY = [
   "browsing-topics=()",
 ].join(", ");
 
-/** Guest order pages: the Payment Request API is allowed for the gateway's own frame only. */
-export const CHECKOUT_PERMISSIONS_POLICY = PERMISSIONS_POLICY.replace("payment=()", 'payment=(self "https://api.razorpay.com")');
+/**
+ * The staff table-QR scanner page (/tables/scan) only: its own origin may use the
+ * camera. Browsers fix this policy when a document loads, so the scanner is
+ * entered by a full page load (see features/backoffice/tables.tsx).
+ */
+export const QR_SCANNER_PATH = "/tables/scan";
+export const SCANNER_PERMISSIONS_POLICY = PERMISSIONS_POLICY.replace("camera=()", "camera=(self)");
 
 /**
- * @param {{ dev: boolean, paymentCheckout?: boolean }} opts
- * paymentCheckout: the guest order pages, where Razorpay Checkout runs. Besides
- * the CSP hosts, the opener policy allows the gateway's popups (UPI / bank 3-D
- * Secure windows report back to the checkout through window.opener).
+ * @param {{ dev: boolean }} opts
  * @returns {{ key: string, value: string }[]}
  */
-export function securityHeaders({ dev, paymentCheckout = false }) {
+export function securityHeaders({ dev }) {
   return [
     { key: "X-Content-Type-Options", value: "nosniff" },
     { key: "X-Frame-Options", value: "DENY" },
     { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-    { key: "Permissions-Policy", value: paymentCheckout ? CHECKOUT_PERMISSIONS_POLICY : PERMISSIONS_POLICY },
-    { key: "Cross-Origin-Opener-Policy", value: paymentCheckout ? "same-origin-allow-popups" : "same-origin" },
+    { key: "Permissions-Policy", value: PERMISSIONS_POLICY },
+    { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
     { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
     { key: "X-Permitted-Cross-Domain-Policies", value: "none" },
-    { key: "Content-Security-Policy", value: contentSecurityPolicy({ dev, paymentCheckout }) },
+    { key: "Content-Security-Policy", value: contentSecurityPolicy({ dev }) },
     ...(dev ? [] : [{ key: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains" }]),
   ];
 }

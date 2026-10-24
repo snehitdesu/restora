@@ -258,6 +258,8 @@ export const AnomalyType = makeEnum([
   "UNMAPPED_ITEM",
   "HEAVY_WASTAGE",
   "RECONCILIATION_MISMATCH",
+  // A guest's online payment verified after the fulfilment window: recorded, order held for staff (kitchenGate.ts).
+  "LATE_PAYMENT_HELD",
 ] as const);
 export type AnomalyType = (typeof AnomalyType.values)[number];
 
@@ -288,6 +290,8 @@ export const AuditAction = makeEnum([
   "PASSWORD_LINK",
   "PASSWORD_SET",
   "PASSWORD_RESET_REQUEST",
+  // a reset link accepted by the mail provider (a separate row: the audit log is append-only)
+  "PASSWORD_RESET_DELIVERED",
   "PASSWORD_CHANGE",
   // background export lifecycle ("EXPORT" = export completed)
   "EXPORT_REQUESTED",

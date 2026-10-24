@@ -16,17 +16,23 @@ import {
   canTransition,
 } from "@/constants/enums";
 import { prisma } from "@/server/db/client";
-import { runInTx } from "@/server/services/_workflow";
+import { lockInTx, runInTx } from "@/server/services/_workflow";
+import { upsertCustomerByPhone } from "@/server/services/crm";
 import { createHash, randomUUID } from "node:crypto";
 import { type AccessContext, assertOutletAccess, ValidationError, NotFoundError, ConflictError } from "@/server/db/scope";
 import { assertOutletInOrg } from "@/server/db/outletGuard";
 import { assertCan } from "@/server/auth/rbac";
+import { repriceAppliedCoupon } from "@/server/services/couponPricing";
 import { writeAudit } from "@/server/audit/log";
 import { D, dMul, dDiv, money, moneyAmount } from "@/domain/money";
 import { priceMenuSelection } from "@/server/services/menu";
 import { createKOTsForOrder } from "@/server/services/kot";
+import { assertKitchenReleasableTx, isGuestQrOrder, isHeldForReviewTx } from "@/server/services/kitchenGate";
+// Function-level cycle with payment.ts (it imports releaseTableTx): both are used only at call time.
+import { settleOrderTx } from "@/server/services/payment";
 import { idempotentCreate, requestHashOf as roundHashOf } from "@/server/services/idempotency";
 import { createNotificationTx } from "@/server/services/notifications";
+import { WALKIN_NOTE_PREFIX } from "@/server/services/reservations";
 
 type Tx = Prisma.TransactionClient;
 type Client = PrismaClient | Tx;
@@ -144,7 +150,7 @@ async function heldTx(tx: Tx, orderId: string) {
 }
 
 /** A repricing (discount, quantity) may never take the total below what the guest already paid. */
-async function assertTotalCoversPaymentsTx(tx: Tx, orderId: string, total: Prisma.Decimal) {
+export async function assertTotalCoversPaymentsTx(tx: Tx, orderId: string, total: Prisma.Decimal) {
   const { gross } = await heldTx(tx, orderId);
   if (D(total).lt(gross)) throw new ValidationError(`The new total ${money(total).toString()} is below the ${money(gross).toString()} already paid; refund first`);
 }
@@ -160,7 +166,15 @@ export async function recomputeTotals(tx: Tx, orderId: string) {
     taxPct: it.taxPct,
     modifiersPerUnit: it.modifiers.reduce((a, m) => a.plus(D(m.priceDelta)), D(0)),
   }));
-  const totals = calculateOrderTotals(items, order.discount);
+  // An applied coupon follows the lines: a percentage coupon is worth more after items are added, and one whose
+  // minimum is no longer met is released. The manual share of the discount is untouched.
+  let orderDiscount: Prisma.Decimal | number | string = order.discount;
+  const repriced = await repriceAppliedCoupon(tx, order, calculateOrderTotals(items, 0).subtotal);
+  if (repriced) {
+    orderDiscount = repriced.discount;
+    if (!D(order.discount).eq(repriced.discount)) await tx.order.update({ where: { id: orderId }, data: { discount: repriced.discount } });
+  }
+  const totals = calculateOrderTotals(items, orderDiscount);
   // keep persisted lineTotal in sync (only lines whose value changed are written:
   // rewriting every line of a long-running order on each round cost a write per
   // line and widened the conflict surface of concurrent rounds)
@@ -188,6 +202,9 @@ const createOrderSchema = z.object({
   externalRef: z.string().optional(),
   covers: z.number().int().positive().default(1),
   notes: z.string().optional(),
+  /** Save the bill at the counter without sending it to the kitchen (the POS's hold list); `holdLabel` names it. */
+  hold: z.boolean().optional(),
+  holdLabel: z.string().trim().max(60).optional(),
   /** Idempotency-Key: a retry with the same key + request returns the original order. */
   idempotencyKey: z.string().trim().min(8).max(100).regex(/^[\w.:-]+$/, "Invalid idempotency key").optional(),
 });
@@ -277,6 +294,14 @@ function createOrderTx(ctx: AccessContext, data: z.infer<typeof createOrderSchem
       const customer = await tx.customer.findUnique({ where: { id: data.customerId }, select: { organizationId: true } });
       if (!customer || customer.organizationId !== ctx.organizationId) throw new NotFoundError("Customer not found");
     }
+    // A party seated from a booking: its special-occasion / allergy note travels with the order, so it is printed on the
+    // kitchen ticket ("Order note: ...") and the captain does not have to pass it on by word of mouth.
+    let notes = data.notes;
+    if (data.tableId) {
+      const seated = await tx.reservation.findFirst({ where: { organizationId: ctx.organizationId, outletId: data.outletId, tableId: data.tableId, status: "SEATED", notes: { not: null } }, orderBy: { reservedAt: "desc" }, select: { notes: true } });
+      const note = seated?.notes?.trim();
+      if (note && !note.startsWith(WALKIN_NOTE_PREFIX)) notes = [data.notes, `Booking note: ${note}`].filter(Boolean).join(" · ");
+    }
     const order = await tx.order.create({
       data: {
         organizationId: ctx.organizationId,
@@ -287,7 +312,9 @@ function createOrderTx(ctx: AccessContext, data: z.infer<typeof createOrderSchem
         customerId: data.customerId,
         externalRef: data.externalRef,
         covers: data.covers,
-        notes: data.notes,
+        notes,
+        holdLabel: data.holdLabel || null,
+        heldAt: data.hold || data.holdLabel ? new Date() : null,
         idempotencyKey: data.idempotencyKey,
         requestHash: hash,
         status: "OPEN",
@@ -315,10 +342,21 @@ const addItemSchema = z.object({
 });
 export type AddItemInput = z.input<typeof addItemSchema>;
 
-export function addOrderItem(ctx: AccessContext, orderId: string, input: AddItemInput, db: Client = prisma) {
+/**
+ * Add one line. Batch callers inside one transaction (placeOrder, addOrderRound) pass the order they already
+ * loaded and `recompute: false`, then recompute the totals once: on a remote database every statement is a
+ * round trip, and re-reading the order and re-totalling it per line cost several per line.
+ */
+export function addOrderItem(
+  ctx: AccessContext,
+  orderId: string,
+  input: AddItemInput,
+  db: Client = prisma,
+  opts: { order?: { id: string; organizationId: string; outletId: string; status: string }; recompute?: boolean } = {},
+) {
   const data = addItemSchema.parse(input);
   return orderTx(db, orderId, async (tx) => {
-    const order = await tx.order.findUnique({ where: { id: orderId } });
+    const order = opts.order?.id === orderId ? opts.order : await tx.order.findUnique({ where: { id: orderId } });
     if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
     assertOutletAccess(ctx, order.outletId);
     assertCan(ctx, "order.modify", order.outletId);
@@ -370,7 +408,7 @@ export function addOrderItem(ctx: AccessContext, orderId: string, input: AddItem
         modifiers: modifiers.length ? { create: modifiers.map((m) => ({ name: m.name, priceDelta: money(m.priceDelta), optionId: m.optionId })) } : undefined,
       },
     });
-    await recomputeTotals(tx, orderId);
+    if (opts.recompute !== false) await recomputeTotals(tx, orderId);
     return item;
   });
 }
@@ -382,12 +420,21 @@ export function updateOrderItem(
   db: Client = prisma
 ) {
   return runInTx(db, async (tx) => {
-    const item = await tx.orderItem.findUnique({ where: { id: orderItemId }, include: { order: true, kotItems: { include: { kot: { select: { status: true } } } } } });
+    const item = await tx.orderItem.findUnique({ where: { id: orderItemId }, include: { order: true, modifiers: true, kotItems: { include: { kot: { select: { status: true } } } } } });
     if (!item || item.organizationId !== ctx.organizationId) throw new NotFoundError("Order item not found");
     assertOutletAccess(ctx, item.outletId);
     assertCan(ctx, "order.modify", item.outletId);
+    // A line discount is a discount: the same permission as the order-level one (a captain may edit lines, not discount them).
+    const discountChanges = patch.discount !== undefined && !money(patch.discount).eq(D(item.discount));
+    if (discountChanges) assertCan(ctx, "order.discount", item.outletId);
     if (CLOSED_STATUSES.includes(item.order.status)) throw new ValidationError("Order is closed");
     if (patch.qty !== undefined && patch.qty <= 0) throw new ValidationError("Quantity must be positive");
+    if (patch.discount !== undefined) {
+      moneyAmount(z.number().nonnegative("Discount cannot be negative")).parse(patch.discount);
+      const qty = patch.qty !== undefined ? D(patch.qty) : D(item.qty);
+      const gross = money(dMul(qty, D(item.unitPrice).plus(item.modifiers.reduce((a, m) => a.plus(D(m.priceDelta)), D(0)))));
+      if (money(patch.discount).gt(gross)) throw new ValidationError(`A line discount cannot exceed the line's value (${gross.toFixed(2)})`);
+    }
     // The kitchen is already making what its ticket says; changing the quantity
     // here would silently diverge from the KOT. Void the ticket at the KDS instead.
     if (patch.qty !== undefined && !D(patch.qty).eq(D(item.qty)) && item.kotItems.some((k) => k.kot.status !== "CANCELLED")) {
@@ -403,6 +450,9 @@ export function updateOrderItem(
     });
     const updated = await recomputeTotals(tx, item.orderId);
     await assertTotalCoversPaymentsTx(tx, item.orderId, D(updated.total));
+    if (discountChanges) {
+      await writeAudit(tx, ctx, { action: "UPDATE", entityType: "OrderItem", entityId: orderItemId, outletId: item.outletId, before: { orderId: item.orderId, name: item.name, discount: money(item.discount).toFixed(2) }, after: { discount: money(patch.discount!).toFixed(2), total: money(updated.total).toFixed(2) } });
+    }
     return updated;
   });
 }
@@ -415,6 +465,13 @@ export function applyDiscount(ctx: AccessContext, orderId: string, amount: numbe
     assertCan(ctx, "order.discount", order.outletId);
     if (CLOSED_STATUSES.includes(order.status)) throw new ValidationError(`Cannot discount a ${order.status} order`);
     moneyAmount(z.number().nonnegative("Discount cannot be negative")).parse(amount);
+    // `amount` is the order's TOTAL discount. With a coupon on the order it must keep covering the coupon's share, and
+    // a coupon that does not stack refuses any other discount (take the coupon off first).
+    const coupon = await tx.couponRedemption.findFirst({ where: { orderId, status: "APPLIED" }, include: { coupon: { select: { stackable: true, code: true } } } });
+    if (coupon) {
+      if (!coupon.coupon.stackable && D(amount).gt(D(coupon.amount))) throw new ValidationError(`Coupon ${coupon.coupon.code} does not combine with another discount; remove the coupon first`);
+      if (D(amount).lt(D(coupon.amount))) throw new ValidationError(`The discount cannot be lower than coupon ${coupon.coupon.code}'s ${money(coupon.amount).toString()}; remove the coupon to take it off`);
+    }
     await tx.order.update({ where: { id: orderId }, data: { discount: money(amount) } });
     const updated = await recomputeTotals(tx, orderId);
     await assertTotalCoversPaymentsTx(tx, orderId, D(updated.total));
@@ -433,8 +490,18 @@ export function submitOrder(ctx: AccessContext, orderId: string, db: Client = pr
     }
     if (order.items.length === 0) throw new ValidationError("Cannot submit an empty order");
     const updated = await tx.order.update({ where: { id: orderId }, data: { status: "SENT" } });
-    // Route every item to its preparation station (one KOT per station).
+    // Route every item to its preparation station (one KOT per station). For a guest QR order the
+    // kitchen gate passes only when verified online payments cover it (kitchenGate.ts).
     const kots = await createKOTsForOrder(tx, ctx, orderId);
+    // Only possible for a guest QR order held after a late payment (paid in full, staff chose to cook it):
+    // it is settled now, exactly as an on-time payment would have settled it.
+    if (isGuestQrOrder(order)) {
+      // createKOTsForOrder skips the gate when no item is left to ticket; settling must never depend on that.
+      await assertKitchenReleasableTx(tx, order);
+      await settleOrderTx(tx, ctx, order);
+      await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Order", entityId: orderId, outletId: order.outletId, before: { status: order.status }, after: { status: "PAID", kots: kots.map((k) => k.number), via: "held-release" } });
+      return tx.order.findUniqueOrThrow({ where: { id: orderId } });
+    }
     await writeAudit(tx, ctx, { action: "UPDATE", entityType: "Order", entityId: orderId, outletId: order.outletId, before: { status: order.status }, after: { status: "SENT", kots: kots.map((k) => k.number) } });
     return updated;
   });
@@ -498,7 +565,8 @@ export async function addOrderRound(ctx: AccessContext, orderId: string, input: 
         assertOutletAccess(ctx, order.outletId);
         assertCan(ctx, "order.modify", order.outletId);
         // addOrderItem re-checks the status (no lines on BILLED / PAID / CANCELLED / REFUNDED orders).
-        for (const line of data.items) await addOrderItem(ctx, orderId, line, tx);
+        for (const line of data.items) await addOrderItem(ctx, orderId, line, tx, { order, recompute: false });
+        await recomputeTotals(tx, orderId);
         let kots: Array<{ number: number }> = [];
         if (data.fire) {
           if (order.status === "OPEN") {
@@ -594,6 +662,7 @@ export function cancelOrder(ctx: AccessContext, orderId: string, reason: string,
     const held = await heldTx(tx, orderId);
     if (held.net.gt(0)) throw new ValidationError(`This order holds ${money(held.net).toString()} in payments; refund them before cancelling`);
     const updated = await tx.order.update({ where: { id: orderId }, data: { status: "CANCELLED", notes: reason } });
+    await tx.couponRedemption.updateMany({ where: { orderId, status: "APPLIED" }, data: { status: "REVERSED", reversedAt: new Date(), reverseReason: "Order cancelled" } });
     // Stop the kitchen: tickets not yet READY are cancelled (READY food already exists; KOT_TRANSITIONS lets it be served/cleared).
     const live = await tx.kot.findMany({ where: { orderId, status: { in: ["NEW", "ACCEPTED", "PREPARING"] } }, select: { id: true, number: true } });
     if (live.length) {
@@ -620,7 +689,8 @@ export async function getOrder(db: PrismaClient, ctx: AccessContext, orderId: st
   if (!order || order.organizationId !== ctx.organizationId) throw new NotFoundError("Order not found");
   assertOutletAccess(ctx, order.outletId);
   assertCan(ctx, "order.view", order.outletId);
-  return order;
+  // Paid online in full but held after a late payment: staff decide (send or refund), the guest does not.
+  return { ...order, heldForReview: await isHeldForReviewTx(db, order) };
 }
 
 const listSchema = z.object({
@@ -629,6 +699,8 @@ const listSchema = z.object({
   /** Only orders still running (not PAID / CANCELLED / REFUNDED). */
   active: z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]).optional(),
   tableId: z.string().optional(),
+  /** Only bills held at the counter and not yet sent (the POS's hold list), oldest first. */
+  held: z.union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")]).optional(),
   from: z.coerce.date().optional(),
   to: z.coerce.date().optional(),
   take: z.coerce.number().int().positive().max(200).default(50),
@@ -645,13 +717,16 @@ export async function listOrders(db: PrismaClient, ctx: AccessContext, input: z.
     where: {
       organizationId: ctx.organizationId, outletId: f.outletId, ...(f.status ? { status: f.status } : {}), ...(f.tableId ? { tableId: f.tableId } : {}), ...(createdAt ? { createdAt } : {}),
       ...(f.active ? { status: { notIn: ["PAID", "CANCELLED", "REFUNDED"] } } : {}),
+      ...(f.held ? { status: "OPEN", heldAt: { not: null } } : {}),
     },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    orderBy: f.held ? [{ heldAt: "asc" }, { id: "asc" }] : [{ createdAt: "desc" }, { id: "desc" }],
     take: f.take + 1,
     include: { customer: customerSelect, table: { select: { code: true } }, items: { select: { id: true, name: true, qty: true, lineTotal: true } }, kots: { select: { status: true } } },
     ...(f.cursor ? { cursor: { id: f.cursor }, skip: 1 } : {}),
   });
-  const items = rows.slice(0, f.take);
+  const page = rows.slice(0, f.take);
+  // A guest QR order that is paid but was held (late payment) waits for a staff decision, not for the guest.
+  const items = await Promise.all(page.map(async (o) => ({ ...o, heldForReview: await isHeldForReviewTx(db, o) })));
   return { items, nextCursor: rows.length > f.take ? items[items.length - 1].id : null };
 }
 
@@ -689,31 +764,69 @@ export async function countOrders(db: PrismaClient, ctx: AccessContext, input: {
  * leaves nothing behind (no half-created orders, no duplicated lines).
  * Items are priced server-side by addOrderItem (menu items) exactly as usual.
  */
-export async function placeOrder(ctx: AccessContext, input: PlaceOrderInput, db: Client = prisma) {
+export type PlacedOrderHook = (tx: Prisma.TransactionClient, order: { id: string; total: Prisma.Decimal }) => Promise<void>;
+
+/**
+ * `afterCreate` runs inside the order's transaction, only when the order is
+ * created (never on a replay): records that must exist exactly when the order
+ * does (the guest flow's audit row and staff notification) commit or roll back
+ * with it.
+ */
+export async function placeOrder(
+  ctx: AccessContext,
+  input: PlaceOrderInput,
+  db: Client = prisma,
+  // knownNew: the caller looked the key up in this request and found no order, so the lookup is not repeated
+  // (a concurrent original still resolves through the unique-key conflict below).
+  // customer: link the order to the CRM record for this phone, found or created INSIDE the order's transaction,
+  // so an order refused there leaves no customer record behind (instead of input.customerId).
+  opts: { afterCreate?: PlacedOrderHook; knownNew?: boolean; customer?: { name: string; phone: string } } = {},
+) {
   const data = placeSchema.parse(input);
   assertOutletAccess(ctx, data.outletId);
   assertCan(ctx, "order.create", data.outletId);
   const { items, submit, ...orderInput } = data;
-  const hash = data.idempotencyKey ? requestHashOf(data as never) : null;
+  if (submit && (data.hold || data.holdLabel)) throw new ValidationError("A held bill is not sent to the kitchen; resume it first");
+  if (opts.customer && data.customerId) throw new ValidationError("Give either a customer or a customer phone, not both");
+  const phone = opts.customer?.phone.trim();
+  // The request hash covers the customer id exactly as when the caller passed one. Before the transaction it is
+  // read only: a replay's customer was created with its original order, and a phone with no record yet cannot
+  // match an earlier order's hash.
+  const knownCustomerId = async () => (phone ? (await db.customer.findUnique({ where: { organizationId_phone: { organizationId: ctx.organizationId, phone } }, select: { id: true } }))?.id : data.customerId);
+  const hashFor = (customerId: string | undefined) => (data.idempotencyKey ? requestHashOf({ ...data, customerId } as never) : null);
+  let hash = hashFor(phone ? await knownCustomerId() : data.customerId);
   const replay = async () => {
     const prior = await db.order.findUnique({ where: { organizationId_idempotencyKey: { organizationId: ctx.organizationId, idempotencyKey: data.idempotencyKey! } }, include: placedInclude });
     if (!prior) return null;
     replayOrConflict(prior, ctx, data.outletId, hash!);
     return { ...prior, replayed: true };
   };
-  if (data.idempotencyKey) {
+  if (data.idempotencyKey && !opts.knownNew) {
     const prior = await replay();
     if (prior) return prior;
   }
   try {
     return await runInTx(db, async (tx) => {
-      const order = await createOrderTx(ctx, orderInput, hash, tx);
-      for (const item of items) await addOrderItem(ctx, order.id, item as AddItemInput, tx);
+      let customerId = orderInput.customerId;
+      if (opts.customer) {
+        // One phone's first orders arriving together would both find no record and both insert it (READ COMMITTED):
+        // the phone's lock makes them look one at a time, so the second finds the first's record.
+        await lockInTx(tx, `customer-phone:${ctx.organizationId}:${phone}`);
+        customerId = (await upsertCustomerByPhone(ctx, { name: opts.customer.name, phone: phone! }, tx)).id;
+        hash = hashFor(customerId);
+      }
+      const order = await createOrderTx(ctx, { ...orderInput, customerId }, hash, tx);
+      for (const item of items) await addOrderItem(ctx, order.id, item as AddItemInput, tx, { order, recompute: false });
+      if (items.length) await recomputeTotals(tx, order.id);
       if (submit) await submitOrder(ctx, order.id, tx);
-      return { ...(await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: placedInclude })), replayed: false };
+      const placed = await tx.order.findUniqueOrThrow({ where: { id: order.id }, include: placedInclude });
+      if (opts.afterCreate) await opts.afterCreate(tx, placed);
+      return { ...placed, replayed: false };
     }, NEW_ORDER_TX);
   } catch (e) {
     if (data.idempotencyKey && (e as { code?: string })?.code === "P2002") {
+      // The customer this attempt created rolled back with it; the winner's committed record is the one to compare.
+      if (phone) hash = hashFor(await knownCustomerId());
       const prior = await replay();
       if (prior) return prior;
     }

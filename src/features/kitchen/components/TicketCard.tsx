@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { KdsTicket } from "@/features/kitchen/kds";
-import { canCancel, primaryAction, ticketLabel, urgency } from "@/features/kitchen/kds";
+import { NO_EXPECTATIONS, canCancel, needsTable, primaryAction, ticketLabel, ticketLateness, type PrepExpectations } from "@/features/kitchen/kds";
 import type { KOTStatus } from "@/constants/enums";
 import { formatElapsed, formatQty, shortRef } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
@@ -15,9 +15,9 @@ const URGENCY: Record<"normal" | "warn" | "late", string> = {
 };
 
 /** One kitchen ticket: large type for monitors; actions follow the backend lifecycle. */
-export function TicketCard({ ticket, now, pending, canUpdate, onAction }: { ticket: KdsTicket; now: number; pending: boolean; canUpdate: boolean; onAction: (to: KOTStatus) => void }) {
+export function TicketCard({ ticket, now, pending, canUpdate, onAction, expectations = NO_EXPECTATIONS }: { ticket: KdsTicket; now: number; pending: boolean; canUpdate: boolean; onAction: (to: KOTStatus) => void; expectations?: PrepExpectations }) {
   const action = primaryAction(ticket.status);
-  const level = urgency(ticket.createdAt, now);
+  const { level, expected } = ticketLateness(ticket, now, expectations);
   const [confirmVoid, setConfirmVoid] = useState(false);
   return (
     <article aria-label={`KOT ${ticket.number}, ${ticketLabel(ticket)}`} className={`flex flex-col rounded-xl border-2 bg-paper shadow-xs ${URGENCY[level]}`}>
@@ -25,6 +25,7 @@ export function TicketCard({ ticket, now, pending, canUpdate, onAction }: { tick
         <div>
           <p className="text-lg font-bold leading-tight">KOT {ticket.number}</p>
           <p className="text-sm font-semibold text-ink-700">{ticketLabel(ticket)}{ticket.order?.covers ? ` · ${ticket.order.covers} pax` : ""}</p>
+          {needsTable(ticket) && <p data-testid="kot-no-table" className="mt-1 inline-block rounded-md bg-warn-50 px-1.5 py-0.5 text-xs font-bold uppercase tracking-wide text-warn-700">No table yet — ask the counter</p>}
           <p className="font-mono text-xs text-ink-500">Order #{shortRef(ticket.orderId)}{ticket.station ? ` · ${ticket.station.name}` : ""}</p>
         </div>
         <div className="flex flex-col items-end gap-1">
@@ -32,6 +33,8 @@ export function TicketCard({ ticket, now, pending, canUpdate, onAction }: { tick
           <span className={`rounded-md px-2 py-1 text-sm font-bold tabular-nums ${level === "late" ? "bg-bad-500 text-white" : level === "warn" ? "bg-warn-50 text-warn-700" : "bg-ink-100 text-ink-700"}`} aria-label={`Waiting ${formatElapsed(ticket.createdAt, now)}`}>
             {formatElapsed(ticket.createdAt, now)}
           </span>
+          {level === "late" && <span className="text-[11px] font-bold uppercase tracking-wide text-bad-600">Running late</span>}
+          {expected !== null && ticket.status !== "READY" && <span className="text-[11px] text-ink-500" data-testid="kds-usual">usually ~{Math.round(expected)} min</span>}
         </div>
       </header>
       <ul className="flex-1 space-y-1.5 px-3 py-2">

@@ -23,6 +23,8 @@ export type ShellData = {
   permissions: Permission[];
   /** Holds an org-wide role (org-level master data is editable only by these). */
   orgWide: boolean;
+  /** Installed desktop app (loopback Next.js), not the hosted deployment. */
+  desktop: boolean;
 };
 
 /**
@@ -41,7 +43,7 @@ const loadShell = cache(async (): Promise<{ shell: ShellData; ctx: AccessContext
   const preferred = (await cookies()).get(OUTLET_COOKIE)?.value;
   const outletId = outlets.find((o) => o.id === preferred)?.id ?? outlets[0]?.id ?? null;
   const permissions = PERMISSIONS.filter((p) => can(ctx, p, outletId ?? undefined));
-  return { ctx, shell: { user: { id: user.id, name: user.name, email: user.email }, roles: ctx.roles, outlets, outletId, permissions, orgWide: ctx.isOrgWide || ctx.isSuperAdmin } };
+  return { ctx, shell: { user: { id: user.id, name: user.name, email: user.email }, roles: ctx.roles, outlets, outletId, permissions, orgWide: ctx.isOrgWide || ctx.isSuperAdmin, desktop: process.env.AHAROS_DESKTOP === "1" } };
 });
 
 /** Resolve the session or send the user to /login (with a return path). */

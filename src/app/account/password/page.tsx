@@ -13,9 +13,10 @@ export default async function ChangePasswordPage() {
       title="Change password"
       subtitle={shell.user.email}
       footer={
-        <Link href="/dashboard" className="mt-4 block text-center text-sm font-medium text-brand-700 hover:text-brand-800 hover:underline">
-          Back to dashboard
-        </Link>
+        <div className="mt-4 flex justify-center gap-5 text-sm font-medium">
+          <Link href="/account/security" className="text-brand-700 hover:text-brand-800 hover:underline">Security &amp; recovery</Link>
+          <Link href="/dashboard" className="text-brand-700 hover:text-brand-800 hover:underline">Back to dashboard</Link>
+        </div>
       }
     >
       <ChangePasswordForm email={shell.user.email} />

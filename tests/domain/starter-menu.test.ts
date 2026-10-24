@@ -12,7 +12,8 @@ import * as rbac from "@/server/auth/rbac";
 import { createMenuItem } from "@/server/services/menu";
 import { importCodersCafeStarter, MENU_NOT_EMPTY, STARTER_TABLE_CODES } from "@/server/services/starterMenu";
 import { menuItemCount, CODERS_CAFE_MENU, PIZZA_ADD_ONS } from "../../prisma/coders-cafe/menu";
-import { cafeTableToken } from "../../prisma/coders-cafe/seed";
+import { legacyCafeTableToken } from "../../prisma/coders-cafe/seed";
+import { GUEST_TABLE_TOKEN_RE } from "@/lib/qr/tableQrUrl";
 
 const RUN = Date.now().toString(36);
 afterAll(async () => { await prisma.$disconnect(); });
@@ -49,8 +50,9 @@ describe("Coders' Cafe starter import", () => {
     const t07 = tables.find((t) => t.code === "T07")!;
     expect(t07).toMatchObject({ capacity: 6, qrToken: `keep-${RUN}` }); // existing table untouched
     for (const t of tables.filter((x) => x.code !== "T07")) {
-      expect(t.qrToken).toBeTruthy();
-      expect(t.qrToken).not.toBe(cafeTableToken(t.code)); // never the public, derivable demo token
+      expect(t.qrToken).toMatch(/^[A-Za-z0-9_-]{24}$/); // 18 random bytes, base64url
+      expect(t.qrToken).toMatch(GUEST_TABLE_TOKEN_RE);
+      expect(t.qrToken).not.toBe(legacyCafeTableToken(t.code)); // never the public, derivable demo token
     }
     expect(await prisma.auditLog.count({ where: { organizationId: org.id, entityType: "MenuItem", action: "CREATE" } })).toBe(64);
 
@@ -107,7 +109,7 @@ describe("Coders' Cafe starter import", () => {
     const kept = await restaurant("g");
     await prisma.restaurantTable.create({ data: { organizationId: kept.org.id, outletId: kept.outlet.id, code: "X1", qrToken: `taken-${RUN}` } });
     const { org, outlet, owner } = await restaurant("h");
-    await expect(importCodersCafeStarter(owner, { outletId: outlet.id, tableToken: () => `taken-${RUN}` }, prisma)).rejects.toThrow(/Unique constraint/i);
+    await expect(importCodersCafeStarter(owner, { outletId: outlet.id }, prisma, () => `taken-${RUN}`)).rejects.toThrow(/Unique constraint/i);
     expect(await prisma.menuCategory.count({ where: { organizationId: org.id } })).toBe(0);
     expect(await prisma.menuItem.count({ where: { organizationId: org.id } })).toBe(0);
     expect(await prisma.menuItemVariant.count({ where: { organizationId: org.id } })).toBe(0);
@@ -118,14 +120,16 @@ describe("Coders' Cafe starter import", () => {
     expect(await prisma.restaurantTable.count({ where: { qrToken: `taken-${RUN}` } })).toBe(1);
   });
 
-  it("stores caller-supplied tokens without a rotation audit, and a system actor is not a user id", async () => {
+  it("issues a distinct random token per table with a rotation audit, and a system actor is not a user id", async () => {
     const { org, outlet } = await restaurant("i");
     const ctx = systemContext(org.id, [outlet.id]);
-    await importCodersCafeStarter(ctx, { outletId: outlet.id, tableToken: (code) => `tok-${RUN}-${code}` }, prisma);
-    const t01 = await prisma.restaurantTable.findFirstOrThrow({ where: { outletId: outlet.id, code: "T01" } });
+    await importCodersCafeStarter(ctx, { outletId: outlet.id }, prisma);
+    const tables = await prisma.restaurantTable.findMany({ where: { outletId: outlet.id }, orderBy: { code: "asc" } });
     const floor = await prisma.floor.findFirstOrThrow({ where: { outletId: outlet.id } });
-    expect(t01).toMatchObject({ qrToken: `tok-${RUN}-T01`, capacity: 4, status: "AVAILABLE", floorId: floor.id });
-    expect(await prisma.auditLog.count({ where: { organizationId: org.id, entityType: "RestaurantTable", action: "UPDATE" } })).toBe(0);
+    expect(tables[0]).toMatchObject({ code: "T01", capacity: 4, status: "AVAILABLE", floorId: floor.id });
+    expect(new Set(tables.map((t) => t.qrToken)).size).toBe(10);
+    for (const t of tables) expect(t.qrToken).not.toBe(legacyCafeTableToken(t.code));
+    expect(await prisma.auditLog.count({ where: { organizationId: org.id, entityType: "RestaurantTable", action: "UPDATE" } })).toBe(10);
     expect(await prisma.auditLog.count({ where: { organizationId: org.id, entityType: "RestaurantTable", action: "CREATE" } })).toBe(10);
     const sample = await prisma.auditLog.findFirstOrThrow({ where: { organizationId: org.id, entityType: "MenuItem", action: "CREATE" } });
     expect(sample.actorId).toBeNull();

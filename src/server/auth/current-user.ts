@@ -12,7 +12,7 @@ import { readSessionCookie } from "@/server/auth/cookies";
 
 export type CurrentUser = { id: string; name: string; email: string; organizationId: string; isSuperAdmin: boolean };
 
-export type Current = { ctx: AccessContext; user: CurrentUser; session: ActiveSession };
+export type Current = { ctx: AccessContext; user: CurrentUser; session: ActiveSession; deviceId?: string };
 
 /** Resolve the caller from the session cookie, or null if unauthenticated. A page render counts as activity. */
 export async function getCurrentContext(): Promise<Current | null> {
@@ -35,6 +35,17 @@ export async function resolveFromToken(token: string | undefined | null, opts: {
     user: { id: user.id, name: user.name, email: user.email, organizationId: user.organizationId, isSuperAdmin: user.isSuperAdmin },
     session,
   };
+}
+
+/**
+ * Kitchen-display idle exemption: a dedicated kitchen account (every role it
+ * holds is KITCHEN) keeps its session alive by polling the KDS ticket board,
+ * so a wall-mounted screen is not signed out mid-service. Anyone holding any
+ * other role (manager, cashier, owner, …) gets no exemption: their KDS poll is
+ * background polling like any other.
+ */
+export function isKitchenDisplayUser(ctx: AccessContext): boolean {
+  return !ctx.isSuperAdmin && ctx.roles.length > 0 && ctx.roles.every((r) => r === "KITCHEN") && ctx.orgRoles.every((r) => r === "KITCHEN");
 }
 
 /** Require an authenticated caller; throws UnauthorizedError (401) otherwise. */

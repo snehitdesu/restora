@@ -36,6 +36,24 @@ export function isLedgerKeyRace(error: unknown): boolean {
 }
 
 /**
+ * Did the request lose the wait for SQLite's single write lock (or for a
+ * transaction slot)? Measured 2026-10-13 under 25–50 concurrent guest checkouts:
+ * a transaction outside the queued runInTx path waited past the busy timeout and
+ * Prisma reported P1008 "Socket timeout"; P2028 is the interactive-transaction
+ * form ("Unable to start a transaction in the given time"); raw driver errors
+ * say "database is locked" / SQLITE_BUSY. The transaction was rolled back, so
+ * the request changed nothing: transient (503 + Retry-After), not a server fault.
+ */
+export function isDatabaseBusy(error: unknown): boolean {
+  const e = error as { code?: unknown; message?: unknown; name?: unknown } | null;
+  if (!e) return false;
+  if (e.name !== "PrismaClientKnownRequestError" && e.name !== "PrismaClientUnknownRequestError") return false;
+  if (e.code === "P1008") return true;
+  if (e.code === "P2028" && /unable to start a transaction|transaction already closed|timed out/i.test(String(e.message ?? ""))) return true;
+  return /database is locked|SQLITE_BUSY/i.test(String(e.message ?? ""));
+}
+
+/**
  * Is the database unreachable or restarting (a transient outage, not a bug)?
  * Measured during a PostgreSQL restart under load (Phase 12): Prisma reported
  * P1001 "Can't reach database server", and unknown-request errors carrying

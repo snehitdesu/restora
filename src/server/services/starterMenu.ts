@@ -15,10 +15,9 @@
  *    duplicate or mix into a menu the restaurant already built;
  *  - one transaction: a failure leaves the restaurant exactly as it was;
  *  - tables that already exist (same code at the outlet) are kept untouched;
- *  - no accounts, no public passwords, and QR codes are random (the same
- *    18-byte token rotateTableQr issues), never the demo seed's derivable
- *    tokens — unless the caller asks for fixed tokens (the demo seed does,
- *    for its printed demo QR cards).
+ *  - no accounts, no public passwords, and every QR token is random
+ *    (newTableQrToken, the same token rotateTableQr issues). No caller,
+ *    the demo seed included, can make a token from a table code.
  */
 import { randomBytes } from "node:crypto";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -28,6 +27,7 @@ import { assertCan } from "@/server/auth/rbac";
 import { assertOutletInOrg } from "@/server/db/outletGuard";
 import { D, money } from "@/domain/money";
 import { runInTx } from "@/server/services/_workflow";
+import { newTableQrToken } from "@/server/qr/tableToken";
 import { CODERS_CAFE_MENU, PIZZA_ADD_ONS } from "../../../prisma/coders-cafe/menu";
 
 type Client = PrismaClient | Prisma.TransactionClient;
@@ -60,8 +60,10 @@ async function insertMany<T>(rows: T[], write: (data: T[]) => Promise<unknown>):
 
 export async function importCodersCafeStarter(
   ctx: AccessContext,
-  input: { outletId: string; tableToken?: (code: string) => string },
+  input: { outletId: string },
   db: Client,
+  /** Test seam only (forcing a unique-index collision). It takes no table code, so no caller can derive a token from one. */
+  tokenSource: () => string = newTableQrToken,
 ): Promise<StarterResult> {
   assertCan(ctx, "menu.manage", input.outletId);
   return runInTx(db, async (tx) => {
@@ -158,9 +160,9 @@ export async function importCodersCafeStarter(
       }
       for (const code of missing) {
         const id = newId();
-        const qrToken = input.tableToken ? input.tableToken(code) : randomBytes(18).toString("base64url");
+        const qrToken = tokenSource();
         audit({ action: "CREATE", entityType: "RestaurantTable", entityId: id, outletId: input.outletId, after: { outletId: input.outletId, code, capacity: 4, floorId } });
-        if (!input.tableToken) audit({ action: "UPDATE", entityType: "RestaurantTable", entityId: id, outletId: input.outletId, after: { qrRotated: true } });
+        audit({ action: "UPDATE", entityType: "RestaurantTable", entityId: id, outletId: input.outletId, after: { qrRotated: true } });
         tables.push({ id, organizationId, outletId: input.outletId, floorId, code, capacity: 4, status: "AVAILABLE", qrToken, createdAt: now, updatedAt: now });
       }
     }
